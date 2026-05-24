@@ -1,0 +1,58 @@
+# ============================================================
+# .gitignore — Files and directories excluded from git
+# ============================================================
+
+# ── Secrets (CRITICAL) ────────────────────────────────────────────────────────
+# The .env file contains SECRET_KEY, DB_PASSWORD, and other credentials.
+# It must NEVER be committed. .env.example (with placeholder values) IS committed.
+.env
+
+# ── Python bytecode ───────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# ── Trained model weights ─────────────────────────────────────────────────────
+# PyTorch .pth files are large binary files (100MB+).
+# Training happens on the host machine; weights are NOT stored in git.
+# The weights/ directory exists in git via .gitkeep files.
+apps/cv/weights/*.pth
+
+# ── Django collected static / uploaded media ──────────────────────────────────
+# 'static/' is SOURCE (CSS, JS) — committed to git.
+# 'staticfiles/' is the collectstatic OUTPUT — a build artifact, not committed.
+/staticfiles/
+# Ignore uploaded media files but keep the placeholder so the directory exists in git.
+# The two-step pattern (un-ignore directory, then un-ignore file) is required because
+# git cannot un-ignore a file inside an ignored parent directory.
+/media/**
+!/media/plates/
+!/media/plates/.gitkeep
+
+# ── Testing and coverage ──────────────────────────────────────────────────────
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.tox/
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+# If running outside Docker, virtual environments stay local.
+venv/
+.venv/
+env/
+.env.local
+
+# ── IDE and OS files ──────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.DS_Store
+Thumbs.db
+
+# ── Docker ────────────────────────────────────────────────────────────────────
+# Compose creates these — not source files.
+*.log
+
+# ── Analysis artifacts ────────────────────────────────────────────────────────
+graphify-out/

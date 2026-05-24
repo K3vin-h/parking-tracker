@@ -1,0 +1,97 @@
+/*
+ * main.css — Global stylesheet for the parking tracker dashboard.
+ *
+ * DAY 1 STATUS:
+ *   Defines the design token custom properties and minimal base styles.
+ *   The full component library (cards, tables, badges, forms) is built in
+ *   Day 9 using the Claude Design output as the reference.
+ *
+ * HOW CSS CUSTOM PROPERTIES (VARIABLES) WORK:
+ *   Defined on :root, they're available anywhere in the page:
+ *     color: var(--text-primary);
+ *   If a variable isn't defined, var() can take a fallback:
+ *     color: var(--text-primary, #e4e4e7);
+ *
+ * NOTE: The same design tokens are also defined inline in base.html's <style>
+ *   block for the Day 1 minimal templates. Once the full CSS is in place (Day 9),
+ *   the inline styles will be removed and this file will be the single source of truth.
+ */
+
+/* ── Design Tokens ─────────────────────────────────────────────────────────── */
+
+:root {
+    /* Backgrounds */
+    --bg-primary:   #0f1117;   /* Page body */
+    --bg-secondary: #1a1d27;   /* Cards, sidebar, navbar */
+    --bg-tertiary:  #252832;   /* Table rows, input fields, hover states */
+
+    /* Text */
+    --text-primary:   #e4e4e7;   /* High-contrast body text */
+    --text-secondary: #a1a1aa;   /* Labels, timestamps, secondary info */
+
+    /* Accent */
+    --accent-blue: #3b82f6;   /* Primary interactive color: buttons, links, focus rings */
+
+    /* Status indicator colors — used for session badges and alert borders */
+    --status-active:  #22c55e;   /* Green: session currently in progress */
+    --status-warning: #eab308;   /* Yellow: needs attention (duplicate, low-confidence) */
+    --status-error:   #ef4444;   /* Red: error state, rejected upload, correction needed */
+    --status-void:    #6b7280;   /* Gray: cancelled or voided session */
+
+    /* Borders */
+    --border-color: #2e3039;
+
+    /* Border radius */
+    --radius: 8px;
+
+    /* Typography */
+    --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+}
+
+/* ── Base Styles ────────────────────────────────────────────────────────────── */
+
+/* Applied to every element: predictable box sizing (border + padding are
+   INCLUDED in width/height, not added on top). Standard default since ~2012. */
+*, *::before, *::after {
+    box-sizing: border-box;
+}
+
+body {
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+                 'Helvetica Neue', Arial, sans-serif;
+    font-size: 14px;
+    line-height: 1.6;
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+/* ── Typography ─────────────────────────────────────────────────────────────── */
+
+/* Utility class: apply monospace font for plate text, timestamps, IDs. */
+.mono, code, pre {
+    font-family: var(--font-mono);
+}
+
+a {
+    color: var(--accent-blue);
+    text-decoration: none;
+}
+a:hover {
+    text-decoration: underline;
+}
+
+/* ── Full design system added in Day 9 ─────────────────────────────────────── */
+/*
+ * The following component classes will be added after Claude Design output:
+ *
+ * Cards:        .card, .card-header, .card-body
+ * Badges:       .badge, .badge-active, .badge-warning, .badge-error, .badge-void
+ * Tables:       .table, .table-dense
+ * Forms:        .form-group, .form-label, .form-input, .form-select
+ * Buttons:      .btn, .btn-primary, .btn-ghost, .btn-danger
+ * Navigation:   .sidebar, .nav-item, .nav-item-active
+ * Layout:       .page-wrapper, .content-area
+ */

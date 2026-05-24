@@ -1,0 +1,167 @@
+{% extends "base.html" %}
+<!--
+  registration/login.html — Login page template.
+
+  Django's built-in auth view (LoginView) looks for this template at exactly
+  this path: 'registration/login.html'. The view passes a 'form' context
+  variable containing the AuthenticationForm.
+
+  DAY 1 STATUS:
+    Functional dark-themed login form using design tokens from base.html.
+    The visual design is refined in Day 9 using Claude Design output.
+
+  SECURITY:
+    - The {% csrf_token %} tag is REQUIRED on all forms that submit via POST.
+      Without it, Django's CsrfViewMiddleware rejects the submission with a 403.
+      CSRF (Cross-Site Request Forgery): a malicious page submits a form on behalf
+      of a logged-in user. The CSRF token is a secret the malicious page can't read.
+    - Django's AuthenticationForm handles password comparison internally using
+      a constant-time comparison function to prevent timing attacks.
+    - Passwords are NEVER logged or displayed — the form field uses type="password".
+-->
+
+{% block title %}Login — Parking Tracker{% endblock %}
+
+{% block nav %}
+<!--
+  Override the nav block on the login page — we don't show navigation or
+  the user's email here because they're not logged in yet.
+-->
+<nav style="
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border-color);
+    padding: 12px 24px;
+">
+    <span style="font-family: var(--font-mono); font-weight: 700; color: var(--text-primary);">
+        Parking Tracker
+    </span>
+</nav>
+{% endblock nav %}
+
+{% block content %}
+<div style="
+    max-width: 360px;
+    margin: 80px auto 0;
+">
+    <!-- Login card -->
+    <div style="
+        background: var(--bg-secondary);
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius);
+        padding: 32px;
+    ">
+        <h1 style="
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 8px;
+        ">Sign in</h1>
+
+        <p style="
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-bottom: 24px;
+        ">Parking lot management dashboard</p>
+
+        <!--
+          Login form.
+          action="" submits back to the same URL (/login/).
+          method="post" — never send credentials via GET (they'd appear in server logs).
+        -->
+        <form method="post" action="">
+            {% csrf_token %}
+
+            <!--
+              Django's form rendering. {{ form.as_p }} renders each field
+              wrapped in a <p> tag. We add minimal CSS to override the default
+              browser styling to match our dark theme.
+
+              In Day 9, this will be replaced with hand-written HTML that
+              matches the Claude Design output exactly.
+            -->
+            <style>
+                /* Scope these styles to the login form to avoid bleed */
+                .login-form p { margin-bottom: 16px; }
+                .login-form label {
+                    display: block;
+                    font-size: 12px;
+                    font-weight: 500;
+                    color: var(--text-secondary);
+                    margin-bottom: 4px;
+                    text-transform: uppercase;
+                    letter-spacing: 0.05em;
+                }
+                .login-form input {
+                    width: 100%;
+                    padding: 8px 12px;
+                    background: var(--bg-tertiary);
+                    border: 1px solid var(--border-color);
+                    border-radius: calc(var(--radius) / 2);
+                    color: var(--text-primary);
+                    font-size: 14px;
+                    font-family: inherit;
+                    outline: none;
+                    transition: border-color 150ms;
+                }
+                .login-form input:focus {
+                    border-color: var(--accent-blue);
+                }
+                .login-form ul {
+                    list-style: none;
+                    margin-top: 4px;
+                }
+                .login-form ul li {
+                    font-size: 12px;
+                    color: var(--status-error);
+                }
+            </style>
+
+            <div class="login-form">
+                {{ form.as_p }}
+            </div>
+
+            <!-- Submit button -->
+            <button type="submit" style="
+                width: 100%;
+                padding: 10px;
+                background: var(--accent-blue);
+                color: white;
+                border: none;
+                border-radius: calc(var(--radius) / 2);
+                font-size: 14px;
+                font-weight: 500;
+                cursor: pointer;
+                transition: opacity 150ms;
+                margin-top: 8px;
+            "
+            onmouseover="this.style.opacity='0.85'"
+            onmouseout="this.style.opacity='1'"
+            >
+                Sign in
+            </button>
+        </form>
+
+        <!--
+          Non-field errors (e.g., "Please enter a correct username and password.")
+          Django's AuthenticationForm raises these when credentials don't match.
+          They're displayed above the form by {{ form.as_p }} automatically, but
+          we add this explicit check for clarity in the template.
+        -->
+        {% if form.non_field_errors %}
+        <div style="
+            margin-top: 16px;
+            padding: 10px;
+            background: rgba(239,68,68,0.10);
+            border: 1px solid var(--status-error);
+            border-radius: calc(var(--radius) / 2);
+            font-size: 13px;
+            color: var(--status-error);
+        ">
+            {% for error in form.non_field_errors %}
+                {{ error }}
+            {% endfor %}
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock content %}

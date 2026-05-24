@@ -1,0 +1,60 @@
+# ============================================================
+# .dockerignore — Files excluded from the Docker build context
+# ============================================================
+# Docker sends the entire build context (all files in the project directory)
+# to the Docker daemon when running 'docker-compose build'. Files listed here
+# are excluded, which:
+#   1. Reduces the build context size (faster builds)
+#   2. Prevents secrets from being copied into the image
+#   3. Avoids invalidating the pip cache layer unnecessarily
+# ============================================================
+
+# --- Git ---
+# Git history is not needed inside the container.
+.git
+.gitignore
+
+# --- Python bytecode ---
+# Python regenerates .pyc files inside the container automatically.
+# Including them wastes space and can cause cross-platform compatibility issues
+# (bytecode is Python-version and architecture specific).
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# --- Environment file (SECURITY CRITICAL) ---
+# .env contains secrets (database passwords, Django secret key).
+# It must NEVER be copied into a Docker image — anyone who pulls the image
+# would have access to your secrets.
+.env
+
+# --- Trained model weights ---
+# PyTorch .pth files can be 100MB+. Training happens on the host machine
+# (Apple Silicon MPS), not inside Docker. Copy weights into the container
+# manually when needed for production inference.
+apps/cv/weights/*.pth
+
+# --- User-uploaded media ---
+# Media files (uploaded plate images) are served from a Docker named volume,
+# not baked into the image. The volume persists across container restarts.
+media/
+
+# --- Test and coverage artifacts ---
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+
+# --- Analysis and tooling artifacts ---
+graphify-out/
+
+# --- IDE and OS files ---
+.idea/
+.vscode/
+*.DS_Store
+Thumbs.db
+
+# --- Documentation build artifacts ---
+docs/_build/

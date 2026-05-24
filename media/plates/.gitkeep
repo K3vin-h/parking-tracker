@@ -1,0 +1,11 @@
+# This directory stores uploaded license plate images.
+# Images are stored here by Django's ImageField (PlateDetectionEvent.image).
+# The directory is tracked in git via this .gitkeep file, but the images
+# themselves are excluded by .gitignore (they're user-generated content,
+# not application code).
+#
+# In Docker, this directory is mounted as a named volume ('media') so uploaded
+# images persist across container restarts. See docker-compose.yml.
+#
+# The cleanup_old_images management command (Day 11) reads LotSettings.image_retention_days
+# and deletes images older than that threshold from this directory.
