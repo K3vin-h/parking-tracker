@@ -1,0 +1,52 @@
+# ============================================================
+# Parking Tracker — Python Dependencies
+# ============================================================
+# Install inside Docker: pip install --no-cache-dir -r requirements.txt
+# For Apple Silicon host training (MPS), install PyTorch separately:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+# The Docker container uses the CPU build from PyPI (sufficient for inference).
+
+# --- Core web framework ---
+# Django 5.1.x — the LTS-eligible release in the 5.x generation.
+Django>=5.1,<5.2
+
+# --- Database adapter ---
+# psycopg2-binary: pre-compiled PostgreSQL adapter. No local pg_config needed.
+# The plain 'psycopg2' package requires a local PostgreSQL install for compilation.
+psycopg2-binary>=2.9
+
+# --- Image processing ---
+# Pillow: required by Django's ImageField to validate uploaded images.
+# Also used in cv/training/synthetic_data.py to render synthetic plate images.
+Pillow>=10.0
+
+# --- Computer vision ---
+# opencv-python-headless: the OpenCV build WITHOUT display (X11/Qt) dependencies.
+# Safe to install in a headless Docker container — no monitor required.
+opencv-python-headless>=4.8
+
+# --- Deep learning ---
+# torch: PyTorch for the plate detector CNN and recognizer CRNN.
+# torchvision: image transforms and utilities used during training.
+# NOTE: This installs the CPU build from PyPI (works for inference in Docker).
+# For MPS training on Apple Silicon, install from https://pytorch.org/get-started/locally/
+torch>=2.2.0
+torchvision>=0.17.0
+
+# --- Testing ---
+# pytest: test runner (preferred over Django's built-in test runner for plugins).
+# pytest-django: Django integration — sets up the test database automatically.
+# pytest-cov: generates coverage reports; enforces the 80% gate via --cov-fail-under.
+pytest>=7.4
+pytest-django>=4.7
+pytest-cov>=4.1
+
+# --- Dev utilities ---
+# django-extensions: adds shell_plus (auto-imports all models), show_urls,
+# graph_models, and other management commands useful during development.
+django-extensions>=3.2
+
+# --- Production WSGI server ---
+# gunicorn: production-grade server that replaces manage.py runserver.
+# Referenced in Day 11 Docker polish; included now so the image is complete.
+gunicorn>=21.2

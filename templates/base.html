@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<!--
+  base.html — Foundational layout template for the parking tracker dashboard.
+
+  All other templates extend this file using Django's template inheritance:
+    {% extends "base.html" %}
+    {% block content %}...{% endblock %}
+
+  TEMPLATE INHERITANCE:
+    Django templates use a parent/child inheritance model. This file defines
+    the HTML skeleton and the named "blocks" that child templates can fill in.
+    Think of it like a form with blank spaces — child templates fill in the blanks.
+
+  DAY 1 STATUS:
+    This is a functional skeleton with dark theme design tokens applied.
+    The visual design (layout, navigation, component styles) is finalized in Day 9
+    using output from Claude Design. The CSS custom properties defined here will
+    be carried forward into the final design.
+
+  DESIGN TOKENS (from PLAN.md):
+    These CSS custom properties are the color palette and typography for the entire
+    application. Using custom properties (variables) means:
+      - Change --accent-blue in one place → updates everywhere it's used.
+      - Light/dark mode switching requires changing only the :root block.
+      - Consistent styling across all pages without repeating hex values.
+-->
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Parking Tracker{% endblock %}</title>
+
+    <!--
+      CSS custom properties (design tokens).
+      Defined on :root so they're available throughout the entire page.
+
+      Color palette:
+        --bg-primary   : darkest background (page body)
+        --bg-secondary : slightly lighter (cards, sidebars)
+        --bg-tertiary  : lighter still (table rows, hover states)
+        --text-primary : primary text color (high contrast)
+        --text-secondary: secondary/muted text
+
+      Status colors (match dashboard badge conventions):
+        --status-active  : green — session in progress
+        --status-warning : yellow — needs attention (duplicate, low-confidence)
+        --status-error   : red — error state, rejected
+        --status-void    : gray — cancelled session
+
+      Typography:
+        --font-mono: JetBrains Mono — monospace font for plate text, timestamps, codes.
+                     Falls back to system monospace if not loaded.
+    -->
+    <style>
+        :root {
+            /* Backgrounds — three levels of depth */
+            --bg-primary:   #0f1117;
+            --bg-secondary: #1a1d27;
+            --bg-tertiary:  #252832;
+
+            /* Text */
+            --text-primary:   #e4e4e7;
+            --text-secondary: #a1a1aa;
+
+            /* Accent */
+            --accent-blue: #3b82f6;
+
+            /* Status indicator colors */
+            --status-active:  #22c55e;
+            --status-warning: #eab308;
+            --status-error:   #ef4444;
+            --status-void:    #6b7280;
+
+            /* Borders and radius */
+            --border-color: #2e3039;
+            --radius:       8px;
+
+            /* Typography */
+            --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+        }
+
+        /* Minimal reset — prevents browser default margins/padding from
+           causing layout surprises across different browsers. */
+        *, *::before, *::after {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+                         'Helvetica Neue', Arial, sans-serif;
+            font-size: 14px;
+            line-height: 1.5;
+            min-height: 100vh;
+        }
+
+        /* Monospace font for plate numbers, IDs, and timestamps. */
+        .mono {
+            font-family: var(--font-mono);
+        }
+
+        /* Base link styling — matches accent color. */
+        a {
+            color: var(--accent-blue);
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+    </style>
+
+    <!-- Project stylesheet — loaded after inline tokens so it can override. -->
+    {% load static %}
+    <link rel="stylesheet" href="{% static 'css/main.css' %}">
+
+    <!-- Per-page extra CSS (optional — child templates can inject here). -->
+    {% block extra_css %}{% endblock %}
+</head>
+<body>
+
+    <!--
+      Navigation placeholder.
+      The full navigation sidebar/header is designed and implemented in Day 9.
+      For Day 1, this provides a minimal header so the admin and login pages
+      render without a completely bare layout.
+    -->
+    {% block nav %}
+    <nav style="
+        background: var(--bg-secondary);
+        border-bottom: 1px solid var(--border-color);
+        padding: 12px 24px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+    ">
+        <span style="font-family: var(--font-mono); font-weight: 700; color: var(--text-primary);">
+            Parking Tracker
+        </span>
+        {% if user.is_authenticated %}
+        <span style="color: var(--text-secondary); font-size: 12px;">
+            {{ user.email }}
+            &nbsp;·&nbsp;
+            <a href="{% url 'logout' %}">Logout</a>
+        </span>
+        {% endif %}
+    </nav>
+    {% endblock nav %}
+
+    <!--
+      Main content area.
+      Child templates fill this block with their page-specific HTML.
+    -->
+    <main style="padding: 24px;">
+        <!--
+          Django messages framework: displays flash messages (e.g., "Settings saved!",
+          "Login failed: incorrect password"). Messages are stored in the session and
+          consumed (removed) after being displayed once.
+        -->
+        {% if messages %}
+        <div style="margin-bottom: 16px;">
+            {% for message in messages %}
+            <div style="
+                padding: 10px 16px;
+                border-radius: var(--radius);
+                margin-bottom: 8px;
+                font-size: 13px;
+                background: {% if message.tags == 'error' %}rgba(239,68,68,0.15){% elif message.tags == 'success' %}rgba(34,197,94,0.15){% else %}rgba(59,130,246,0.15){% endif %};
+                border: 1px solid {% if message.tags == 'error' %}var(--status-error){% elif message.tags == 'success' %}var(--status-active){% else %}var(--accent-blue){% endif %};
+                color: var(--text-primary);
+            ">
+                {{ message }}
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        {% block content %}
+        <!-- Child templates replace this block with their page content. -->
+        {% endblock content %}
+    </main>
+
+    <!-- Per-page JavaScript (optional). -->
+    {% block extra_js %}{% endblock %}
+
+</body>
+</html>

@@ -1,0 +1,8 @@
+# This directory stores trained PyTorch model weights (.pth files).
+# The weights themselves are gitignored (large binary files, machine-specific).
+# This .gitkeep file ensures the directory exists in the repository so that
+# training scripts can write to it without creating the directory first.
+#
+# To populate this directory:
+#   python apps/cv/training/train_detector.py --output apps/cv/weights/detector.pth
+#   python apps/cv/training/train_recognizer.py --output apps/cv/weights/recognizer.pth

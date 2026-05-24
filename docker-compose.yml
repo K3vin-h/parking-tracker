@@ -1,0 +1,119 @@
+# ============================================================
+# docker-compose.yml — parking tracker local development stack
+# ============================================================
+# Defines two services:
+#   db  — PostgreSQL 16 database
+#   web — Django application (parking tracker)
+#
+# HOW TO USE:
+#   1. Copy .env.example to .env and fill in all values
+#   2. docker-compose up --build   (first run — builds the image)
+#   3. docker-compose exec web python manage.py migrate
+#   4. docker-compose exec web python manage.py setup_defaults
+#   5. Visit http://localhost:8000/admin/
+# ============================================================
+
+services:
+
+  # ──────────────────────────────────────────────────────────
+  # db — PostgreSQL 16
+  # ──────────────────────────────────────────────────────────
+  # Stores all application data: users, sessions, detection events, settings.
+  db:
+    # postgres:16-alpine — PostgreSQL 16 on Alpine Linux.
+    # Alpine is even smaller than Debian slim; good for a database container
+    # that doesn't need a lot of system tools.
+    image: postgres:16-alpine
+
+    # Load credentials from the .env file.
+    # POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD are standard PostgreSQL
+    # environment variables read at container startup to create the initial database.
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+
+    volumes:
+      # Named volume: stores the actual database files.
+      # Named volumes persist across 'docker-compose down' — only removed by
+      # 'docker-compose down -v'. Without this volume, the database resets
+      # every time the container is removed.
+      - postgres_data:/var/lib/postgresql/data
+
+    # Expose port 5432 to the host so you can connect with psql or a GUI tool
+    # (TablePlus, pgAdmin) from your laptop during development.
+    ports:
+      - "5432:5432"
+
+    networks:
+      - app_net
+
+  # ──────────────────────────────────────────────────────────
+  # web — Django application
+  # ──────────────────────────────────────────────────────────
+  # Runs manage.py runserver for local development.
+  # (Replaced by gunicorn in Day 11 for production.)
+  web:
+    # Build the image from the Dockerfile in the current directory.
+    build: .
+
+    # Start the Django development server.
+    # 0.0.0.0:8000 binds to all interfaces inside the container so Docker
+    # can forward the port. If we bound to 127.0.0.1, it would only be
+    # reachable from inside the container itself (unreachable from your laptop).
+    command: python manage.py runserver 0.0.0.0:8000
+
+    env_file:
+      - .env
+
+    volumes:
+      # Mount source code — changes to your Python/template files are reflected
+      # immediately without rebuilding the Docker image. Django's dev server
+      # auto-reloads when .py files change.
+      - .:/app
+      # Named volumes for user-uploaded images and collected static files.
+      # These are separate from the source code mount so they persist between
+      # code changes.
+      - media:/app/media
+      # staticfiles is the collectstatic output directory (separate from source static/).
+      - staticfiles:/app/staticfiles
+
+    ports:
+      # Forward container port 8000 to host port 8000.
+      # Visit http://localhost:8000 in your browser.
+      - "8000:8000"
+
+    # Ensure the database container starts before Django tries to connect.
+    # Note: depends_on only waits for the container to START, not for Postgres
+    # to be ready to accept connections. If migrations fail with "connection refused",
+    # wait a few seconds and retry — Postgres is still initializing.
+    depends_on:
+      - db
+
+    networks:
+      - app_net
+
+# ──────────────────────────────────────────────────────────
+# Named volumes
+# ──────────────────────────────────────────────────────────
+volumes:
+  # postgres_data: database files persist across container restarts.
+  postgres_data:
+
+  # media: uploaded plate images persist across restarts.
+  media:
+
+  # staticfiles: collectstatic output persists across restarts.
+  staticfiles:
+
+# ──────────────────────────────────────────────────────────
+# Networks
+# ──────────────────────────────────────────────────────────
+networks:
+  # app_net: internal network that lets 'web' reach 'db' by hostname.
+  # Docker's internal DNS resolves service names ('db') to container IPs.
+  # Without a shared network, containers cannot communicate.
+  app_net:
+    driver: bridge
