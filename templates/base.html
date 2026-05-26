@@ -3,8 +3,8 @@
   base.html — Foundational layout template for the parking tracker dashboard.
 
   All other templates extend this file using Django's template inheritance:
-    {% extends "base.html" %}
-    {% block content %}...{% endblock %}
+    extends "base.html", then define a "content" block (see login.html for an example).
+  NOTE: Do not put block/endblock tags inside HTML comments — Django still parses them.
 
   TEMPLATE INHERITANCE:
     Django templates use a parent/child inheritance model. This file defines
