@@ -6,11 +6,15 @@ required. Tests are organized by function and follow the Arrange-Act-Assert
 pattern throughout.
 """
 
+import os
+
 import numpy as np
 import pytest
 import torch
 import cv2
 from django.conf import settings
+from django.core.exceptions import ImproperlyConfigured
+from PIL import Image
 
 from apps.cv.preprocessing import (
     load_image,
@@ -22,6 +26,19 @@ from apps.cv.preprocessing import (
     prepare_for_recognizer,
     _assert_safe_path,
 )
+
+
+def _must_not_decode(*_args, **_kwargs):
+    """
+    Sentinel patched onto cv2.imdecode to assert the decode path is unreached.
+
+    Used by tests that expect pre-decode validation (path guard, header check,
+    pixel-count guard, decompression-bomb guard) to short-circuit before any
+    bytes are decoded. Failing loudly here makes a regression — where a
+    malicious image slips past validation and reaches the decoder — impossible
+    to miss.
+    """
+    raise AssertionError("cv2.imdecode must not be reached after pre-decode validation")
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -88,6 +105,22 @@ def test_assert_safe_path_allows_valid_path(tmp_path, monkeypatch):
     """Paths inside MEDIA_ROOT must not raise."""
     monkeypatch.setattr(settings, "MEDIA_ROOT", str(tmp_path))
     _assert_safe_path(str(tmp_path / "plates" / "img.jpg"))  # must not raise
+
+
+@pytest.mark.unit
+def test_assert_safe_path_rejects_empty_media_root(monkeypatch):
+    """An empty MEDIA_ROOT must raise ImproperlyConfigured, not silently allow CWD."""
+    monkeypatch.setattr(settings, "MEDIA_ROOT", "")
+    with pytest.raises(ImproperlyConfigured):
+        _assert_safe_path("/anywhere/file.jpg")
+
+
+@pytest.mark.unit
+def test_assert_safe_path_rejects_cwd_media_root(monkeypatch):
+    """MEDIA_ROOT equal to the project working directory must raise."""
+    monkeypatch.setattr(settings, "MEDIA_ROOT", os.getcwd())
+    with pytest.raises(ImproperlyConfigured):
+        _assert_safe_path(os.path.join(os.getcwd(), "file.jpg"))
 
 
 # ── load_image ─────────────────────────────────────────────────────────────────
@@ -172,18 +205,15 @@ def test_load_image_rejects_disallowed_format(mock_media_root, monkeypatch):
 
 @pytest.mark.unit
 def test_load_image_rejects_oversized_image_before_decoding(mock_media_root, monkeypatch):
-    """Images exceeding the 12 MP pixel cap must fail before cv2.imread decodes."""
+    """Images exceeding the 12 MP pixel cap must fail before cv2.imdecode runs."""
     img_path = str(mock_media_root / "huge.png")
     (mock_media_root / "huge.png").write_bytes(b"fake image bytes")
 
     monkeypatch.setattr(
         "apps.cv.preprocessing.Image.open",
-        lambda p: FakeImageHeader((4001, 3000)),
+        lambda src: FakeImageHeader((4001, 3000)),
     )
-    monkeypatch.setattr(
-        cv2, "imread",
-        lambda p: (_ for _ in ()).throw(AssertionError("cv2.imread must not run")),
-    )
+    monkeypatch.setattr("apps.cv.preprocessing.cv2.imdecode", _must_not_decode)
 
     with pytest.raises(ValueError, match="exceed"):
         load_image(img_path)
@@ -191,20 +221,33 @@ def test_load_image_rejects_oversized_image_before_decoding(mock_media_root, mon
 
 @pytest.mark.unit
 def test_load_image_rejects_uninspectable_image(mock_media_root, monkeypatch):
-    """Files whose format cannot be inspected must fail before cv2.imread."""
+    """Files whose format cannot be inspected must fail before cv2.imdecode."""
     img_path = str(mock_media_root / "bad.raw")
     (mock_media_root / "bad.raw").write_bytes(b"not an image")
 
     from PIL import UnidentifiedImageError as UIE
 
-    def fake_open(p):
+    def fake_open(src):
         raise UIE("cannot identify")
 
     monkeypatch.setattr("apps.cv.preprocessing.Image.open", fake_open)
-    monkeypatch.setattr(
-        cv2, "imread",
-        lambda p: (_ for _ in ()).throw(AssertionError("cv2.imread must not run")),
-    )
+    monkeypatch.setattr("apps.cv.preprocessing.cv2.imdecode", _must_not_decode)
+
+    with pytest.raises(FileNotFoundError, match="Could not load the image"):
+        load_image(img_path)
+
+
+@pytest.mark.unit
+def test_load_image_rejects_decompression_bomb(mock_media_root, monkeypatch):
+    """Pillow's DecompressionBombError must be wrapped, not propagated raw."""
+    img_path = str(mock_media_root / "bomb.png")
+    (mock_media_root / "bomb.png").write_bytes(b"fake image bytes")
+
+    def fake_open(src):
+        raise Image.DecompressionBombError("simulated decompression bomb")
+
+    monkeypatch.setattr("apps.cv.preprocessing.Image.open", fake_open)
+    monkeypatch.setattr("apps.cv.preprocessing.cv2.imdecode", _must_not_decode)
 
     with pytest.raises(FileNotFoundError, match="Could not load the image"):
         load_image(img_path)
@@ -429,6 +472,22 @@ def test_to_tensor_values_preserved():
     assert torch.allclose(result[2], torch.full((5, 5), 0.9))
 
 
+@pytest.mark.unit
+def test_to_tensor_rejects_uint8_input():
+    """Passing a uint8 array must raise TypeError, not silently produce a uint8 tensor."""
+    img = np.zeros((10, 10, 3), dtype=np.uint8)
+    with pytest.raises(TypeError, match="float32"):
+        to_tensor(img)
+
+
+@pytest.mark.unit
+def test_to_tensor_rejects_float64_input():
+    """Even float64 must be rejected — only float32 is supported."""
+    img = np.zeros((10, 10, 3), dtype=np.float64)
+    with pytest.raises(TypeError, match="float32"):
+        to_tensor(img)
+
+
 # ── crop_plate_region ──────────────────────────────────────────────────────────
 
 @pytest.mark.unit
@@ -587,3 +646,11 @@ def test_prepare_for_recognizer_large_input():
     result = prepare_for_recognizer(crop)
 
     assert result.shape == torch.Size([1, 32, 128])
+
+
+@pytest.mark.unit
+def test_prepare_for_recognizer_rejects_float_input():
+    """Already-normalized float crop must raise TypeError, not silently re-normalize."""
+    crop = np.zeros((40, 120, 3), dtype=np.float32)
+    with pytest.raises(TypeError, match="uint8"):
+        prepare_for_recognizer(crop)
