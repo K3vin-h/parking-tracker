@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import torch
 import cv2
+from django.conf import settings
 
 from apps.cv.preprocessing import (
     load_image,
@@ -19,6 +20,7 @@ from apps.cv.preprocessing import (
     to_tensor,
     crop_plate_region,
     prepare_for_recognizer,
+    _assert_safe_path,
 )
 
 
@@ -37,8 +39,9 @@ def make_rgb_image(h: int = 100, w: int = 100, fill: int = 128) -> np.ndarray:
 class FakeImageHeader:
     """Context manager that mimics Pillow's header-only image object."""
 
-    def __init__(self, size: tuple[int, int]):
+    def __init__(self, size: tuple[int, int], fmt: str = "JPEG"):
         self.size = size
+        self.format = fmt
 
     def __enter__(self):
         return self
@@ -47,34 +50,83 @@ class FakeImageHeader:
         return False
 
 
+@pytest.fixture()
+def mock_media_root(tmp_path, monkeypatch):
+    """
+    Point settings.MEDIA_ROOT at tmp_path for the duration of a test.
+
+    _assert_safe_path checks that image paths are under MEDIA_ROOT.
+    Tests that call load_image() with real files need MEDIA_ROOT to match
+    tmp_path so the guard passes without disabling security logic.
+    """
+    monkeypatch.setattr(settings, "MEDIA_ROOT", str(tmp_path))
+    return tmp_path
+
+
+# ── _assert_safe_path ──────────────────────────────────────────────────────────
+
+@pytest.mark.unit
+def test_assert_safe_path_rejects_traversal(tmp_path, monkeypatch):
+    """Paths outside MEDIA_ROOT must raise ValueError."""
+    monkeypatch.setattr(settings, "MEDIA_ROOT", str(tmp_path / "media"))
+    with pytest.raises(ValueError, match="outside the permitted"):
+        _assert_safe_path("/etc/passwd")
+
+
+@pytest.mark.unit
+def test_assert_safe_path_rejects_dotdot(tmp_path, monkeypatch):
+    """Path traversal via '..' must be caught after realpath resolution."""
+    media = tmp_path / "media"
+    media.mkdir()
+    monkeypatch.setattr(settings, "MEDIA_ROOT", str(media))
+    with pytest.raises(ValueError, match="outside the permitted"):
+        _assert_safe_path(str(media / ".." / "secret.jpg"))
+
+
+@pytest.mark.unit
+def test_assert_safe_path_allows_valid_path(tmp_path, monkeypatch):
+    """Paths inside MEDIA_ROOT must not raise."""
+    monkeypatch.setattr(settings, "MEDIA_ROOT", str(tmp_path))
+    _assert_safe_path(str(tmp_path / "plates" / "img.jpg"))  # must not raise
+
+
 # ── load_image ─────────────────────────────────────────────────────────────────
 
 @pytest.mark.unit
-def test_load_image_raises_file_not_found():
-    """cv2.imread returns None for missing files; we must raise FileNotFoundError."""
+def test_load_image_raises_file_not_found(mock_media_root):
+    """Missing file inside MEDIA_ROOT must raise FileNotFoundError."""
+    missing = str(mock_media_root / "nonexistent.jpg")
     with pytest.raises(FileNotFoundError, match="Could not load the image"):
-        load_image("/nonexistent/path/that/does/not/exist.jpg")
+        load_image(missing)
 
 
 @pytest.mark.unit
-def test_load_image_returns_ndarray(tmp_path):
-    """A valid PNG written to disk must load as a numpy array."""
+def test_load_image_rejects_path_outside_media_root(tmp_path, monkeypatch):
+    """Paths outside MEDIA_ROOT must be blocked by the path traversal guard."""
+    monkeypatch.setattr(settings, "MEDIA_ROOT", str(tmp_path / "media"))
+    with pytest.raises(ValueError, match="outside the permitted"):
+        load_image("/etc/passwd")
+
+
+@pytest.mark.unit
+def test_load_image_returns_ndarray(mock_media_root):
+    """A valid PNG written to MEDIA_ROOT must load as a numpy array."""
     img = make_bgr_image(50, 80)
-    img_path = str(tmp_path / "test.png")
+    img_path = str(mock_media_root / "test.png")
     cv2.imwrite(img_path, img)
 
     result = load_image(img_path)
 
     assert isinstance(result, np.ndarray)
     assert result.ndim == 3
-    assert result.shape[2] == 3  # 3 channels
+    assert result.shape[2] == 3
 
 
 @pytest.mark.unit
-def test_load_image_shape_matches_written(tmp_path):
+def test_load_image_shape_matches_written(mock_media_root):
     """Loaded image shape must match the dimensions written to disk."""
     img = make_bgr_image(h=60, w=120)
-    img_path = str(tmp_path / "shape_test.png")
+    img_path = str(mock_media_root / "shape_test.png")
     cv2.imwrite(img_path, img)
 
     result = load_image(img_path)
@@ -83,10 +135,10 @@ def test_load_image_shape_matches_written(tmp_path):
 
 
 @pytest.mark.unit
-def test_load_image_dtype_is_uint8(tmp_path):
+def test_load_image_dtype_is_uint8(mock_media_root):
     """cv2.imread returns uint8 arrays by default."""
     img = make_bgr_image(10, 10)
-    img_path = str(tmp_path / "dtype_test.png")
+    img_path = str(mock_media_root / "dtype_test.png")
     cv2.imwrite(img_path, img)
 
     result = load_image(img_path)
@@ -95,60 +147,74 @@ def test_load_image_dtype_is_uint8(tmp_path):
 
 
 @pytest.mark.unit
-def test_load_image_error_message_does_not_leak_path():
-    """FileNotFoundError message must not contain the file path (info leakage)."""
-    fake_path = "/internal/secret/structure/image.jpg"
+def test_load_image_error_message_does_not_leak_path(mock_media_root):
+    """FileNotFoundError message must not contain the file path."""
+    missing = str(mock_media_root / "secret_internal_path.jpg")
     with pytest.raises(FileNotFoundError) as exc_info:
-        load_image(fake_path)
-    assert fake_path not in str(exc_info.value)
+        load_image(missing)
+    assert "secret_internal_path" not in str(exc_info.value)
 
 
 @pytest.mark.unit
-def test_load_image_rejects_oversized_image_before_decoding(tmp_path, monkeypatch):
+def test_load_image_rejects_disallowed_format(mock_media_root, monkeypatch):
+    """Files with an unsupported format (e.g. EPS) must be rejected."""
+    img_path = str(mock_media_root / "shell.eps")
+    (mock_media_root / "shell.eps").write_bytes(b"fake eps bytes")
+
+    monkeypatch.setattr(
+        "apps.cv.preprocessing.Image.open",
+        lambda p: FakeImageHeader((100, 100), fmt="EPS"),
+    )
+
+    with pytest.raises(ValueError, match="Unsupported image format"):
+        load_image(img_path)
+
+
+@pytest.mark.unit
+def test_load_image_rejects_oversized_image_before_decoding(mock_media_root, monkeypatch):
     """Images exceeding the 12 MP pixel cap must fail before cv2.imread decodes."""
-    img_path = str(tmp_path / "huge.png")
-    img_path_obj = tmp_path / "huge.png"
-    img_path_obj.write_bytes(b"fake image bytes")
+    img_path = str(mock_media_root / "huge.png")
+    (mock_media_root / "huge.png").write_bytes(b"fake image bytes")
 
-    def fake_open(path):
-        assert path == img_path
-        return FakeImageHeader((4001, 3000))
-
-    def fail_if_decoded(path):
-        raise AssertionError("cv2.imread should not run for oversized images")
-
-    monkeypatch.setattr("apps.cv.preprocessing.Image.open", fake_open)
-    monkeypatch.setattr(cv2, "imread", fail_if_decoded)
+    monkeypatch.setattr(
+        "apps.cv.preprocessing.Image.open",
+        lambda p: FakeImageHeader((4001, 3000)),
+    )
+    monkeypatch.setattr(
+        cv2, "imread",
+        lambda p: (_ for _ in ()).throw(AssertionError("cv2.imread must not run")),
+    )
 
     with pytest.raises(ValueError, match="exceed"):
         load_image(img_path)
 
 
 @pytest.mark.unit
-def test_load_image_rejects_uninspectable_image_before_decoding(tmp_path, monkeypatch):
-    """Files whose dimensions cannot be inspected must fail before cv2.imread."""
-    img_path = str(tmp_path / "huge.raw")
-    img_path_obj = tmp_path / "huge.raw"
-    img_path_obj.write_bytes(b"fake image bytes")
+def test_load_image_rejects_uninspectable_image(mock_media_root, monkeypatch):
+    """Files whose format cannot be inspected must fail before cv2.imread."""
+    img_path = str(mock_media_root / "bad.raw")
+    (mock_media_root / "bad.raw").write_bytes(b"not an image")
 
-    def fake_open(path):
-        raise OSError("unsupported header")
+    from PIL import UnidentifiedImageError as UIE
 
-    def fail_if_decoded(path):
-        raise AssertionError("cv2.imread should not run for uninspectable images")
+    def fake_open(p):
+        raise UIE("cannot identify")
 
     monkeypatch.setattr("apps.cv.preprocessing.Image.open", fake_open)
-    monkeypatch.setattr(cv2, "imread", fail_if_decoded)
+    monkeypatch.setattr(
+        cv2, "imread",
+        lambda p: (_ for _ in ()).throw(AssertionError("cv2.imread must not run")),
+    )
 
     with pytest.raises(FileNotFoundError, match="Could not load the image"):
         load_image(img_path)
 
 
 @pytest.mark.unit
-def test_load_image_allows_image_at_pixel_limit(tmp_path):
-    """Images at exactly 12 MP are allowed."""
+def test_load_image_allows_image_at_pixel_limit(mock_media_root):
+    """Images at exactly 12 MP (4000×3000) must be accepted."""
     img = np.zeros((3000, 4000, 3), dtype=np.uint8)
-    img_path = str(tmp_path / "huge.png")
+    img_path = str(mock_media_root / "max.png")
     cv2.imwrite(img_path, img)
 
     result = load_image(img_path)
