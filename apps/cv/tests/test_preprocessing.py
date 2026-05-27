@@ -220,6 +220,25 @@ def test_load_image_rejects_oversized_image_before_decoding(mock_media_root, mon
 
 
 @pytest.mark.unit
+def test_load_image_rejects_large_compressed_file_before_header_parse(
+    mock_media_root, monkeypatch
+):
+    """Compressed bytes above the cap must fail before Pillow or OpenCV parse them."""
+    img_path = mock_media_root / "large.jpg"
+    img_path.write_bytes(b"x" * 11)
+
+    def fail_if_header_parsed(src):
+        raise AssertionError("Image.open must not parse oversized compressed files")
+
+    monkeypatch.setattr("apps.cv.preprocessing.MAX_IMAGE_BYTES", 10)
+    monkeypatch.setattr("apps.cv.preprocessing.Image.open", fail_if_header_parsed)
+    monkeypatch.setattr("apps.cv.preprocessing.cv2.imdecode", _must_not_decode)
+
+    with pytest.raises(ValueError, match="compressed size"):
+        load_image(str(img_path))
+
+
+@pytest.mark.unit
 def test_load_image_rejects_uninspectable_image(mock_media_root, monkeypatch):
     """Files whose format cannot be inspected must fail before cv2.imdecode."""
     img_path = str(mock_media_root / "bad.raw")
