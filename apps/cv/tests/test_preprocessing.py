@@ -273,6 +273,22 @@ def test_load_image_rejects_decompression_bomb(mock_media_root, monkeypatch):
 
 
 @pytest.mark.unit
+def test_load_image_rejects_decompression_bomb_warning(mock_media_root, monkeypatch):
+    """Pillow's bomb warning must not leak as a raw warning exception."""
+    img_path = str(mock_media_root / "bomb-warning.png")
+    (mock_media_root / "bomb-warning.png").write_bytes(b"fake image bytes")
+
+    def fake_open(src):
+        raise Image.DecompressionBombWarning("simulated decompression bomb warning")
+
+    monkeypatch.setattr("apps.cv.preprocessing.Image.open", fake_open)
+    monkeypatch.setattr("apps.cv.preprocessing.cv2.imdecode", _must_not_decode)
+
+    with pytest.raises(ValueError, match="maximum allowed size"):
+        load_image(img_path)
+
+
+@pytest.mark.unit
 def test_load_image_allows_image_at_pixel_limit(mock_media_root):
     """Images at exactly 12 MP (4000×3000) must be accepted."""
     img = np.zeros((3000, 4000, 3), dtype=np.uint8)
