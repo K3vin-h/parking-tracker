@@ -24,8 +24,45 @@ import logging
 import cv2
 import numpy as np
 import torch
+from PIL import Image, UnidentifiedImageError
 
 logger = logging.getLogger(__name__)
+
+MAX_IMAGE_PIXELS = 4000 * 3000
+
+
+def _image_load_error() -> FileNotFoundError:
+    return FileNotFoundError(
+        "Could not load the image. "
+        "The file may not exist, be corrupt, or be an unsupported format."
+    )
+
+
+def _validate_image_dimensions(path: str) -> None:
+    """
+    Inspect image dimensions from metadata before OpenCV decodes the file.
+
+    cv2.imread() allocates the full decoded array before returning, so checking
+    the shape afterward is too late for highly compressed oversized uploads.
+    Pillow reads enough header metadata to expose width and height without
+    materializing the pixel buffer.
+    """
+    try:
+        with Image.open(path) as image:
+            width, height = image.size
+    except FileNotFoundError as exc:
+        logger.debug("Image path does not exist: path=%r", path)
+        raise _image_load_error() from exc
+    except (UnidentifiedImageError, OSError):
+        # Let cv2.imread decide whether this is a supported image. Keeping this
+        # fallback avoids rejecting formats OpenCV may support differently.
+        return
+
+    if width * height > MAX_IMAGE_PIXELS:
+        raise ValueError(
+            f"Image dimensions {width}x{height} exceed the maximum allowed size "
+            f"({MAX_IMAGE_PIXELS // 1_000_000} MP). Resize before uploading."
+        )
 
 
 def load_image(path: str) -> np.ndarray:
@@ -51,25 +88,22 @@ def load_image(path: str) -> np.ndarray:
     Raises:
         FileNotFoundError: If the file cannot be loaded by OpenCV.
     """
+    _validate_image_dimensions(path)
+
     img = cv2.imread(path)
     if img is None:
         # Log the path at DEBUG only — do not include it in the exception
         # message, which may surface in API responses and leak internal paths.
         logger.debug("cv2.imread returned None for path=%r", path)
-        raise FileNotFoundError(
-            "Could not load the image. "
-            "The file may not exist, be corrupt, or be an unsupported format."
-        )
+        raise _image_load_error()
 
-    # Guard against decompression bombs: a small compressed file can decode
-    # to a multi-gigabyte array. A 12 MP cap (4000×3000) is generous for
-    # security camera images and prevents runaway memory allocation.
-    max_pixels = 4000 * 3000
+    # Keep a post-decode guard as defense in depth for any image format whose
+    # dimensions could not be inspected by Pillow but was decoded by OpenCV.
     h, w = img.shape[:2]
-    if h * w > max_pixels:
+    if h * w > MAX_IMAGE_PIXELS:
         raise ValueError(
-            f"Image dimensions {w}×{h} exceed the maximum allowed size "
-            f"({max_pixels // 1_000_000} MP). Resize before uploading."
+            f"Image dimensions {w}x{h} exceed the maximum allowed size "
+            f"({MAX_IMAGE_PIXELS // 1_000_000} MP). Resize before uploading."
         )
 
     logger.debug("Loaded image shape=%s dtype=%s", img.shape, img.dtype)
