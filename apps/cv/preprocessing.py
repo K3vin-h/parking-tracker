@@ -19,6 +19,8 @@ Pipeline overview:
     └─ prepare_for_recognizer() → float32 (1, 32, 128) tensor  (for recognizer)
 """
 
+import hashlib
+import io
 import logging
 import os
 
@@ -26,6 +28,7 @@ import cv2
 import numpy as np
 import torch
 from django.conf import settings
+from django.core.exceptions import ImproperlyConfigured
 from PIL import Image, UnidentifiedImageError
 
 logger = logging.getLogger(__name__)
@@ -41,7 +44,10 @@ Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 # Only these formats are needed by the CV pipeline. Rejecting everything else
 # prevents Pillow from parsing EPS (PostScript), SVG, PSD, or other formats
 # that have broader attack surfaces or are irrelevant to camera uploads.
-_ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "BMP", "WEBP"}
+# BMP is intentionally excluded: real camera uploads are always JPEG/PNG/WEBP,
+# and BMP has a richer history of malformed-header CVEs in both Pillow and
+# OpenCV's BMP parsers — keeping it out shrinks attack surface for no loss.
+_ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "WEBP"}
 
 
 def _image_load_error() -> FileNotFoundError:
@@ -49,6 +55,22 @@ def _image_load_error() -> FileNotFoundError:
         "Could not load the image. "
         "The file may not exist, be corrupt, or be an unsupported format."
     )
+
+
+def _path_id(path: str) -> str:
+    """
+    Short, stable identifier derived from a file path for DEBUG log correlation.
+
+    WHY a hash instead of the full path: full paths in logs reveal the server's
+    filesystem layout (upload directory naming, project root location, etc.).
+    If DEBUG logging ever reaches a less-trusted aggregator (Sentry, third-
+    party log sink), that disclosure becomes a CWE-532 information leak. A
+    6-byte blake2b digest is still stable enough to correlate related log
+    lines for the same upload without exposing path structure.
+    """
+    return hashlib.blake2b(
+        path.encode("utf-8", errors="replace"), digest_size=6
+    ).hexdigest()
 
 
 def _assert_safe_path(path: str) -> None:
@@ -63,35 +85,68 @@ def _assert_safe_path(path: str) -> None:
     directory should ever reach this function. Enforcing this here is defense-
     in-depth — even if the calling view passes a path without sanitizing it,
     this guard prevents the pipeline from opening arbitrary host files.
+
+    WHY the empty / CWD guard: if MEDIA_ROOT is misconfigured as "" or ".",
+    os.path.realpath resolves it to the process's current working directory.
+    The startswith check would then permit any file under the project root,
+    including source code, secrets, and management commands. Refusing to
+    proceed in that case turns a silent path-traversal hole into a loud
+    configuration error.
     """
-    media_root = os.path.realpath(settings.MEDIA_ROOT)
+    media_root_setting = settings.MEDIA_ROOT
+    if not media_root_setting:
+        raise ImproperlyConfigured(
+            "settings.MEDIA_ROOT must be set to an absolute path before "
+            "loading uploaded images."
+        )
+    media_root = os.path.realpath(media_root_setting)
+    if media_root == os.path.realpath(os.getcwd()):
+        raise ImproperlyConfigured(
+            "settings.MEDIA_ROOT must point outside the project working "
+            "directory so source files stay unreachable from the upload "
+            "pipeline."
+        )
     resolved = os.path.realpath(path)
     if not resolved.startswith(media_root + os.sep):
         raise ValueError("Image path is outside the permitted media directory.")
 
 
-def _validate_image_dimensions(path: str) -> None:
+def _validate_image_dimensions(raw: bytes) -> None:
     """
-    Inspect image format and dimensions from metadata before OpenCV decodes.
+    Inspect image format and dimensions from in-memory bytes before decode.
 
-    cv2.imread() allocates the full decoded array before returning, so checking
-    the shape afterward is too late for highly compressed oversized uploads.
-    Pillow reads enough header metadata to expose format, width, and height
-    without materializing the pixel buffer.
+    WHY in-memory bytes (not a disk path): the previous design opened the
+    file twice — once with Pillow for header validation, then again with
+    cv2.imread for decode. An attacker with concurrent write access to
+    MEDIA_ROOT could race-swap the file between those reads (CWE-367 TOCTOU)
+    and substitute a payload that bypasses Pillow's checks. Loading the bytes
+    once and feeding them to both Pillow and cv2.imdecode closes that window.
+
+    cv2 itself cannot expose format and dimensions before allocating the
+    decoded pixel buffer, so Pillow is used for header-only inspection.
+
+    WHY DecompressionBombError is caught here: setting Image.MAX_IMAGE_PIXELS
+    makes Pillow raise DecompressionBombError natively when the declared
+    pixel count exceeds 2× the limit. That class does not inherit from
+    OSError, so without an explicit branch the exception would propagate
+    as an unhandled error to the caller instead of our sanitized
+    _image_load_error(). The manual width*height check below remains as
+    defense in depth for images between the limit and the 2× threshold.
 
     Format is checked here rather than by file extension because extensions
     are caller-controlled and trivially spoofed (e.g. 'shell.php' renamed to
     'photo.jpg'). Pillow detects format from the actual file magic bytes.
     """
     try:
-        with Image.open(path) as image:
+        with Image.open(io.BytesIO(raw)) as image:
             fmt = image.format
             width, height = image.size
-    except FileNotFoundError as exc:
-        logger.debug("Image path does not exist: path=%r", path)
-        raise _image_load_error() from exc
-    except (UnidentifiedImageError, OSError) as exc:
-        logger.debug("Could not inspect image for path=%r", path)
+    except (
+        UnidentifiedImageError,
+        Image.DecompressionBombError,
+        OSError,
+    ) as exc:
+        logger.debug("Could not inspect image header")
         raise _image_load_error() from exc
 
     if fmt not in _ALLOWED_IMAGE_FORMATS:
@@ -115,11 +170,20 @@ def load_image(path: str) -> np.ndarray:
     output is a numpy array — the native format for all subsequent
     preprocessing steps. PIL's Image objects require an extra conversion step.
 
-    WHY explicit None check: cv2.imread returns None on failure (file not
-    found, corrupt file, unsupported format) instead of raising an exception.
-    Leaving None to propagate would cause a confusing AttributeError or
-    TypeError deep in the pipeline. Raising FileNotFoundError here gives
-    callers a meaningful error they can catch and handle.
+    WHY a single read followed by cv2.imdecode: opening the file twice (once
+    for Pillow validation, once for cv2.imread) creates a TOCTOU race window
+    where an attacker with concurrent write access to MEDIA_ROOT could swap
+    a validated file for a malicious one between the two reads. Reading the
+    bytes into memory once, then validating and decoding from those same
+    bytes, eliminates that race entirely. The compressed bytes are at most
+    a few MB for any image that passes the pixel-count guard, so memory
+    overhead is negligible compared to the decoded uint8 array.
+
+    WHY explicit None check: cv2.imdecode returns None on failure (corrupt
+    file, unsupported format) instead of raising. Leaving None to propagate
+    would cause a confusing AttributeError or TypeError deep in the pipeline.
+    Raising FileNotFoundError here gives callers a meaningful error they can
+    catch and handle.
 
     Args:
         path: Absolute or relative path to the image file.
@@ -132,13 +196,28 @@ def load_image(path: str) -> np.ndarray:
         ValueError: If the path is outside MEDIA_ROOT (path traversal guard).
     """
     _assert_safe_path(path)
-    _validate_image_dimensions(path)
 
-    img = cv2.imread(path)
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except FileNotFoundError as exc:
+        logger.debug("Image file missing path_id=%s", _path_id(path))
+        raise _image_load_error() from exc
+    except OSError as exc:
+        logger.debug("Image file unreadable path_id=%s", _path_id(path))
+        raise _image_load_error() from exc
+
+    _validate_image_dimensions(raw)
+
+    # np.frombuffer creates a zero-copy uint8 view over the bytes object;
+    # cv2.imdecode then decompresses from this in-memory buffer. This is the
+    # documented equivalent of cv2.imread but without re-opening the file.
+    buf = np.frombuffer(raw, dtype=np.uint8)
+    img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
     if img is None:
-        # Log the path at DEBUG only — do not include it in the exception
-        # message, which may surface in API responses and leak internal paths.
-        logger.debug("cv2.imread returned None for path=%r", path)
+        # Log only the path hash — never the path itself, which may surface
+        # in API responses or external log sinks and leak internal layout.
+        logger.debug("cv2.imdecode returned None path_id=%s", _path_id(path))
         raise _image_load_error()
 
     # Keep a post-decode guard as defense in depth in case metadata and decoded
@@ -293,7 +372,20 @@ def to_tensor(image: np.ndarray) -> torch.Tensor:
 
     Returns:
         float32 tensor of shape (C, H, W).
+
+    Raises:
+        TypeError: If the input is not float32. Without this guard, calling
+            to_tensor on a uint8 array would silently produce a torch.uint8
+            tensor that fails deep inside the model with a confusing dtype
+            mismatch error. Mirrors the guard in normalize_pixels and keeps
+            the project's no-silent-failures rule intact.
     """
+    if image.dtype != np.float32:
+        raise TypeError(
+            f"to_tensor expects a float32 array, got {image.dtype}. "
+            "Call normalize_pixels() before to_tensor()."
+        )
+
     tensor = torch.from_numpy(image)           # (H, W, C), float32
     return tensor.permute(2, 0, 1).contiguous()  # (C, H, W), contiguous
 
@@ -401,11 +493,24 @@ def prepare_for_recognizer(plate_crop: np.ndarray) -> torch.Tensor:
        Result shape: (1, 32, 128) — 1 grayscale channel, 32px tall, 128px wide.
 
     Args:
-        plate_crop: RGB numpy array of the plate region, any input size.
+        plate_crop: uint8 RGB numpy array of the plate region, any input size.
 
     Returns:
         float32 tensor of shape (1, 32, 128).
+
+    Raises:
+        TypeError: If the input is not uint8. The inline /255 normalization
+            below assumes a uint8 source; calling this on a pre-normalized
+            float crop would silently rescale values into [0, 0.004] and the
+            recognizer would emit garbage. Mirrors normalize_pixels's guard.
     """
+    if plate_crop.dtype != np.uint8:
+        raise TypeError(
+            f"prepare_for_recognizer expects a uint8 plate crop, "
+            f"got {plate_crop.dtype}. The recognizer pipeline normalizes "
+            "internally; pass the raw uint8 crop from crop_plate_region()."
+        )
+
     # Step 1: resize — cv2 dsize is (width, height)
     resized = cv2.resize(plate_crop, (128, 32), interpolation=cv2.INTER_LINEAR)
 
