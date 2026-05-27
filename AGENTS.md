@@ -1,38 +1,20 @@
 <claude-mem-context>
 # Memory Context
 
-# [parking tracker] recent context, 2026-05-26 9:35pm MDT
+# [parking tracker] recent context, 2026-05-26 10:38pm MDT
 
 Legend: 🎯session 🔴bugfix 🟣feature 🔄refactor ✅change 🔵discovery ⚖️decision 🚨security_alert 🔐security_note
 Format: ID TIME TYPE TITLE
 Fetch details: get_observations([IDs]) | Search: mem-search skill
 
-Stats: 50 obs (21,472t read) | 202,429t work | 89% savings
+Stats: 50 obs (17,425t read) | 161,070t work | 89% savings
 
 ### May 24, 2026
-1529 4:36p 🟣 Django management command setup_defaults created for initial data bootstrap
-1530 4:37p ✅ Django base template established with design tokens and template inheritance blocks
-1531 " 🟣 Django login template created with CSRF protection and dark theme styling
-1532 4:38p ✅ Global stylesheet created with design tokens and placeholder for Day 9 component library
-1533 " ✅ Media directory established for uploaded plate image storage with retention management
-1534 " 🟣 Pytest test suite created for User model with security and configuration validation
-1535 4:39p 🟣 Integration test suite created for authentication flows with configuration validation
-1536 4:40p 🟣 Comprehensive pytest test suite created for all five parking models with relationship and constraint validation
-1537 " ✅ Git ignore patterns configured for secrets, artifacts, and environment-specific files
-1538 " 🔴 Static files configuration corrected to separate source and production directories
-1539 " ✅ Gitignore updated to exclude collectstatic output, not source static files
-1540 4:41p ✅ Docker Compose volumes updated to mount collectstatic output, not source static files
-1541 " ✅ Test fixture cleanup: removed redundant client fixture definition
-S504 Rename git commit messages to remove "day 1" prefix from the Django project foundation commit (May 24 at 5:04 PM)
-1542 10:12p ✅ Removed "day 1" prefix from git commit message
-S505 Remove "day 1" prefix from git commit messages in the parking tracker project (May 24 at 10:13 PM)
 1543 10:13p 🔵 Detected diverged branches with naming mismatch after commit amendment
-S507 Create README.md for parking tracker project with format similar to email-scam-detector, including database models, billing logic, and Docker setup (May 24 at 10:15 PM)
 ### May 25, 2026
 1544 11:36p 🔵 Parking Tracker project scope and architecture documented
 1545 " ⚖️ README.md creation plan established using email-scam-detector format
 1546 11:38p 🟣 README.md created for parking tracker project
-S508 Create README.md for parking tracker project with format similar to email-scam-detector reference, then commit and push to remote branch (May 25 at 11:38 PM)
 1547 11:39p ⚖️ README.md and templates/base.html staged for commit and push to remote branch
 1550 11:41p ✅ README.md successfully committed to local branch
 1551 " 🔵 Django Template Parser Evaluates Tags Inside HTML Comments
@@ -70,16 +52,34 @@ S513 Complete Day 2 work on parking tracker CV preprocessing: implement image pi
 1582 5:04p ✅ Security fixes applied to load_image function
 1583 " ✅ Fixed interpolation logic bug in resize_for_detector
 1584 " ✅ Added dtype guard to normalize_pixels function
+S514 Create README file for parking-tracker project with format similar to email-scam-detector README (May 26 at 5:10 PM)
 1585 9:33p ✅ README documentation updated with CV preprocessing details
-S514 Create README file for parking-tracker project with format similar to email-scam-detector README (May 26 at 9:33 PM)
-**Investigated**: Examined existing README.md and preprocessing.py files on feat/cv-image-preprocessing branch; reviewed git status showing uncommitted changes to both files
+S515 Fix PR review issues and push all files with separate commits (one for documentation, one for PR issue resolution) (May 26 at 9:33 PM)
+1586 9:36p 🔵 P1 Security Issue in Image Preprocessing: Decompression Bomb Vulnerability
+1587 " ✅ AGENTS.md File Modified in Current Branch
+1588 9:37p 🔴 Fix Decompression Bomb Vulnerability in Image Preprocessing
+1589 " ✅ Add Comprehensive Tests for Decompression Bomb Fix
+1591 9:39p ✅ First Commit: Documentation Update to Agent Memory Context
+1592 " 🔴 Second Commit: Decompression Bomb Security Fix with Tests
+1593 " 🔵 Local Branch Ready for Push with Two New Commits
+1594 " ✅ Commits Pushed to Remote Branch
+1595 " ✅ Reply Posted to PR Review Comment
+1596 " ✅ PR Description Updated with Verified Test Results
+1597 9:40p ✅ PR Review Thread Marked as Resolved
+1598 " 🔵 PR #2 Ready to Merge with All Review Issues Resolved
+S516 User inquiry: How to create a React website in VSCode and deploy it on Wix (May 26 at 9:40 PM)
+S517 User research on React website creation in VSCode and deployment to Wix, with discovery of Wix CLI as a legitimate developer tooling option (May 26 at 10:34 PM)
+1599 10:36p 🔵 Wix CLI discovered as Astro-based framework supporting React components
+1600 " 🔵 Wix CLI supports React components and Wix-managed headless projects with Astro deployment
+S518 User inquiry into Wix CLI deployment workflow and feasibility of Claude building and user deploying a website to Wix (May 26 at 10:38 PM)
+**Investigated**: Explored what Claude can automate versus what requires user intervention in Wix CLI deployment pipeline. Examined deployment command requirements and Wix credential handling
 
-**Learned**: Project uses feature branch workflow; README.md already existed and was enhanced rather than created from scratch; CV image preprocessing logic is the primary focus of documentation
+**Learned**: Wix CLI deployment can be fully automated by Claude (project structure, routing, styling, components, ready-to-deploy code), but final deployment requires user to run three CLI commands: npm install -g @wix/cli, wix login (browser authentication), and wix deploy. User's Wix account credentials cannot be shared, so authentication step must be user-initiated. Wix CLI project uses Astro framework with React component support. Wix provides built-in backend APIs for CMS, ecommerce, bookings, and other services. Wix free tier has subdomain and bandwidth limitations; custom domain requires paid plan
 
-**Completed**: README.md expanded with 13 lines of documentation explaining CV image preprocessing features following the requested format; inline comment added to apps/cv/preprocessing.py to clarify resize logic; both files committed with message "docs: update README and add inline comment to resize logic" and pushed to origin/feat/cv-image-preprocessing; PR #2 updated and ready for review
+**Completed**: No code development or deployment has been completed. User and Claude clarified the division of responsibilities for a Wix CLI deployment workflow
 
-**Next Steps**: PR #2 is complete and pushed. No additional work appears to be in progress; the documentation and code clarity improvements are shipped to the feature branch
+**Next Steps**: Waiting for user to provide: (1) design/mockup (screenshots, Figma, sketch, or description), (2) functional requirements and user flows, (3) specification of any Wix backend service needs (CMS, store, bookings, etc.). Once provided, Claude can begin project scaffolding and implementation
 
 
-Access 202k tokens of past work via get_observations([IDs]) or mem-search skill.
+Access 161k tokens of past work via get_observations([IDs]) or mem-search skill.
 </claude-mem-context>
