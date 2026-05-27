@@ -144,7 +144,7 @@ def resize_for_detector(
     # artifacts. Comparing total pixel count picks the dominant direction.
     total_src = src_w * src_h
     total_dst = target_w * target_h
-    if total_src > total_dst:
+    if total_src > total_dst: # if source is bigger then target 
         interpolation = cv2.INTER_AREA    # net downscale: average pooling
     else:
         interpolation = cv2.INTER_LINEAR  # net upscale or same size: bilinear

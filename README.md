@@ -88,6 +88,19 @@ The CV logging system, where the CV pipeline logs entry and exit events.
 - bounding_box: the bounding box of the license plate as a JSON array [x, y, w, h]
 - timestamp: the time the event was created
 
+### CV pipeline
+flowchart TD
+    IMG[Raw photo file path] --> LOAD[load the image from the file path]
+    LOAD --> BGR[convert the image from BGR (Blue Green Red) to RGB (Red Green Blue). OpenCV loads the image in BGR but the AI models expect RGB. Use cvtColor instead of img because PyTorch reads left to right and img flips the data so you need to read it right to left.]
+    BGR --> RESIZE[resize the image to 640×480, the expected input size for the detector model.]
+    RESIZE --> NORM[normalize the image pixels to 0-1. Ex: 0-255 to 0.0-1.0]
+    NORM --> TENSOR[convert the image from numpy array to a PyTorch tensor. Also reorder the axis from HWC (Height Width Channels) to CHW (Channels Height Width).]
+    TENSOR --> DETECTOR[run the plate detector AI model. The detector model returns the bounding box of the license plate.]
+    DETECTOR --> CROP[crop the plate region from the image so that we are left with only the license plate.]
+    CROP --> PREP[prepare the plate region for the recognizer AI model. The recognizer model expects a 128×32 grayscale image.]
+    PREP --> RECOG[run the recognizer AI model. The recognizer model returns the text of the license plate and the confidence score.]
+
+
 ## Web Application
 
 Django 5.1 backend with HTMX for reactive partials and Chart.js for revenue visualization. No Node.js, no React — server-rendered templates with targeted DOM swaps.
