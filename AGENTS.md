@@ -1,30 +1,19 @@
 <claude-mem-context>
 # Memory Context
 
-# [parking tracker] recent context, 2026-05-26 10:38pm MDT
+# [parking tracker] recent context, 2026-05-26 10:55pm MDT
 
 Legend: 🎯session 🔴bugfix 🟣feature 🔄refactor ✅change 🔵discovery ⚖️decision 🚨security_alert 🔐security_note
 Format: ID TIME TYPE TITLE
 Fetch details: get_observations([IDs]) | Search: mem-search skill
 
-Stats: 50 obs (17,425t read) | 161,070t work | 89% savings
+Stats: 50 obs (15,394t read) | 152,111t work | 90% savings
 
-### May 24, 2026
-1543 10:13p 🔵 Detected diverged branches with naming mismatch after commit amendment
 ### May 25, 2026
-1544 11:36p 🔵 Parking Tracker project scope and architecture documented
-1545 " ⚖️ README.md creation plan established using email-scam-detector format
-1546 11:38p 🟣 README.md created for parking tracker project
-1547 11:39p ⚖️ README.md and templates/base.html staged for commit and push to remote branch
-1550 11:41p ✅ README.md successfully committed to local branch
-1551 " 🔵 Django Template Parser Evaluates Tags Inside HTML Comments
-1552 " 🔵 PR #1 Has No Review Threads or Formal Feedback to Address
-1554 " 🔵 Django Template File Structure and Django Project Configuration Verified
-1555 " 🔵 Project Requires Docker for Testing; Local Environment Not Configured
+1555 11:41p 🔵 Project Requires Docker for Testing; Local Environment Not Configured
 1556 11:42p 🔵 Docker Compose Stack Running; Django Dev Server and PostgreSQL Ready
 1557 " 🔴 PR #1 Fix Verified: Login Page TemplateSyntaxError Resolved
 1558 " ✅ README.md successfully pushed to remote branch feat/day1-django-project-foundation-docker-postgresql
-S509 Review and resolve PR issues on parking-tracker PR #1 (fix: login page TemplateSyntaxError in base.html) (May 25 at 11:43 PM)
 1559 11:43p 🔵 All Test Suite Passes; PR Fix Validated Against Full Test Coverage
 1561 " ✅ PR #1 Checklist Updated; All Verification Tasks Completed
 1562 " ✅ PR #1 Verification Summary Posted to GitHub
@@ -71,15 +60,25 @@ S516 User inquiry: How to create a React website in VSCode and deploy it on Wix 
 S517 User research on React website creation in VSCode and deployment to Wix, with discovery of Wix CLI as a legitimate developer tooling option (May 26 at 10:34 PM)
 1599 10:36p 🔵 Wix CLI discovered as Astro-based framework supporting React components
 1600 " 🔵 Wix CLI supports React components and Wix-managed headless projects with Astro deployment
-S518 User inquiry into Wix CLI deployment workflow and feasibility of Claude building and user deploying a website to Wix (May 26 at 10:38 PM)
-**Investigated**: Explored what Claude can automate versus what requires user intervention in Wix CLI deployment pipeline. Examined deployment command requirements and Wix credential handling
+S518 User inquiry into Wix CLI deployment workflow and feasibility of Claude building and user deploying a website to Wix (May 26 at 10:37 PM)
+1601 10:38p 🔵 PR #2 review thread analysis reveals one resolved security issue and one pending validator fix
+1602 " 🔴 Fixed NumPy float scalar rejection in bounding box validator
+1603 10:39p ✅ Added regression test for numpy float scalar handling in bounding boxes
+1604 10:41p 🔵 All 47 CV tests pass including numpy float scalar fix validation
+1605 " ✅ Committed PR review fixes to feat/cv-image-preprocessing branch
+1606 10:42p ✅ Pushed branch feat/cv-image-preprocessing with PR review fixes to origin
+1607 " ✅ Replied to P2 review comment marking numpy bbox scalar fix as resolved
+1608 10:50p 🔴 Fixed NumPy float scalar rejection in bounding box validation
+1609 " 🟣 CV image preprocessing pipeline and device utilities implemented
+S519 Review and resolve PR #2 review issues in parking-tracker repository (May 26 at 10:51 PM)
+**Investigated**: Examined two open review threads on PR #2 (feat: CV image preprocessing pipeline and device utilities). First thread flagged decompression bomb vulnerability in load_image() where cv2.imread() decodes files before dimension checking. Second thread (P2 priority) flagged rejection of valid NumPy float32 detector outputs in crop_plate_region() bounding box validation.
 
-**Learned**: Wix CLI deployment can be fully automated by Claude (project structure, routing, styling, components, ready-to-deploy code), but final deployment requires user to run three CLI commands: npm install -g @wix/cli, wix login (browser authentication), and wix deploy. User's Wix account credentials cannot be shared, so authentication step must be user-initiated. Wix CLI project uses Astro framework with React component support. Wix provides built-in backend APIs for CMS, ecommerce, bookings, and other services. Wix free tier has subdomain and bandwidth limitations; custom domain requires paid plan
+**Learned**: Image dimension validation must occur before full file decoding to prevent decompression bomb attacks - Pillow header inspection allows pre-decode filtering. NumPy detector model outputs produce np.float32 coordinate scalars that fail isinstance(x, float) checks despite being valid finite values; coercion through np.asarray(..., dtype=float) accepts NumPy scalars while preserving validation for non-finite values and invalid bbox shapes.
 
-**Completed**: No code development or deployment has been completed. User and Claude clarified the division of responsibilities for a Wix CLI deployment workflow
+**Completed**: All PR #2 review issues resolved. Fixed decompression bomb vulnerability in commit 8e95542 by adding Pillow header metadata dimension checks before cv2.imread() calls, with defense-in-depth post-decode check retained for formats Pillow cannot inspect. Fixed NumPy scalar rejection in commit 744c815 by coercing detector bboxes through np.asarray(..., dtype=float) before validation. All 47 unit tests passing. PR #2 is now mergeable with clean git status.
 
-**Next Steps**: Waiting for user to provide: (1) design/mockup (screenshots, Figma, sketch, or description), (2) functional requirements and user flows, (3) specification of any Wix backend service needs (CMS, store, bookings, etc.). Once provided, Claude can begin project scaffolding and implementation
+**Next Steps**: PR #2 is ready for merge with both review threads resolved and all tests passing. Current trajectory appears to be finalizing this CV preprocessing feature branch before moving to other pending work.
 
 
-Access 161k tokens of past work via get_observations([IDs]) or mem-search skill.
+Access 152k tokens of past work via get_observations([IDs]) or mem-search skill.
 </claude-mem-context>
