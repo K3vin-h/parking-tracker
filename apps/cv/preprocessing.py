@@ -20,15 +20,28 @@ Pipeline overview:
 """
 
 import logging
+import os
 
 import cv2
 import numpy as np
 import torch
+from django.conf import settings
 from PIL import Image, UnidentifiedImageError
 
 logger = logging.getLogger(__name__)
 
 MAX_IMAGE_PIXELS = 4000 * 3000
+
+# Tell Pillow to refuse images above this pixel count during header parsing.
+# Without this, Pillow only raises DecompressionBombWarning (not an error) at
+# its default threshold of ~178 MP. Setting it here makes our limit enforced
+# natively inside Image.open(), independent of the manual check below.
+Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
+
+# Only these formats are needed by the CV pipeline. Rejecting everything else
+# prevents Pillow from parsing EPS (PostScript), SVG, PSD, or other formats
+# that have broader attack surfaces or are irrelevant to camera uploads.
+_ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "BMP", "WEBP"}
 
 
 def _image_load_error() -> FileNotFoundError:
@@ -38,24 +51,54 @@ def _image_load_error() -> FileNotFoundError:
     )
 
 
+def _assert_safe_path(path: str) -> None:
+    """
+    Verify the resolved path is inside MEDIA_ROOT.
+
+    WHY realpath: os.path.realpath resolves symlinks and '..' components before
+    the comparison, preventing traversal tricks like '../../etc/passwd' or
+    symlink chains that point outside the allowed directory.
+
+    WHY MEDIA_ROOT: only files that Django has already written to the media
+    directory should ever reach this function. Enforcing this here is defense-
+    in-depth — even if the calling view passes a path without sanitizing it,
+    this guard prevents the pipeline from opening arbitrary host files.
+    """
+    media_root = os.path.realpath(settings.MEDIA_ROOT)
+    resolved = os.path.realpath(path)
+    if not resolved.startswith(media_root + os.sep):
+        raise ValueError("Image path is outside the permitted media directory.")
+
+
 def _validate_image_dimensions(path: str) -> None:
     """
-    Inspect image dimensions from metadata before OpenCV decodes the file.
+    Inspect image format and dimensions from metadata before OpenCV decodes.
 
     cv2.imread() allocates the full decoded array before returning, so checking
     the shape afterward is too late for highly compressed oversized uploads.
-    Pillow reads enough header metadata to expose width and height without
-    materializing the pixel buffer.
+    Pillow reads enough header metadata to expose format, width, and height
+    without materializing the pixel buffer.
+
+    Format is checked here rather than by file extension because extensions
+    are caller-controlled and trivially spoofed (e.g. 'shell.php' renamed to
+    'photo.jpg'). Pillow detects format from the actual file magic bytes.
     """
     try:
         with Image.open(path) as image:
+            fmt = image.format
             width, height = image.size
     except FileNotFoundError as exc:
         logger.debug("Image path does not exist: path=%r", path)
         raise _image_load_error() from exc
     except (UnidentifiedImageError, OSError) as exc:
-        logger.debug("Could not inspect image dimensions for path=%r", path)
+        logger.debug("Could not inspect image for path=%r", path)
         raise _image_load_error() from exc
+
+    if fmt not in _ALLOWED_IMAGE_FORMATS:
+        raise ValueError(
+            f"Unsupported image format '{fmt}'. "
+            f"Allowed formats: {sorted(_ALLOWED_IMAGE_FORMATS)}."
+        )
 
     if width * height > MAX_IMAGE_PIXELS:
         raise ValueError(
@@ -86,7 +129,9 @@ def load_image(path: str) -> np.ndarray:
 
     Raises:
         FileNotFoundError: If the file cannot be loaded by OpenCV.
+        ValueError: If the path is outside MEDIA_ROOT (path traversal guard).
     """
+    _assert_safe_path(path)
     _validate_image_dimensions(path)
 
     img = cv2.imread(path)
