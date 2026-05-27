@@ -34,6 +34,7 @@ from PIL import Image, UnidentifiedImageError
 logger = logging.getLogger(__name__)
 
 MAX_IMAGE_PIXELS = 4000 * 3000
+MAX_IMAGE_BYTES = 64 * 1024 * 1024
 
 # Tell Pillow to refuse images above this pixel count during header parsing.
 # Without this, Pillow only raises DecompressionBombWarning (not an error) at
@@ -162,6 +163,33 @@ def _validate_image_dimensions(raw: bytes) -> None:
         )
 
 
+def _read_image_bytes(path: str) -> bytes:
+    """
+    Read compressed image bytes with an explicit upper bound.
+
+    A valid image header can be followed by arbitrarily large trailing data.
+    Reading at most MAX_IMAGE_BYTES + 1 lets us reject oversized uploads
+    without allocating the whole user-controlled file.
+    """
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read(MAX_IMAGE_BYTES + 1)
+    except FileNotFoundError as exc:
+        logger.debug("Image file missing path_id=%s", _path_id(path))
+        raise _image_load_error() from exc
+    except OSError as exc:
+        logger.debug("Image file unreadable path_id=%s", _path_id(path))
+        raise _image_load_error() from exc
+
+    if len(raw) > MAX_IMAGE_BYTES:
+        raise ValueError(
+            f"Image file exceeds the maximum allowed compressed size "
+            f"({MAX_IMAGE_BYTES // (1024 * 1024)} MB)."
+        )
+
+    return raw
+
+
 def load_image(path: str) -> np.ndarray:
     """
     Load an image from disk using OpenCV.
@@ -170,14 +198,13 @@ def load_image(path: str) -> np.ndarray:
     output is a numpy array — the native format for all subsequent
     preprocessing steps. PIL's Image objects require an extra conversion step.
 
-    WHY a single read followed by cv2.imdecode: opening the file twice (once
-    for Pillow validation, once for cv2.imread) creates a TOCTOU race window
-    where an attacker with concurrent write access to MEDIA_ROOT could swap
-    a validated file for a malicious one between the two reads. Reading the
-    bytes into memory once, then validating and decoding from those same
-    bytes, eliminates that race entirely. The compressed bytes are at most
-    a few MB for any image that passes the pixel-count guard, so memory
-    overhead is negligible compared to the decoded uint8 array.
+    WHY a bounded single read followed by cv2.imdecode: opening the file twice
+    (once for Pillow validation, once for cv2.imread) creates a TOCTOU race
+    window where an attacker with concurrent write access to MEDIA_ROOT could
+    swap a validated file for a malicious one between the two reads. Reading
+    the compressed bytes once, up to MAX_IMAGE_BYTES + 1, then validating and
+    decoding from those same bytes eliminates that race without letting a
+    user-controlled file force an unbounded allocation.
 
     WHY explicit None check: cv2.imdecode returns None on failure (corrupt
     file, unsupported format) instead of raising. Leaving None to propagate
@@ -197,15 +224,7 @@ def load_image(path: str) -> np.ndarray:
     """
     _assert_safe_path(path)
 
-    try:
-        with open(path, "rb") as fh:
-            raw = fh.read()
-    except FileNotFoundError as exc:
-        logger.debug("Image file missing path_id=%s", _path_id(path))
-        raise _image_load_error() from exc
-    except OSError as exc:
-        logger.debug("Image file unreadable path_id=%s", _path_id(path))
-        raise _image_load_error() from exc
+    raw = _read_image_bytes(path)
 
     _validate_image_dimensions(raw)
 
