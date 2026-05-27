@@ -17,14 +17,14 @@ See `PLAN.md` for the complete architecture, 12-day work plan, and verification 
 | Admin + model tests + auth tests | Done | `apps/*/admin.py`, `apps/*/tests/` |
 | Seed data command | Done | `apps/parking/management/commands/setup_defaults.py` |
 | CV device auto-detection | Done | `apps/cv/utils/device.py` |
-| CV image preprocessing | Done | `apps/cv/preprocessing.py` (47 tests) |
+| CV image preprocessing | Done | `apps/cv/preprocessing.py` (58 tests) |
 | Plate detector / recognizer models | Planned | `PLAN.md` — not in repo yet |
 | Training scripts + synthetic data | Planned | `apps/cv/training/` — not in repo yet |
 | Session/billing services | Planned | `apps/parking/services.py` — not in repo yet |
 | Dashboard views + HTMX UI | Planned | `apps/dashboard/views.py` is placeholder |
 | REST API (`/api/upload/`, etc.) | Planned | `apps/dashboard/api.py` — not in repo yet |
 
-Current branch focus: **CV preprocessing** (`feat/cv-image-preprocessing`).
+Current branch focus: **none** — `feat/cv-image-preprocessing` is complete and pending merge into `feat/django-project-foundation-docker-postgresql-models`.
 
 ## Commands
 
@@ -156,7 +156,7 @@ Django templates + HTMX + Chart.js. No Node.js, no React.
 
 ## graphify
 
-This project has a knowledge graph at `graphify-out/` (530 nodes, 637 edges as of 2026-05-26). Open `graphify-out/graph.html` in a browser for the interactive tree.
+This project has a knowledge graph at `graphify-out/` (596 nodes, 717 edges as of 2026-05-26). Open `graphify-out/graph.html` in a browser for the interactive tree.
 
 **God nodes (highest connectivity):** `load_image()`, `make_bgr_image()`, `make_rgb_image()`, preprocessing helpers, core Django models.
 
