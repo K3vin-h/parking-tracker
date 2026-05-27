@@ -280,13 +280,18 @@ def crop_plate_region(image: np.ndarray, bbox: list[float]) -> np.ndarray:
     Returns:
         Cropped numpy array, shape (crop_h, crop_w, 3).
     """
-    if len(bbox) != 4:
-        raise ValueError(f"bbox must have exactly 4 elements [x, y, w, h], got {len(bbox)}")
+    bbox_values = np.asarray(bbox, dtype=float)
 
-    x, y, bw, bh = bbox
+    if bbox_values.shape != (4,):
+        raise ValueError(
+            f"bbox must have exactly 4 elements [x, y, w, h], got {bbox_values.size}"
+        )
 
-    if not all(isinstance(v, (int, float)) and np.isfinite(v) for v in bbox):
+    if not np.all(np.isfinite(bbox_values)):
         raise ValueError(f"bbox contains non-finite values: {bbox}")
+
+    x, y, bw, bh = bbox_values
+
     if bw <= 0 or bh <= 0:
         raise ValueError(f"bbox has non-positive dimensions: w={bw}, h={bh}")
 

@@ -381,6 +381,17 @@ def test_crop_plate_region_correct_shape():
 
 
 @pytest.mark.unit
+def test_crop_plate_region_accepts_numpy_float_scalars():
+    """Detector boxes may arrive as numpy float32 scalars from model output."""
+    img = make_rgb_image(h=100, w=100)
+    bbox = list(np.array([0.25, 0.25, 0.5, 0.5], dtype=np.float32))
+
+    result = crop_plate_region(img, bbox)
+
+    assert result.shape == (50, 50, 3)
+
+
+@pytest.mark.unit
 def test_crop_plate_region_full_image():
     """bbox [0, 0, 1, 1] must return the entire image."""
     img = make_rgb_image(h=100, w=200)
