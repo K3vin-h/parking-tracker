@@ -23,6 +23,7 @@ import hashlib
 import io
 import logging
 import os
+import warnings
 
 import cv2
 import numpy as np
@@ -126,22 +127,28 @@ def _validate_image_dimensions(raw: bytes) -> None:
     cv2 itself cannot expose format and dimensions before allocating the
     decoded pixel buffer, so Pillow is used for header-only inspection.
 
-    WHY DecompressionBombError is caught here: setting Image.MAX_IMAGE_PIXELS
-    makes Pillow raise DecompressionBombError natively when the declared
-    pixel count exceeds 2× the limit. That class does not inherit from
-    OSError, so without an explicit branch the exception would propagate
-    as an unhandled error to the caller instead of our sanitized
-    _image_load_error(). The manual width*height check below remains as
-    defense in depth for images between the limit and the 2× threshold.
+    WHY Pillow bomb warnings are forced to errors locally: deployments may run
+    tests or workers with warnings-as-errors, where Pillow raises
+    DecompressionBombWarning before the manual width*height check runs. This
+    function owns upload validation, so it normalizes both Pillow's warning and
+    error paths into explicit upload rejections instead of leaking raw warning
+    exceptions to callers.
 
     Format is checked here rather than by file extension because extensions
     are caller-controlled and trivially spoofed (e.g. 'shell.php' renamed to
     'photo.jpg'). Pillow detects format from the actual file magic bytes.
     """
     try:
-        with Image.open(io.BytesIO(raw)) as image:
-            fmt = image.format
-            width, height = image.size
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(raw)) as image:
+                fmt = image.format
+                width, height = image.size
+    except Image.DecompressionBombWarning as exc:
+        raise ValueError(
+            f"Image dimensions exceed the maximum allowed size "
+            f"({MAX_IMAGE_PIXELS // 1_000_000} MP). Resize before uploading."
+        ) from exc
     except (
         UnidentifiedImageError,
         Image.DecompressionBombError,
