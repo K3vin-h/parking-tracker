@@ -288,6 +288,11 @@ def resize_for_detector(
     layers receive a fixed-size feature vector after the convolutional blocks.
     The 4:3 aspect ratio matches most security camera outputs.
 
+    WHY letterbox instead of stretching: camera frames are not always 4:3
+    (for example, many are 1920×1080). Directly resizing those frames to
+    640×480 changes plate geometry before detection. Letterboxing preserves
+    the original aspect ratio, then pads the remaining detector canvas.
+
     WHY adaptive interpolation:
     - INTER_AREA: used when downscaling. It averages the pixels that map to
       each output pixel, preventing moiré patterns and aliasing that appear
@@ -307,25 +312,33 @@ def resize_for_detector(
         target: (width, height) in pixels. Default matches detector input size.
 
     Returns:
-        Resized numpy array, shape (target_height, target_width, 3).
+        Letterboxed numpy array, shape (target_height, target_width, 3).
     """
     src_h, src_w = image.shape[:2]
     target_w, target_h = target
+    scale = min(target_w / src_w, target_h / src_h)
+    resized_w = max(1, int(round(src_w * scale)))
+    resized_h = max(1, int(round(src_h * scale)))
 
-    # Choose interpolation based on net scale direction (by total pixel count).
-    # Using `or` on individual dimensions is wrong for mixed cases: an image at
-    # 320×600 resizing to 640×480 has one axis shrinking and one growing — the
-    # `or` condition would pick INTER_AREA, but OpenCV falls back to nearest-
-    # neighbor for INTER_AREA when a dimension is being upscaled, causing blocky
-    # artifacts. Comparing total pixel count picks the dominant direction.
-    total_src = src_w * src_h
-    total_dst = target_w * target_h
-    if total_src > total_dst: # if source is bigger then target 
-        interpolation = cv2.INTER_AREA    # net downscale: average pooling
-    else:
-        interpolation = cv2.INTER_LINEAR  # net upscale or same size: bilinear
+    interpolation = cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR
+    resized = cv2.resize(image, (resized_w, resized_h), interpolation=interpolation)
 
-    return cv2.resize(image, target, interpolation=interpolation)
+    pad_x = target_w - resized_w
+    pad_y = target_h - resized_h
+    left = pad_x // 2
+    right = pad_x - left
+    top = pad_y // 2
+    bottom = pad_y - top
+
+    return cv2.copyMakeBorder(
+        resized,
+        top,
+        bottom,
+        left,
+        right,
+        borderType=cv2.BORDER_CONSTANT,
+        value=(0, 0, 0),
+    )
 
 
 def normalize_pixels(image: np.ndarray) -> np.ndarray:

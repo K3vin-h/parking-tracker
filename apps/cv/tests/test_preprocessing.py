@@ -346,6 +346,19 @@ def test_resize_for_detector_default_output_shape():
 
 
 @pytest.mark.unit
+def test_resize_for_detector_letterboxes_widescreen_input():
+    """16:9 camera frames must preserve aspect ratio with vertical padding."""
+    img = make_bgr_image(h=1080, w=1920, fill=255)
+
+    result = resize_for_detector(img)
+
+    assert result.shape == (480, 640, 3)
+    assert np.all(result[:60, :, :] == 0)
+    assert np.all(result[60:420, :, :] == 255)
+    assert np.all(result[420:, :, :] == 0)
+
+
+@pytest.mark.unit
 def test_resize_for_detector_custom_target():
     """Custom target size must be respected."""
     img = make_bgr_image(h=200, w=300)
@@ -358,11 +371,14 @@ def test_resize_for_detector_custom_target():
 @pytest.mark.unit
 def test_resize_for_detector_handles_portrait_input():
     """Portrait-orientation images must resize to the correct landscape output."""
-    img = make_bgr_image(h=800, w=600)
+    img = make_bgr_image(h=800, w=600, fill=255)
 
     result = resize_for_detector(img, target=(640, 480))
 
     assert result.shape == (480, 640, 3)
+    assert np.all(result[:, :140, :] == 0)
+    assert np.all(result[:, 140:500, :] == 255)
+    assert np.all(result[:, 500:, :] == 0)
 
 
 @pytest.mark.unit
