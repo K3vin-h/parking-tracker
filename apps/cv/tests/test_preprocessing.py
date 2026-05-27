@@ -34,6 +34,19 @@ def make_rgb_image(h: int = 100, w: int = 100, fill: int = 128) -> np.ndarray:
     return np.full((h, w, 3), fill, dtype=np.uint8)
 
 
+class FakeImageHeader:
+    """Context manager that mimics Pillow's header-only image object."""
+
+    def __init__(self, size: tuple[int, int]):
+        self.size = size
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
 # ── load_image ─────────────────────────────────────────────────────────────────
 
 @pytest.mark.unit
@@ -91,15 +104,57 @@ def test_load_image_error_message_does_not_leak_path():
 
 
 @pytest.mark.unit
-def test_load_image_rejects_oversized_image(tmp_path):
-    """Images exceeding the 12 MP pixel cap must raise ValueError."""
-    # Create a 4001×3000 image — just over the limit
-    img = np.zeros((3001, 4001, 3), dtype=np.uint8)
+def test_load_image_rejects_oversized_image_before_decoding(tmp_path, monkeypatch):
+    """Images exceeding the 12 MP pixel cap must fail before cv2.imread decodes."""
     img_path = str(tmp_path / "huge.png")
-    cv2.imwrite(img_path, img)
+    img_path_obj = tmp_path / "huge.png"
+    img_path_obj.write_bytes(b"fake image bytes")
+
+    def fake_open(path):
+        assert path == img_path
+        return FakeImageHeader((4001, 3000))
+
+    def fail_if_decoded(path):
+        raise AssertionError("cv2.imread should not run for oversized images")
+
+    monkeypatch.setattr("apps.cv.preprocessing.Image.open", fake_open)
+    monkeypatch.setattr(cv2, "imread", fail_if_decoded)
 
     with pytest.raises(ValueError, match="exceed"):
         load_image(img_path)
+
+
+@pytest.mark.unit
+def test_load_image_keeps_post_decode_size_guard(tmp_path, monkeypatch):
+    """The decoded-array guard remains as fallback when headers are unavailable."""
+    img_path = str(tmp_path / "huge.raw")
+    img_path_obj = tmp_path / "huge.raw"
+    img_path_obj.write_bytes(b"fake image bytes")
+
+    def fake_open(path):
+        raise OSError("unsupported header")
+
+    def fake_imread(path):
+        assert path == img_path
+        return np.zeros((3001, 4001, 3), dtype=np.uint8)
+
+    monkeypatch.setattr("apps.cv.preprocessing.Image.open", fake_open)
+    monkeypatch.setattr(cv2, "imread", fake_imread)
+
+    with pytest.raises(ValueError, match="exceed"):
+        load_image(img_path)
+
+
+@pytest.mark.unit
+def test_load_image_allows_image_at_pixel_limit(tmp_path):
+    """Images at exactly 12 MP are allowed."""
+    img = np.zeros((3000, 4000, 3), dtype=np.uint8)
+    img_path = str(tmp_path / "huge.png")
+    cv2.imwrite(img_path, img)
+
+    result = load_image(img_path)
+
+    assert result.shape == (3000, 4000, 3)
 
 
 # ── bgr_to_rgb ─────────────────────────────────────────────────────────────────
