@@ -1,36 +1,18 @@
 <claude-mem-context>
 # Memory Context
 
-# [parking tracker] recent context, 2026-05-26 11:22pm MDT
+# [parking tracker] recent context, 2026-05-26 11:28pm MDT
 
 Legend: 🎯session 🔴bugfix 🟣feature 🔄refactor ✅change 🔵discovery ⚖️decision 🚨security_alert 🔐security_note
 Format: ID TIME TYPE TITLE
 Fetch details: get_observations([IDs]) | Search: mem-search skill
 
-Stats: 50 obs (15,965t read) | 167,801t work | 90% savings
+Stats: 50 obs (16,399t read) | 190,816t work | 91% savings
 
 ### May 26, 2026
-S513 Complete Day 2 work on parking tracker CV preprocessing: implement image pipeline, run code/security reviews, create feature branch and PR without "day 2" in naming (May 26 at 4:47 PM)
-1572 4:55p ✅ Day 2 CV preprocessing work initiated
-1573 4:59p 🟣 CV preprocessing module structure initialized
-1574 5:00p 🟣 Device auto-detection utility implemented
-1575 5:01p 🟣 Complete image preprocessing pipeline implemented
-1576 " 🟣 Device utility tests written
-1577 " 🟣 Comprehensive preprocessing test suite implemented
-1578 5:02p 🔵 All CV preprocessing tests pass inside Docker environment
-1579 " ✅ Pytest markers registered to eliminate test warnings
-1580 5:03p 🔵 Code review identified 5 issues in preprocessing module (2 HIGH severity)
-1581 " 🚨 Security review identified 5 issues in preprocessing module (1 HIGH severity)
-1582 5:04p ✅ Security fixes applied to load_image function
-1583 " ✅ Fixed interpolation logic bug in resize_for_detector
-1584 " ✅ Added dtype guard to normalize_pixels function
 S514 Create README file for parking-tracker project with format similar to email-scam-detector README (May 26 at 5:10 PM)
-1585 9:33p ✅ README documentation updated with CV preprocessing details
 S515 Fix PR review issues and push all files with separate commits (one for documentation, one for PR issue resolution) (May 26 at 9:33 PM)
-1586 9:36p 🔵 P1 Security Issue in Image Preprocessing: Decompression Bomb Vulnerability
-1587 " ✅ AGENTS.md File Modified in Current Branch
-1588 9:37p 🔴 Fix Decompression Bomb Vulnerability in Image Preprocessing
-1589 " ✅ Add Comprehensive Tests for Decompression Bomb Fix
+1589 9:37p ✅ Add Comprehensive Tests for Decompression Bomb Fix
 1591 9:39p ✅ First Commit: Documentation Update to Agent Memory Context
 1592 " 🔴 Second Commit: Decompression Bomb Security Fix with Tests
 1593 " 🔵 Local Branch Ready for Push with Two New Commits
@@ -63,21 +45,39 @@ S520 Resolve all PR issues then push all changes - addressing the final unresolv
 1616 " ✅ PR review comment resolved: uninspectable image upload fix documented
 1617 " ✅ PR #2 description updated with complete security fix list
 S521 Security review and remediation of apps/cv/preprocessing.py image upload handler in parking tracker CV pipeline (May 26 at 10:57 PM)
+S522 Commit and push all new changes on feat/cv-image-preprocessing branch (May 26 at 11:01 PM)
 1625 11:16p 🔵 CV test suite passing
 1626 " 🔵 Uncommitted changes on feat/cv-image-preprocessing branch
 1627 11:17p 🔵 Git commit blocked by circular permission enforcement
 1628 " ✅ CV preprocessing module hardened with security fixes
 1629 " ✅ CV preprocessing changes committed to feat/cv-image-preprocessing
 1630 " ✅ CV preprocessing commit pushed to remote origin
-S522 Commit and push all new changes on feat/cv-image-preprocessing branch (May 26 at 11:18 PM)
-**Investigated**: CV test suite status (58 tests passing), git repository state (3 modified files), staged files (apps/cv/preprocessing.py and apps/cv/tests/test_preprocessing.py)
+1631 11:22p 🔵 PR #2 security review reveals unbounded file read vulnerability
+1632 " 🔴 Addressed unbounded file read via intentional TOCTOU mitigation
+1633 " ✅ PR #2 documentation and status updates finalized
+1634 " 🔵 PR #2 ready for merge: all 4 review issues addressed
+1635 11:23p 🔵 CV preprocessing implementation defense-in-depth with comprehensive test coverage
+1636 " 🔴 Bounded image file read to prevent unbounded memory allocation
+1637 " 🔴 Unbounded file read fix verified with all 59 tests passing
+1638 11:24p ✅ All PR #2 fixes staged and verified; ready for commit and push
+1639 " 🔵 .claude/settings.local.json globally gitignored; only settings.json should be committed
+1640 " ✅ Documentation and settings refresh committed (57aa1ab)
+1641 " 🔴 Bounded image file read fix committed (a1063b6)
+1642 " ✅ Local branch ahead of origin; ready for push
+1643 " ✅ All PR fixes pushed to GitHub (563b6f3 → a1063b6)
+1644 " ✅ Final PR review issue resolution posted on GitHub (comment ID 3308626579)
+1645 " ✅ PR #2 description updated to reflect all security fixes including bounded reads
+1646 11:25p ✅ Final PR review thread marked resolved (PRRT_kwDOSljN286FAIoA)
+1647 " ✅ PR #2 task complete: all issues resolved and pushed; ready for merge
+S523 Resolve all PR #2 security review issues and push changes to GitHub (May 26 at 11:25 PM)
+**Investigated**: PR #2 had 4 flagged review threads: 1 P1 (decompression-bomb timing), 3 P2 (NumPy bbox scalars, uninspectable headers, unbounded file reads). First three were already resolved in commits 8e95542, 744c815, 70cb728 respectively. Final P2 issue remained unresolved: unbounded `fh.read()` allocates entire file before validation, allowing memory exhaustion from user-controlled compressed uploads with trailing data.
 
-**Learned**: CV preprocessing module received security hardening: TOCTOU race condition eliminated via bytes-based validation, path leakage prevented with blake2b-based IDs, configuration misuse guards added for empty/CWD MEDIA_ROOT, BMP format removed from allowlist. Circular permission enforcement discovered: git-manager agent blocked from running git commit due to CLAUDE.md delegation rule requiring commits to be delegated to git-manager.
+**Learned**: CV preprocessing implements defense-in-depth security with TOCTOU mitigation by reading file once into memory and feeding same bytes to both Pillow (header validation) and cv2.imdecode (decode), preventing race-condition file swaps between validation steps. Unbounded reads expose workers to memory exhaustion even when file headers are small but compressed size is large. Regression test coverage uses sentinel assertions (_must_not_decode) to verify parse-prevention, making future regressions impossible to miss. All 59 unit tests are synthetic with no external image dependencies.
 
-**Completed**: All 58 CV tests verified passing. Two files staged and committed to feat/cv-image-preprocessing (commit 563b6f3: 210 insertions, 38 deletions). Changes pushed to GitHub remote branch (updated 3700a6e..563b6f3). Security hardening for image preprocessing now live on remote.
+**Completed**: Fixed final P2 issue by: (1) adding MAX_IMAGE_BYTES constant (64 MB), (2) implementing _read_image_bytes() helper that reads at most MAX_IMAGE_BYTES + 1 bytes and rejects oversized files before Pillow/OpenCV, (3) adding regression test test_load_image_rejects_large_compressed_file_before_header_parse with monkeypatch sentinels. Committed 2 new commits: 57aa1ab (docs refresh, Claude settings for graphify integration) and a1063b6 (bounded read fix). Pushed to GitHub. All 4 PR review threads now marked resolved with commit references. Updated PR description to document all security fixes. Verified: 59 tests pass, imports clean, device detection functional, git whitespace check clean, working tree clean and in sync with remote.
 
-**Next Steps**: AGENTS.md remains unstaged and uncommitted. Clarify whether AGENTS.md changes should be included in next commit or deferred. Permission enforcement issue with git-manager may require settings adjustment to prevent future circular blocking.
+**Next Steps**: None — all 4 PR issues resolved and pushed. PR #2 is mergeable and ready for maintainer merge review. No active work in this task.
 
 
-Access 168k tokens of past work via get_observations([IDs]) or mem-search skill.
+Access 191k tokens of past work via get_observations([IDs]) or mem-search skill.
 </claude-mem-context>
