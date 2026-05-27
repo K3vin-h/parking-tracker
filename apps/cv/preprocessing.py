@@ -53,10 +53,9 @@ def _validate_image_dimensions(path: str) -> None:
     except FileNotFoundError as exc:
         logger.debug("Image path does not exist: path=%r", path)
         raise _image_load_error() from exc
-    except (UnidentifiedImageError, OSError):
-        # Let cv2.imread decide whether this is a supported image. Keeping this
-        # fallback avoids rejecting formats OpenCV may support differently.
-        return
+    except (UnidentifiedImageError, OSError) as exc:
+        logger.debug("Could not inspect image dimensions for path=%r", path)
+        raise _image_load_error() from exc
 
     if width * height > MAX_IMAGE_PIXELS:
         raise ValueError(
@@ -97,8 +96,8 @@ def load_image(path: str) -> np.ndarray:
         logger.debug("cv2.imread returned None for path=%r", path)
         raise _image_load_error()
 
-    # Keep a post-decode guard as defense in depth for any image format whose
-    # dimensions could not be inspected by Pillow but was decoded by OpenCV.
+    # Keep a post-decode guard as defense in depth in case metadata and decoded
+    # array dimensions ever disagree.
     h, w = img.shape[:2]
     if h * w > MAX_IMAGE_PIXELS:
         raise ValueError(

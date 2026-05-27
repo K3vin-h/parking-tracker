@@ -125,8 +125,8 @@ def test_load_image_rejects_oversized_image_before_decoding(tmp_path, monkeypatc
 
 
 @pytest.mark.unit
-def test_load_image_keeps_post_decode_size_guard(tmp_path, monkeypatch):
-    """The decoded-array guard remains as fallback when headers are unavailable."""
+def test_load_image_rejects_uninspectable_image_before_decoding(tmp_path, monkeypatch):
+    """Files whose dimensions cannot be inspected must fail before cv2.imread."""
     img_path = str(tmp_path / "huge.raw")
     img_path_obj = tmp_path / "huge.raw"
     img_path_obj.write_bytes(b"fake image bytes")
@@ -134,14 +134,13 @@ def test_load_image_keeps_post_decode_size_guard(tmp_path, monkeypatch):
     def fake_open(path):
         raise OSError("unsupported header")
 
-    def fake_imread(path):
-        assert path == img_path
-        return np.zeros((3001, 4001, 3), dtype=np.uint8)
+    def fail_if_decoded(path):
+        raise AssertionError("cv2.imread should not run for uninspectable images")
 
     monkeypatch.setattr("apps.cv.preprocessing.Image.open", fake_open)
-    monkeypatch.setattr(cv2, "imread", fake_imread)
+    monkeypatch.setattr(cv2, "imread", fail_if_decoded)
 
-    with pytest.raises(ValueError, match="exceed"):
+    with pytest.raises(FileNotFoundError, match="Could not load the image"):
         load_image(img_path)
 
 
