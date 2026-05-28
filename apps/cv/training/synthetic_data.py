@@ -26,7 +26,16 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
+from apps.cv.training._image_io import safe_open_image
+
 logger = logging.getLogger(__name__)
+
+# Upper bounds for caller-supplied generation parameters. A typo such as
+# n=1_000_000_000 would otherwise silently exhaust the disk before any
+# obvious failure mode triggers; capping here turns the typo into an
+# immediate, descriptive ValueError.
+_MAX_SAMPLES = 1_000_000
+_MAX_TARGET_DIM = 4096
 
 # ── Character sets ────────────────────────────────────────────────────────────
 
@@ -62,7 +71,7 @@ _BG_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 
 # ── Background file collection (cached per bg_dir to avoid 10k dir scans) ────
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=8)
 def _collect_bg_files(bg_dir: Path) -> tuple[Path, ...]:
     """
     Scan bg_dir once and cache the result for the lifetime of the process.
@@ -70,10 +79,20 @@ def _collect_bg_files(bg_dir: Path) -> tuple[Path, ...]:
     generate_detector_dataset calls composite_on_background once per sample;
     without caching this would scan the directory 10,000+ times per run.
     lru_cache does not cache exceptions, so a missing dir is re-checked each call.
+    maxsize=8 covers the realistic number of distinct background directories a
+    single process touches (typically one) without growing unboundedly if a
+    caller passes a fresh Path object each call.
+
+    Results are sorted so that ``random.choice`` is reproducible across
+    machines once ``random.seed`` is set — ``Path.iterdir`` returns files
+    in filesystem-dependent order, which would otherwise leak into the
+    sampling decision even under a fixed seed.
     """
     if not bg_dir.exists():
         raise FileNotFoundError("Background directory not found.")
-    files = tuple(p for p in bg_dir.iterdir() if p.suffix.lower() in _BG_EXTENSIONS)
+    files = tuple(
+        sorted(p for p in bg_dir.iterdir() if p.suffix.lower() in _BG_EXTENSIONS)
+    )
     if not files:
         raise FileNotFoundError("No .jpg/.png images found in background directory.")
     return files
@@ -81,22 +100,36 @@ def _collect_bg_files(bg_dir: Path) -> tuple[Path, ...]:
 
 # ── Font loading (cached so 50k render calls don't reload from disk) ──────────
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=16)
 def _load_font(size: int = _FONT_SIZE) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     """
     Load the bundled TrueType plate font; fall back to PIL default if absent.
 
     The LRU cache means the font file is opened once per Python process regardless
     of how many plates are generated. Caching on `size` so different sizes don't
-    trample each other if callers vary the parameter.
+    trample each other if callers vary the parameter; maxsize=16 is plenty for
+    the small number of distinct sizes the pipeline ever uses.
+
+    Corrupt or unreadable font files fall through to the PIL default rather
+    than aborting the run — a degraded plate font is better than no training
+    data at all, and the warning makes the degradation visible.
     """
     if _FONT_PATH.exists():
-        return ImageFont.truetype(str(_FONT_PATH), size=size)
+        try:
+            return ImageFont.truetype(str(_FONT_PATH), size=size)
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "Plate font at %s could not be loaded (%s); "
+                "falling back to PIL default.",
+                _FONT_PATH,
+                exc,
+            )
+    else:
+        logger.warning(
+            "Plate font not found — using PIL default (lower fidelity). "
+            "See apps/cv/training/assets/README.md to install plate_font.ttf."
+        )
 
-    logger.warning(
-        "Plate font not found — using PIL default (lower fidelity). "
-        "See apps/cv/training/assets/README.md to install plate_font.ttf."
-    )
     # load_default(size=) accepted in Pillow 10+; fallback handles older builds.
     try:
         return ImageFont.load_default(size=size)
@@ -176,12 +209,18 @@ def render_plate_image(text: str, country: str) -> Image.Image:
 
     font = _load_font()
 
-    # Center text within the plate using textbbox (getsize removed in Pillow 10)
+    # Center text within the plate using textbbox (getsize removed in Pillow 10).
+    # textbbox returns the inked rectangle in canvas coordinates *including*
+    # any origin offset (bbox[0], bbox[1]) — TrueType side bearings and ascender
+    # padding mean bbox[0]/bbox[1] are often non-zero. Subtracting that offset
+    # back out is required because draw.text((x, y), ...) interprets (x, y) as
+    # the text's drawing origin, not the bbox top-left. Without the subtraction
+    # every plate would be shifted right and down by the font's bearing.
     bbox = draw.textbbox((0, 0), text, font=font)
     text_w = bbox[2] - bbox[0]
     text_h = bbox[3] - bbox[1]
-    x = (w - text_w) // 2
-    y = (h - text_h) // 2
+    x = (w - text_w) // 2 - bbox[0]
+    y = (h - text_h) // 2 - bbox[1]
 
     draw.text((x, y), text, fill=(10, 10, 10, 255), font=font)
     return img
@@ -217,18 +256,26 @@ def composite_on_background(
 
     Raises:
         FileNotFoundError: If bg_dir is missing or contains no valid images.
+        ValueError:        If target_size exceeds the configured per-dim cap,
+                           or if the chosen background fails format/pixel checks.
+        OSError:           If the chosen background file is corrupt/unreadable.
     """
+    tw, th = target_size
+    if tw <= 0 or th <= 0 or tw > _MAX_TARGET_DIM or th > _MAX_TARGET_DIM:
+        raise ValueError(
+            f"target_size {target_size} must be positive and "
+            f"<= {_MAX_TARGET_DIM} per dimension."
+        )
+
     bg_files = _collect_bg_files(bg_dir)  # cached; raises FileNotFoundError if missing
 
-    # Never log the chosen filename — prevents path leaks in production logs
+    # Never log the chosen filename — prevents path leaks in production logs.
+    # safe_open_image enforces pixel cap, format whitelist, and bomb protection;
+    # propagating its OSError/ValueError as-is preserves the real failure cause
+    # instead of masking it as FileNotFoundError.
     bg_path = random.choice(bg_files)
-    try:
-        bg = Image.open(bg_path).convert("RGBA")
-    except Exception:
-        raise FileNotFoundError("Could not open a background image.")
+    bg = safe_open_image(bg_path).convert("RGBA")
     bg = bg.resize(target_size, Image.LANCZOS)
-
-    tw, th = target_size
 
     # Scale plate so it occupies 15–40% of image width — realistic for parking cameras
     scale = random.uniform(0.15, 0.40)
@@ -266,10 +313,53 @@ def composite_on_background(
 
 # ── Dataset generation ────────────────────────────────────────────────────────
 
+def _validate_sample_count(n: int) -> None:
+    """Reject obviously-wrong sample counts before we touch the filesystem."""
+    if n <= 0:
+        raise ValueError(f"n must be positive, got {n}.")
+    if n > _MAX_SAMPLES:
+        raise ValueError(
+            f"n={n} exceeds the {_MAX_SAMPLES} sample cap. "
+            "Raise _MAX_SAMPLES intentionally if you really need more."
+        )
+
+
+def _seed_rng(seed: int | None) -> None:
+    """
+    Seed the global random module if a seed is supplied.
+
+    A seed parameter is the simplest reproducibility knob for callers; we
+    deliberately reach for the process-wide RNG (rather than a private
+    Random instance) because the helpers in this module — render, format
+    choice, composite — all use top-level ``random.*`` calls and threading
+    a local Random through every helper would be a much bigger refactor.
+    """
+    if seed is not None:
+        random.seed(seed)
+
+
+def _clear_existing(directory: Path, suffixes: tuple[str, ...]) -> None:
+    """
+    Delete previously-generated dataset files matching the given suffixes.
+
+    Without this, re-running with a smaller ``n`` leaves orphan files behind
+    that the Dataset classes will happily ingest at training time — silently
+    inflating the dataset and mixing labels across runs. Limiting the deletes
+    to a fixed suffix whitelist prevents collateral damage if the operator
+    points ``output_dir`` at a populated directory by mistake.
+    """
+    if not directory.exists():
+        return
+    for entry in directory.iterdir():
+        if entry.is_file() and entry.suffix.lower() in suffixes:
+            entry.unlink()
+
+
 def generate_detector_dataset(
     n: int = 10_000,
     output_dir: Path = Path("data/detector"),
     bg_dir: Path = Path("data/backgrounds"),
+    seed: int | None = None,
 ) -> None:
     """
     Generate n composite images with YOLO-format bounding-box labels.
@@ -281,18 +371,33 @@ def generate_detector_dataset(
     The YOLO format uses class index 0 for "license plate" and normalises all
     coordinates by the image dimensions so labels are resolution-independent.
 
+    Re-running with a smaller ``n`` clears any prior ``.jpg``/``.txt`` files in
+    the output directories first so the resulting dataset has exactly ``n``
+    samples — orphan files from a previous larger run would otherwise be
+    picked up by ``PlateDetectorDataset`` and pollute training.
+
     Args:
-        n:          Number of training samples to generate.
-        output_dir: Root output directory (created if missing, safe to re-run).
+        n:          Number of training samples to generate (1 .. 1_000_000).
+        output_dir: Root output directory (created if missing).
         bg_dir:     Directory of real background images.
+        seed:       Optional seed for ``random`` to make output reproducible.
+                    Note: this calls ``random.seed(seed)`` on the process-wide
+                    RNG, which affects any other code in the same process.
 
     Raises:
         FileNotFoundError: If bg_dir is missing or empty.
+        ValueError:        If n is outside [1, 1_000_000].
     """
+    _validate_sample_count(n)
+    _seed_rng(seed)
+
     img_dir = output_dir / "images"
     lbl_dir = output_dir / "labels"
     img_dir.mkdir(parents=True, exist_ok=True)
     lbl_dir.mkdir(parents=True, exist_ok=True)
+
+    _clear_existing(img_dir, (".jpg",))
+    _clear_existing(lbl_dir, (".txt",))
 
     for i in range(n):
         text, country = generate_plate_text()
@@ -317,6 +422,7 @@ def generate_detector_dataset(
 def generate_recognizer_dataset(
     n: int = 50_000,
     output_dir: Path = Path("data/recognizer"),
+    seed: int | None = None,
 ) -> None:
     """
     Generate n cropped plate images at 128×32 grayscale for recognizer training.
@@ -328,12 +434,27 @@ def generate_recognizer_dataset(
     Grayscale is used because plate text recognition is a shape-recognition task;
     colour carries no signal and reducing to 1 channel halves the feature space.
 
+    Re-running with a smaller ``n`` clears any prior ``.png`` files in the
+    output directory and rewrites ``labels.csv`` from scratch, so the resulting
+    dataset has exactly ``n`` samples — orphan PNGs from a previous larger run
+    would otherwise be picked up if the CSV were ever regenerated by hand.
+
     Args:
-        n:          Number of training samples to generate.
-        output_dir: Root output directory (created if missing, safe to re-run).
+        n:          Number of training samples to generate (1 .. 1_000_000).
+        output_dir: Root output directory (created if missing).
+        seed:       Optional seed for ``random`` to make output reproducible.
+                    Note: this calls ``random.seed(seed)`` on the process-wide
+                    RNG, which affects any other code in the same process.
+
+    Raises:
+        ValueError: If n is outside [1, 1_000_000].
     """
+    _validate_sample_count(n)
+    _seed_rng(seed)
+
     img_dir = output_dir / "images"
     img_dir.mkdir(parents=True, exist_ok=True)
+    _clear_existing(img_dir, (".png",))
 
     csv_path = output_dir / "labels.csv"
     with csv_path.open("w", newline="") as f:

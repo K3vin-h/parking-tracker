@@ -165,6 +165,53 @@ class TestPlateDetectorDataset:
         with pytest.raises(ValueError, match="Malformed label"):
             ds[0]
 
+    def test_missing_label_file_raises_descriptive_error(self, tmp_path: Path):
+        """
+        FileNotFoundError with the missing filename when the label is absent.
+
+        Regression guard: the previous code let ``Path.read_text`` raise a
+        bare ``[Errno 2]`` FileNotFoundError with no context about which
+        sample was the problem.
+        """
+        root = tmp_path / "det_no_label"
+        (root / "images").mkdir(parents=True)
+        (root / "labels").mkdir()
+        Image.new("RGB", (640, 480), (128, 128, 128)).save(
+            root / "images" / "000000.jpg"
+        )
+        ds = PlateDetectorDataset(root)
+        with pytest.raises(FileNotFoundError, match="000000"):
+            ds[0]
+
+    def test_symlinks_in_images_are_skipped(self, tmp_path: Path):
+        """
+        Symlinks under root/images/ must be excluded from the dataset.
+
+        A tampered dataset directory could otherwise expose arbitrary host
+        files as ``.jpg`` entries. The Dataset class strips them at __init__
+        time so subsequent ``__getitem__`` calls only see plain files.
+        """
+        root = tmp_path / "det_symlink"
+        (root / "images").mkdir(parents=True)
+        (root / "labels").mkdir()
+        # Plain file that should remain in the dataset
+        Image.new("RGB", (640, 480), (200, 200, 200)).save(
+            root / "images" / "real.jpg"
+        )
+        (root / "labels" / "real.txt").write_text("0 0.5 0.5 0.2 0.1\n")
+        # Symlink pointing at a file outside the dataset — must be dropped
+        outside = tmp_path / "outside.jpg"
+        Image.new("RGB", (640, 480), (10, 10, 10)).save(outside)
+        try:
+            (root / "images" / "linked.jpg").symlink_to(outside)
+        except (NotImplementedError, OSError):
+            pytest.skip("Filesystem does not support symlinks")
+
+        ds = PlateDetectorDataset(root)
+        assert len(ds) == 1
+        # Confirm the surviving sample is the real file, not the symlink
+        assert ds._samples[0].name == "real.jpg"
+
 
 # ── PlateRecognizerDataset ────────────────────────────────────────────────────
 

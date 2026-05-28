@@ -12,12 +12,8 @@ Augmentations are chosen to address the main sources of domain shift between
 synthetic training data and real parking-lot camera footage.
 """
 
-import logging
-
 import torch
 from torchvision.transforms import v2
-
-logger = logging.getLogger(__name__)
 
 
 class DetectorAugment:
