@@ -7,7 +7,6 @@ for both augmentation classes (ToImage + ToDtype must happen before augment).
 """
 import pytest
 import torch
-from torchvision.transforms import v2
 
 from apps.cv.training.augment import DetectorAugment, RecognizerAugment
 
@@ -62,16 +61,48 @@ class TestDetectorAugment:
         out = aug(img)
         assert not torch.allclose(out, img, atol=0.01)
 
-    def test_train_pipeline_has_horizontal_flip(self):
+    def test_train_pipeline_is_stochastic(self):
         """
-        Detector training must include RandomHorizontalFlip.
+        Train mode must produce different outputs under different seeds.
 
-        Plates approach from either direction, so the detector must learn to
-        find them regardless of horizontal orientation.
+        Stochasticity is what augmentation buys — if the train transform is
+        accidentally swapped for the eval transform, this test catches the
+        regression without depending on the internal v2.Compose structure.
         """
         aug = DetectorAugment(train=True)
-        transforms_list = getattr(aug._transform, "transforms", [])
-        assert any(isinstance(t, v2.RandomHorizontalFlip) for t in transforms_list)
+        img = _rgb()
+        torch.manual_seed(0)
+        out_a = aug(img)
+        torch.manual_seed(1)
+        out_b = aug(img)
+        assert not torch.allclose(out_a, out_b)
+
+    def test_train_pipeline_sometimes_flips(self):
+        """
+        Detector training must mix flipped and un-flipped samples.
+
+        Behavioural check for RandomHorizontalFlip: feed an image with a sharp
+        left/right brightness asymmetry (left half bright, right half dark) and
+        compare left-vs-right strip means across many seeds. Without a flip the
+        left strip dominates 100% of runs; with p=0.5 the distribution is
+        roughly 50/50. Asserting both outcomes appear within 40 seeds confirms
+        the flip is in the pipeline without inspecting v2 internals.
+        """
+        img = torch.zeros(3, 32, 64, dtype=torch.float32)
+        img[:, :, :32] = 1.0  # bright left half
+        aug = DetectorAugment(train=True)
+
+        left_dominant = 0
+        for seed in range(40):
+            torch.manual_seed(seed)
+            out = aug(img.clone())
+            if out[:, :, :32].mean() > out[:, :, 32:].mean():
+                left_dominant += 1
+
+        assert 5 < left_dominant < 35, (
+            f"Expected mixed flip behaviour over 40 seeds, got left-dominant "
+            f"in {left_dominant}/40 — RandomHorizontalFlip may not be firing."
+        )
 
 
 # ── RecognizerAugment ─────────────────────────────────────────────────────────
@@ -111,27 +142,45 @@ class TestRecognizerAugment:
         out = aug(img)
         assert torch.allclose(out, torch.zeros_like(out), atol=1e-5)
 
-    def test_no_horizontal_flip_in_train_pipeline(self):
+    def test_train_pipeline_never_flips(self):
         """
-        RecognizerAugment must NOT include RandomHorizontalFlip.
+        RecognizerAugment must never produce a horizontally mirrored image.
 
-        Mirrored plate text ("3BA 4DC") cannot be decoded by a left-to-right
-        sequence model and would corrupt the label during training.
+        Mirrored plate text ("3BA 4DC") is undecodable by a left-to-right CTC
+        sequence model and would corrupt the label. Behavioural check: feed a
+        sharply asymmetric image (left half bright) and assert the left strip
+        is always brighter than the right strip across many seeds. 16-px guard
+        bands at each end stay outside the ~20% spatial reach of
+        distortion_scale=0.2 RandomPerspective, so a flip is the only
+        transform that could invert this ordering.
         """
+        img = torch.zeros(1, 32, 128, dtype=torch.float32)
+        img[:, :, :64] = 1.0  # bright left half
         aug = RecognizerAugment(train=True)
-        transforms_list = getattr(aug._transform, "transforms", [])
-        for t in transforms_list:
-            assert not isinstance(t, v2.RandomHorizontalFlip), (
-                "RecognizerAugment must not contain RandomHorizontalFlip"
+
+        for seed in range(40):
+            torch.manual_seed(seed)
+            out = aug(img.clone())
+            left = out[:, :, :16].mean()
+            right = out[:, :, -16:].mean()
+            assert left > right, (
+                f"seed {seed}: right strip ({right.item():.3f}) is brighter than "
+                f"left strip ({left.item():.3f}) — a horizontal flip leaked into "
+                "the recognizer pipeline."
             )
 
-    def test_train_pipeline_has_perspective(self):
+    def test_train_pipeline_is_stochastic(self):
         """
-        Recognizer training must include RandomPerspective.
+        Recognizer training must produce varying output under different seeds.
 
-        Cameras are rarely perpendicular to the plate; perspective warp
-        teaches the recognizer to handle angled views.
+        Indirectly verifies that at least one stochastic transform
+        (ColorJitter / GaussianBlur / RandomPerspective) is active in the
+        train pipeline without depending on the internal v2.Compose layout.
         """
         aug = RecognizerAugment(train=True)
-        transforms_list = getattr(aug._transform, "transforms", [])
-        assert any(isinstance(t, v2.RandomPerspective) for t in transforms_list)
+        img = _gray()
+        torch.manual_seed(0)
+        out_a = aug(img)
+        torch.manual_seed(1)
+        out_b = aug(img)
+        assert not torch.allclose(out_a, out_b)

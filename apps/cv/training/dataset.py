@@ -31,9 +31,10 @@ import string
 from pathlib import Path
 
 import torch
-from PIL import Image
 from torch.utils.data import Dataset
 from torchvision.transforms import v2
+
+from apps.cv.training._image_io import safe_open_image
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +143,12 @@ class PlateDetectorDataset(Dataset):
         self._lbl_dir = root / "labels"
         self._transform = transform or _DETECTOR_DEFAULT_TRANSFORM
 
-        self._samples: list[Path] = sorted(self._img_dir.glob("*.jpg"))
+        # Skip symlinks: a tampered dataset directory could otherwise point
+        # individual ".jpg" entries at arbitrary host files. Real images
+        # produced by generate_detector_dataset are plain files.
+        self._samples: list[Path] = sorted(
+            p for p in self._img_dir.glob("*.jpg") if not p.is_symlink()
+        )
         if not self._samples:
             raise ValueError("No .jpg images found in dataset root/images/.")
 
@@ -159,12 +165,19 @@ class PlateDetectorDataset(Dataset):
         img_path = self._samples[idx]
         lbl_path = self._lbl_dir / (img_path.stem + ".txt")
 
-        img = Image.open(img_path).convert("RGB")
+        img = safe_open_image(img_path).convert("RGB")
         img_t: torch.Tensor = self._transform(img)
 
         # YOLO label format: "class cx cy w h" — validate before use so a malformed
         # or poisoned label file fails loudly here rather than silently corrupting
         # training with a wrong-shape tensor or a cryptic DataLoader worker crash.
+        # An explicit existence check produces a descriptive error naming the
+        # missing file rather than the bare "[Errno 2]" trace from read_text.
+        if not lbl_path.exists():
+            raise FileNotFoundError(
+                f"Label file {lbl_path.name} is missing for image "
+                f"{img_path.name}. Every image must have a paired label."
+            )
         parts = lbl_path.read_text().strip().split()
         if len(parts) != 5:
             raise ValueError(
@@ -202,7 +215,7 @@ class PlateRecognizerDataset(Dataset):
 
         csv_path = root / "labels.csv"
         if not csv_path.exists():
-            raise FileNotFoundError(f"labels.csv not found in dataset root.")
+            raise FileNotFoundError("labels.csv not found in dataset root.")
 
         self._img_dir = root / "images"
         # Resolve once at init for cheap path-traversal checks in __getitem__
@@ -238,7 +251,7 @@ class PlateRecognizerDataset(Dataset):
                 "labels.csv contains a path that escapes the dataset directory."
             )
 
-        img = Image.open(img_path)
+        img = safe_open_image(img_path)
         img_t: torch.Tensor = self._transform(img)
 
         # Spaces are intentionally excluded (no visual signal for the recognizer).

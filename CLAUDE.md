@@ -19,12 +19,13 @@ See `PLAN.md` for the complete architecture, 12-day work plan, and verification 
 | CV device auto-detection | Done | `apps/cv/utils/device.py` |
 | CV image preprocessing | Done | `apps/cv/preprocessing.py` (61 tests) |
 | Plate detector / recognizer models | Planned | `PLAN.md` — not in repo yet |
-| Training scripts + synthetic data | Planned | `apps/cv/training/` — not in repo yet |
+| Synthetic training data + augmentations + Datasets | Done | `apps/cv/training/synthetic_data.py`, `augment.py`, `dataset.py` |
+| Training scripts (`train_detector.py`, `train_recognizer.py`) | Planned | `apps/cv/training/` — not in repo yet |
 | Session/billing services | Planned | `apps/parking/services.py` — not in repo yet |
 | Dashboard views + HTMX UI | Planned | `apps/dashboard/views.py` is placeholder |
 | REST API (`/api/upload/`, etc.) | Planned | `apps/dashboard/api.py` — not in repo yet |
 
-Current branch focus: **none** — foundation + CV preprocessing merged into `main`. Next: plate detector/recognizer models.
+Current branch focus: **`feat/synthetic-training-data-pipeline`** — synthetic data + augmentation + Dataset classes; next: plate detector/recognizer models.
 
 ## Commands
 
