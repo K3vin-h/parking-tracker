@@ -17,14 +17,15 @@ See `PLAN.md` for the complete architecture, 12-day work plan, and verification 
 | Admin + model tests + auth tests | Done | `apps/*/admin.py`, `apps/*/tests/` |
 | Seed data command | Done | `apps/parking/management/commands/setup_defaults.py` |
 | CV device auto-detection | Done | `apps/cv/utils/device.py` |
-| CV image preprocessing | Done | `apps/cv/preprocessing.py` (58 tests) |
+| CV image preprocessing | Done | `apps/cv/preprocessing.py` (61 tests) |
 | Plate detector / recognizer models | Planned | `PLAN.md` — not in repo yet |
-| Training scripts + synthetic data | Planned | `apps/cv/training/` — not in repo yet |
+| Synthetic training data + augmentations + Datasets | Done | `apps/cv/training/synthetic_data.py`, `augment.py`, `dataset.py` |
+| Training scripts (`train_detector.py`, `train_recognizer.py`) | Planned | `apps/cv/training/` — not in repo yet |
 | Session/billing services | Planned | `apps/parking/services.py` — not in repo yet |
 | Dashboard views + HTMX UI | Planned | `apps/dashboard/views.py` is placeholder |
 | REST API (`/api/upload/`, etc.) | Planned | `apps/dashboard/api.py` — not in repo yet |
 
-Current branch focus: **none** — `feat/cv-image-preprocessing` is complete and pending merge into `feat/django-project-foundation-docker-postgresql-models`.
+Current branch focus: **`feat/synthetic-training-data-pipeline`** — synthetic data + augmentation + Dataset classes; next: plate detector/recognizer models.
 
 ## Commands
 
@@ -77,7 +78,7 @@ python apps/cv/training/train_recognizer.py --epochs 100 --data-dir data/recogni
 
 ### CV Pipeline Flow
 
-**Implemented today** (`apps/cv/preprocessing.py`):
+**Implemented** (`apps/cv/preprocessing.py`):
 
 ```
 path → load_image() → bgr_to_rgb() → resize_for_detector(640×480)
