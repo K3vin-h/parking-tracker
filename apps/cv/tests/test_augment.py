@@ -104,6 +104,35 @@ class TestDetectorAugment:
             f"in {left_dominant}/40 — RandomHorizontalFlip may not be firing."
         )
 
+    def test_train_pipeline_flips_bbox_with_image(self):
+        """
+        Detector horizontal flips must mirror the YOLO bbox centre.
+
+        A plate at cx=0.25 moves to cx=0.75 after a horizontal image flip. This
+        guards against image-only detector augmentation that trains against a
+        target on the wrong side of the image.
+        """
+        img = torch.zeros(3, 32, 64, dtype=torch.float32)
+        img[:, :, :32] = 1.0  # bright left half
+        bbox = torch.tensor([0.25, 0.5, 0.2, 0.1], dtype=torch.float32)
+        aug = DetectorAugment(train=True)
+
+        saw_flipped = False
+        saw_unflipped = False
+        for seed in range(40):
+            torch.manual_seed(seed)
+            out_img, out_bbox = aug(img.clone(), bbox.clone())
+            left_is_brighter = out_img[:, :, :32].mean() > out_img[:, :, 32:].mean()
+            if left_is_brighter:
+                saw_unflipped = True
+                assert torch.allclose(out_bbox, bbox)
+            else:
+                saw_flipped = True
+                expected = torch.tensor([0.75, 0.5, 0.2, 0.1], dtype=torch.float32)
+                assert torch.allclose(out_bbox, expected)
+
+        assert saw_flipped and saw_unflipped
+
 
 # ── RecognizerAugment ─────────────────────────────────────────────────────────
 
