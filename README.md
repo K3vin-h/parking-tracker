@@ -129,14 +129,14 @@ flowchart TD
 
     LOAD["load_image()"]
     BGR["bgr_to_rgb()"]
-    RESIZE["resize_for_detector() — 640 × 480"]
-    NORM["normalize_pixels() — 0.0 to 1.0"]
-    TENSOR["to_tensor() — CHW tensor"]
+    RESIZE["resize_for_detector()"]
+    NORM["normalize_pixels()"]
+    TENSOR["to_tensor()"]
 
     DETECTOR(["PlateDetectorCNN"])
 
     CROP["crop_plate_region()"]
-    PREP["prepare_for_recognizer() — 128 × 32 gray"]
+    PREP["prepare_for_recognizer()"]
 
     RECOG(["PlateRecognizerCRNN"])
 
