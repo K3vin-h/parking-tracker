@@ -19,6 +19,7 @@ learns to find plates against realistic clutter.
 
 import csv
 import logging
+import math
 import random
 import string
 from functools import lru_cache
@@ -29,6 +30,10 @@ from PIL import Image, ImageDraw, ImageFont
 from apps.cv.training._image_io import safe_open_image
 
 logger = logging.getLogger(__name__)
+
+# Module-private RNG — isolated from the process-wide ``random`` module so
+# seeding here does not affect reproducibility of other code (tests, workers).
+_rng = random.Random()
 
 # Upper bounds for caller-supplied generation parameters. A typo such as
 # n=1_000_000_000 would otherwise silently exhaust the disk before any
@@ -91,7 +96,10 @@ def _collect_bg_files(bg_dir: Path) -> tuple[Path, ...]:
     if not bg_dir.exists():
         raise FileNotFoundError("Background directory not found.")
     files = tuple(
-        sorted(p for p in bg_dir.iterdir() if p.suffix.lower() in _BG_EXTENSIONS)
+        sorted(
+            p for p in bg_dir.iterdir()
+            if p.suffix.lower() in _BG_EXTENSIONS and not p.is_symlink()
+        )
     )
     if not files:
         raise FileNotFoundError("No .jpg/.png images found in background directory.")
@@ -144,9 +152,9 @@ def _apply_format(fmt: str) -> str:
     out = []
     for ch in fmt:
         if ch == "L":
-            out.append(random.choice(_LETTERS))
+            out.append(_rng.choice(_LETTERS))
         elif ch == "D":
-            out.append(random.choice(_DIGITS))
+            out.append(_rng.choice(_DIGITS))
         else:
             out.append(ch)
     return "".join(out)
@@ -166,12 +174,12 @@ def generate_plate_text(country: str = "random") -> tuple[str, str]:
         ValueError: For any country value other than "US", "CA", or "random".
     """
     if country == "random":
-        country = random.choice(["US", "CA"])
+        country = _rng.choice(["US", "CA"])
 
     if country == "US":
-        return _apply_format(random.choice(_US_FORMATS)), "US"
+        return _apply_format(_rng.choice(_US_FORMATS)), "US"
     if country == "CA":
-        return _apply_format(random.choice(_CA_FORMATS)), "CA"
+        return _apply_format(_rng.choice(_CA_FORMATS)), "CA"
 
     raise ValueError(f"Unknown country {country!r}. Must be 'US', 'CA', or 'random'.")
 
@@ -267,43 +275,48 @@ def composite_on_background(
             f"<= {_MAX_TARGET_DIM} per dimension."
         )
 
-    bg_files = _collect_bg_files(bg_dir)  # cached; raises FileNotFoundError if missing
+    bg_files = _collect_bg_files(bg_dir.resolve())  # resolve for consistent cache key
 
     # Never log the chosen filename — prevents path leaks in production logs.
     # safe_open_image enforces pixel cap, format whitelist, and bomb protection;
     # propagating its OSError/ValueError as-is preserves the real failure cause
     # instead of masking it as FileNotFoundError.
-    bg_path = random.choice(bg_files)
+    bg_path = _rng.choice(bg_files)
     bg = safe_open_image(bg_path).convert("RGBA")
     bg = bg.resize(target_size, Image.LANCZOS)
 
     # Scale plate so it occupies 15–40% of image width — realistic for parking cameras
-    scale = random.uniform(0.15, 0.40)
+    scale = _rng.uniform(0.15, 0.40)
     new_w = int(tw * scale)
     new_h = int(new_w * plate_img.height / plate_img.width)
     plate_scaled = plate_img.resize((new_w, new_h), Image.LANCZOS)
 
     # Rotate ±15°; expand=True grows the canvas to fit rotated corners without clipping
-    angle = random.uniform(-15, 15)
+    angle = _rng.uniform(-15, 15)
     plate_rotated = plate_scaled.rotate(
         angle, resample=Image.BICUBIC, expand=True, fillcolor=(0, 0, 0, 0)
     )
 
-    # pw, ph are the tight AABB of the rotated plate (Pillow expand=True computes
-    # the minimum bounding box of all four rotated corners). This IS the correct
-    # axis-aligned bbox for YOLO format — the transparent corners are outside the
-    # plate content but within the AABB, which is standard for detection labels.
-    pw, ph = plate_rotated.size
+    # Compute the tight AABB of the rotated plate content via the standard formula,
+    # explicit rather than reading plate_rotated.size (Pillow's expand=True uses
+    # ceil rounding and may add 1–2 px of canvas padding beyond the plate corners).
+    rad = math.radians(abs(angle))
+    pw = int(new_w * math.cos(rad) + new_h * math.sin(rad))
+    ph = int(new_w * math.sin(rad) + new_h * math.cos(rad))
+
+    # Use the actual canvas dimensions for placement bounds so the full rotated
+    # image (including any Pillow rounding pixels) always stays within the frame.
+    canvas_w, canvas_h = plate_rotated.size
 
     # Constrain placement so the plate stays fully within the image
-    max_x = tw - pw
-    max_y = th - ph
+    max_x = tw - canvas_w
+    max_y = th - canvas_h
     if max_x < 0 or max_y < 0:
         # Safety fallback: plate is larger than image (shouldn't happen at ≤40% scale)
-        x, y = max(0, (tw - pw) // 2), max(0, (th - ph) // 2)
+        x, y = max(0, (tw - canvas_w) // 2), max(0, (th - canvas_h) // 2)
     else:
-        x = random.randint(0, max_x)
-        y = random.randint(0, max_y)
+        x = _rng.randint(0, max_x)
+        y = _rng.randint(0, max_y)
 
     # Paste using the plate's own alpha channel as the transparency mask
     bg.paste(plate_rotated, (x, y), mask=plate_rotated)
@@ -326,16 +339,14 @@ def _validate_sample_count(n: int) -> None:
 
 def _seed_rng(seed: int | None) -> None:
     """
-    Seed the global random module if a seed is supplied.
+    Seed the module-private RNG instance if a seed is supplied.
 
-    A seed parameter is the simplest reproducibility knob for callers; we
-    deliberately reach for the process-wide RNG (rather than a private
-    Random instance) because the helpers in this module — render, format
-    choice, composite — all use top-level ``random.*`` calls and threading
-    a local Random through every helper would be a much bigger refactor.
+    Uses the module-level ``_rng`` (a ``random.Random`` instance) rather than
+    the process-wide ``random`` module, so seeding here does not affect other
+    code running in the same process (parallel workers, test suites).
     """
     if seed is not None:
-        random.seed(seed)
+        _rng.seed(seed)
 
 
 def _clear_existing(directory: Path, suffixes: tuple[str, ...]) -> None:
@@ -391,6 +402,9 @@ def generate_detector_dataset(
     _validate_sample_count(n)
     _seed_rng(seed)
 
+    output_dir = output_dir.resolve()  # canonicalize before any deletion
+    bg_dir = bg_dir.resolve()
+
     img_dir = output_dir / "images"
     lbl_dir = output_dir / "labels"
     img_dir.mkdir(parents=True, exist_ok=True)
@@ -399,24 +413,35 @@ def generate_detector_dataset(
     _clear_existing(img_dir, (".jpg",))
     _clear_existing(lbl_dir, (".txt",))
 
+    skip_count = 0
     for i in range(n):
-        text, country = generate_plate_text()
-        plate = render_plate_image(text, country)
-        composite, (x, y, w, h) = composite_on_background(plate, bg_dir)
+        try:
+            text, country = generate_plate_text()
+            plate = render_plate_image(text, country)
+            composite, (x, y, w, h) = composite_on_background(plate, bg_dir)
 
-        composite.save(img_dir / f"{i:06d}.jpg", quality=92)
+            composite.save(img_dir / f"{i:06d}.jpg", quality=92)
 
-        iw, ih = composite.size
-        cx = (x + w / 2) / iw
-        cy = (y + h / 2) / ih
-        nw = w / iw
-        nh = h / ih
-        (lbl_dir / f"{i:06d}.txt").write_text(
-            f"0 {cx:.6f} {cy:.6f} {nw:.6f} {nh:.6f}\n"
-        )
+            iw, ih = composite.size
+            cx = (x + w / 2) / iw
+            cy = (y + h / 2) / ih
+            nw = w / iw
+            nh = h / ih
+            (lbl_dir / f"{i:06d}.txt").write_text(
+                f"0 {cx:.6f} {cy:.6f} {nw:.6f} {nh:.6f}\n"
+            )
+        except (OSError, ValueError) as exc:
+            logger.warning("Detector dataset: skipping sample %d — %s", i, exc)
+            skip_count += 1
+            continue
 
         if (i + 1) % 1000 == 0:
             logger.info("Detector dataset: %d / %d generated", i + 1, n)
+
+    if skip_count:
+        logger.warning(
+            "Detector dataset: skipped %d / %d samples due to errors.", skip_count, n
+        )
 
 
 def generate_recognizer_dataset(
@@ -452,24 +477,42 @@ def generate_recognizer_dataset(
     _validate_sample_count(n)
     _seed_rng(seed)
 
+    output_dir = output_dir.resolve()  # canonicalize before any deletion
+
     img_dir = output_dir / "images"
     img_dir.mkdir(parents=True, exist_ok=True)
     _clear_existing(img_dir, (".png",))
 
     csv_path = output_dir / "labels.csv"
+    skip_count = 0
     with csv_path.open("w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["filename", "text", "country"])
 
         for i in range(n):
-            text, country = generate_plate_text()
-            plate = render_plate_image(text, country)
-            # Convert to grayscale and resize to recognizer input resolution
-            plate_gray = plate.convert("L").resize((128, 32), Image.LANCZOS)
+            try:
+                text, country = generate_plate_text()
+                plate = render_plate_image(text, country)
+                # Flatten RGBA onto white before converting to grayscale so the
+                # alpha channel is not misinterpreted as black in the luminance
+                # formula (safe now since alpha=255, but prevents a silent bug
+                # if render_plate_image ever adds partial transparency).
+                white_bg = Image.new("RGB", plate.size, (255, 255, 255))
+                white_bg.paste(plate, mask=plate.split()[3])
+                plate_gray = white_bg.convert("L").resize((128, 32), Image.LANCZOS)
 
-            filename = f"{i:06d}.png"
-            plate_gray.save(img_dir / filename)
-            writer.writerow([filename, text, country])
+                filename = f"{i:06d}.png"
+                plate_gray.save(img_dir / filename)
+                writer.writerow([filename, text, country])
+            except (OSError, ValueError) as exc:
+                logger.warning("Recognizer dataset: skipping sample %d — %s", i, exc)
+                skip_count += 1
+                continue
 
             if (i + 1) % 5000 == 0:
                 logger.info("Recognizer dataset: %d / %d generated", i + 1, n)
+
+    if skip_count:
+        logger.warning(
+            "Recognizer dataset: skipped %d / %d samples due to errors.", skip_count, n
+        )
