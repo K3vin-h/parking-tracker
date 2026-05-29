@@ -125,41 +125,30 @@ The CV logging system — records every entry and exit event from the CV pipelin
 
 ```mermaid
 flowchart TD
-    IMG(["📷 photo path"])
+    IMG(["photo path"])
 
-    subgraph A["① Load & Validate"]
-        LOAD["load_image()\nPath guard · format check · size cap"]
-    end
+    LOAD["load_image()"]
+    BGR["bgr_to_rgb()"]
+    RESIZE["resize_for_detector() — 640 × 480"]
+    NORM["normalize_pixels() — 0.0 to 1.0"]
+    TENSOR["to_tensor() — CHW tensor"]
 
-    subgraph B["② Preprocess for Detector"]
-        BGR["bgr_to_rgb()\nBGR → RGB"]
-        RESIZE["resize_for_detector()\n640 × 480 letterbox"]
-        NORM["normalize_pixels()\n0–255 → 0.0–1.0 float32"]
-        TENSOR["to_tensor()\nHWC → CHW tensor"]
-    end
+    DETECTOR(["PlateDetectorCNN"])
 
-    subgraph C["③ Plate Detection"]
-        DETECTOR["PlateDetectorCNN\nOutputs bounding box [x, y, w, h]"]
-    end
+    CROP["crop_plate_region()"]
+    PREP["prepare_for_recognizer() — 128 × 32 gray"]
 
-    subgraph D["④ Crop & Preprocess for Recognizer"]
-        CROP["crop_plate_region()\nCrop using bounding box"]
-        PREP["prepare_for_recognizer()\n128 × 32 grayscale tensor"]
-    end
+    RECOG(["PlateRecognizerCRNN"])
 
-    subgraph E["⑤ Plate Recognition"]
-        RECOG(["PlateRecognizerCRNN\nPlate text + confidence score"])
-    end
+    IMG --> LOAD --> BGR --> RESIZE --> NORM --> TENSOR --> DETECTOR --> CROP --> PREP --> RECOG
 
-    IMG --> LOAD
-    LOAD --> BGR
-    BGR --> RESIZE
-    RESIZE --> NORM
-    NORM --> TENSOR
-    TENSOR --> DETECTOR
-    DETECTOR --> CROP
-    CROP --> PREP
-    PREP --> RECOG
+    classDef preproc fill:#1e40af,stroke:#1d4ed8,color:#fff
+    classDef model fill:#6d28d9,stroke:#7c3aed,color:#fff
+    classDef io fill:#0f766e,stroke:#0d9488,color:#fff
+
+    class LOAD,BGR,RESIZE,NORM,TENSOR,CROP,PREP preproc
+    class DETECTOR,RECOG model
+    class IMG io
 ```
 
 <details>
