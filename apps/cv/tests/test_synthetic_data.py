@@ -389,6 +389,40 @@ class TestGenerateDetectorDataset:
         with pytest.raises(ValueError):
             generate_detector_dataset(n=2_000_000, output_dir=out, bg_dir=bg_dir)
 
+    def test_missing_background_dir_raises_before_output_creation(
+        self, tmp_path: Path
+    ):
+        """Missing backgrounds must not produce an empty detector dataset."""
+        out = tmp_path / "det_missing_bg"
+        with pytest.raises(FileNotFoundError):
+            generate_detector_dataset(
+                n=2,
+                output_dir=out,
+                bg_dir=tmp_path / "missing_backgrounds",
+            )
+        assert not out.exists()
+
+    def test_empty_background_dir_raises_before_output_creation(
+        self, tmp_path: Path
+    ):
+        """Empty backgrounds must not produce an empty detector dataset."""
+        out = tmp_path / "det_empty_bg"
+        empty_bg = tmp_path / "empty_backgrounds"
+        empty_bg.mkdir()
+        with pytest.raises(FileNotFoundError):
+            generate_detector_dataset(n=2, output_dir=out, bg_dir=empty_bg)
+        assert not out.exists()
+
+    def test_all_rejected_backgrounds_raise(self, tmp_path: Path):
+        """If every sample fails to load a background, generation must fail."""
+        out = tmp_path / "det_corrupt_bg"
+        bg_dir = tmp_path / "corrupt_backgrounds"
+        bg_dir.mkdir()
+        (bg_dir / "broken.jpg").write_bytes(b"not a valid jpeg")
+
+        with pytest.raises(OSError):
+            generate_detector_dataset(n=2, output_dir=out, bg_dir=bg_dir)
+
 
 # ── generate_recognizer_dataset ───────────────────────────────────────────────
 

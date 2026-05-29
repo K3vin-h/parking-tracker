@@ -403,6 +403,7 @@ def generate_detector_dataset(
 
     output_dir = output_dir.resolve()  # canonicalize before any deletion
     bg_dir = bg_dir.resolve()
+    _collect_bg_files(bg_dir)
 
     img_dir = output_dir / "images"
     lbl_dir = output_dir / "labels"
@@ -413,6 +414,8 @@ def generate_detector_dataset(
     _clear_existing(lbl_dir, (".txt",))
 
     skip_count = 0
+    generated_count = 0
+    last_error: OSError | ValueError | None = None
     for i in range(n):
         try:
             text, country = generate_plate_text()
@@ -429,9 +432,11 @@ def generate_detector_dataset(
             (lbl_dir / f"{i:06d}.txt").write_text(
                 f"0 {cx:.6f} {cy:.6f} {nw:.6f} {nh:.6f}\n"
             )
+            generated_count += 1
         except (OSError, ValueError) as exc:
             logger.warning("Detector dataset: skipping sample %d — %s", i, exc)
             skip_count += 1
+            last_error = exc
             continue
 
         if (i + 1) % 1000 == 0:
@@ -441,6 +446,8 @@ def generate_detector_dataset(
         logger.warning(
             "Detector dataset: skipped %d / %d samples due to errors.", skip_count, n
         )
+    if generated_count == 0 and last_error is not None:
+        raise last_error
 
 
 def generate_recognizer_dataset(
