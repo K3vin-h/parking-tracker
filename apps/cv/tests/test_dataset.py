@@ -12,6 +12,7 @@ import pytest
 import torch
 from PIL import Image
 
+from apps.cv.training.augment import RecognizerAugment
 from apps.cv.training.dataset import (
     BLANK_IDX,
     CHAR_TO_IDX,
@@ -161,6 +162,27 @@ class TestPlateDetectorDataset:
         _make_detector_root(root, n=1)
         # Overwrite the label with malformed content
         list((root / "labels").glob("*.txt"))[0].write_text("0 0.5 0.5\n")
+        ds = PlateDetectorDataset(root)
+        with pytest.raises(ValueError, match="Malformed label"):
+            ds[0]
+
+    @pytest.mark.parametrize("label", [
+        "1 0.5 0.5 0.2 0.1\n",
+        "0 nan 0.5 0.2 0.1\n",
+        "0 inf 0.5 0.2 0.1\n",
+        "0 -0.1 0.5 0.2 0.1\n",
+        "0 1.1 0.5 0.2 0.1\n",
+        "0 0.5 0.5 0.0 0.1\n",
+        "0 0.5 0.5 0.2 -0.1\n",
+        "0 0.5 0.5 1.2 0.1\n",
+    ])
+    def test_invalid_bbox_values_raise_value_error(
+        self, tmp_path: Path, label: str
+    ):
+        """Detector labels must be finite normalized YOLO boxes."""
+        root = tmp_path / "det_invalid_bbox"
+        _make_detector_root(root, n=1)
+        (root / "labels" / "000000.txt").write_text(label)
         ds = PlateDetectorDataset(root)
         with pytest.raises(ValueError, match="Malformed label"):
             ds[0]
@@ -332,6 +354,36 @@ class TestPlateRecognizerDataset:
         ds = PlateRecognizerDataset(root)
         with pytest.raises(ValueError, match="escapes the dataset directory"):
             ds[0]
+
+    def test_custom_transform_runs_after_default_tensor_conversion(
+        self, tmp_path: Path
+    ):
+        """
+        Recognizer transforms should receive grayscale float tensors, not PIL images.
+        """
+        root = tmp_path / "rec_transform_order"
+        _make_recognizer_root(root, n=1)
+
+        class AssertTensorTransform:
+            def __call__(self, image: torch.Tensor) -> torch.Tensor:
+                assert isinstance(image, torch.Tensor)
+                assert image.shape == (1, 32, 128)
+                assert image.dtype == torch.float32
+                assert image.min() >= 0.0 and image.max() <= 1.0
+                return image + 1.0
+
+        img, _ = PlateRecognizerDataset(root, transform=AssertTensorTransform())[0]
+        assert img.min() >= 1.0
+
+    def test_recognizer_augment_can_be_used_as_dataset_transform(
+        self, tmp_path: Path
+    ):
+        """RecognizerAugment should compose after default tensor conversion."""
+        root = tmp_path / "rec_aug_transform"
+        _make_recognizer_root(root, n=1)
+        img, _ = PlateRecognizerDataset(root, transform=RecognizerAugment(train=False))[0]
+        assert img.shape == (1, 32, 128)
+        assert img.dtype == torch.float32
 
 
 # ── ctc_collate_fn ────────────────────────────────────────────────────────────
