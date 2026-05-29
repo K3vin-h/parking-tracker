@@ -124,16 +124,42 @@ The CV logging system — records every entry and exit event from the CV pipelin
 ## CV Pipeline
 
 ```mermaid
-flowchart LR
-    IMG([photo path]) --> LOAD[load_image]
-    LOAD --> BGR[bgr_to_rgb]
-    BGR --> RESIZE[resize_for_detector]
-    RESIZE --> NORM[normalize_pixels]
-    NORM --> TENSOR[to_tensor]
-    TENSOR --> DETECTOR[PlateDetectorCNN]
-    DETECTOR --> CROP[crop_plate_region]
-    CROP --> PREP[prepare_for_recognizer]
-    PREP --> RECOG([PlateRecognizerCRNN])
+flowchart TD
+    IMG(["📷 photo path"])
+
+    subgraph A["① Load & Validate"]
+        LOAD["load_image()\nPath guard · format check · size cap"]
+    end
+
+    subgraph B["② Preprocess for Detector"]
+        BGR["bgr_to_rgb()\nBGR → RGB"]
+        RESIZE["resize_for_detector()\n640 × 480 letterbox"]
+        NORM["normalize_pixels()\n0–255 → 0.0–1.0 float32"]
+        TENSOR["to_tensor()\nHWC → CHW tensor"]
+    end
+
+    subgraph C["③ Plate Detection"]
+        DETECTOR["PlateDetectorCNN\nOutputs bounding box [x, y, w, h]"]
+    end
+
+    subgraph D["④ Crop & Preprocess for Recognizer"]
+        CROP["crop_plate_region()\nCrop using bounding box"]
+        PREP["prepare_for_recognizer()\n128 × 32 grayscale tensor"]
+    end
+
+    subgraph E["⑤ Plate Recognition"]
+        RECOG(["PlateRecognizerCRNN\nPlate text + confidence score"])
+    end
+
+    IMG --> LOAD
+    LOAD --> BGR
+    BGR --> RESIZE
+    RESIZE --> NORM
+    NORM --> TENSOR
+    TENSOR --> DETECTOR
+    DETECTOR --> CROP
+    CROP --> PREP
+    PREP --> RECOG
 ```
 
 <details>
