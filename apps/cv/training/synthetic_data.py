@@ -197,7 +197,7 @@ def render_plate_image(text: str, country: str) -> Image.Image:
         RGBA PIL Image of size PLATE_SIZE.
     """
     w, h = PLATE_SIZE
-    img = Image.new("RGBA", (w, h), (255, 255, 255, 255))
+    img = Image.new("RGBA", (w, h), (255, 255, 255, 255)) # White background, fully opaque
     draw = ImageDraw.Draw(img)
 
     if country == "CA":
@@ -217,7 +217,7 @@ def render_plate_image(text: str, country: str) -> Image.Image:
     # the text's drawing origin, not the bbox top-left. Without the subtraction
     # every plate would be shifted right and down by the font's bearing.
     bbox = draw.textbbox((0, 0), text, font=font)
-    text_w = bbox[2] - bbox[0]
+    text_w = bbox[2] - bbox[0] #bbox (left, top, right, bottom)
     text_h = bbox[3] - bbox[1]
     x = (w - text_w) // 2 - bbox[0]
     y = (h - text_h) // 2 - bbox[1]
