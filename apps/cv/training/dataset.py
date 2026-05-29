@@ -142,7 +142,7 @@ class PlateDetectorDataset(Dataset):
 
         self._img_dir = root / "images"
         self._lbl_dir = root / "labels"
-        self._transform = transform or _DETECTOR_DEFAULT_TRANSFORM
+        self._transform = transform
 
         # Skip symlinks: a tampered dataset directory could otherwise point
         # individual ".jpg" entries at arbitrary host files. Real images
@@ -166,9 +166,6 @@ class PlateDetectorDataset(Dataset):
         img_path = self._samples[idx]
         lbl_path = self._lbl_dir / (img_path.stem + ".txt")
 
-        img = safe_open_image(img_path).convert("RGB")
-        img_t: torch.Tensor = self._transform(img)
-
         # YOLO label format: "class cx cy w h" — validate before use so a malformed
         # or poisoned label file fails loudly here rather than silently corrupting
         # training with a wrong-shape tensor or a cryptic DataLoader worker crash.
@@ -185,6 +182,22 @@ class PlateDetectorDataset(Dataset):
                 f"Malformed label {lbl_path.name}: expected 5 fields, got {len(parts)}."
             )
         bbox = torch.tensor([float(v) for v in parts[1:]], dtype=torch.float32)
+
+        img = safe_open_image(img_path).convert("RGB")
+        img_t: torch.Tensor = _DETECTOR_DEFAULT_TRANSFORM(img)
+        if self._transform is not None:
+            try:
+                transformed = self._transform(img_t, bbox)
+            except TypeError as exc:
+                try:
+                    transformed = self._transform(img_t)
+                except TypeError:
+                    raise exc
+
+            if isinstance(transformed, tuple):
+                img_t, bbox = transformed
+            else:
+                img_t = transformed
 
         return img_t, bbox
 

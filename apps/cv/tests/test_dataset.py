@@ -212,6 +212,31 @@ class TestPlateDetectorDataset:
         # Confirm the surviving sample is the real file, not the symlink
         assert ds._samples[0].name == "real.jpg"
 
+    def test_detector_transform_can_update_bbox(self, tmp_path: Path):
+        """
+        Detector transforms may update labels alongside image geometry.
+
+        Regression guard for horizontal-flip augmentation: the dataset must not
+        discard a transform-updated bbox and return the original label.
+        """
+        root = tmp_path / "det_bbox_transform"
+        _make_detector_root(root, n=1)
+        (root / "labels" / "000000.txt").write_text(
+            "0 0.250000 0.500000 0.200000 0.100000\n"
+        )
+
+        class FlipWithBbox:
+            def __call__(self, image: torch.Tensor, bbox: torch.Tensor):
+                bbox = bbox.clone()
+                bbox[0] = 1.0 - bbox[0]
+                return torch.flip(image, dims=(-1,)), bbox
+
+        _, bbox = PlateDetectorDataset(root, transform=FlipWithBbox())[0]
+        assert torch.allclose(
+            bbox,
+            torch.tensor([0.75, 0.5, 0.2, 0.1], dtype=torch.float32),
+        )
+
 
 # ── PlateRecognizerDataset ────────────────────────────────────────────────────
 

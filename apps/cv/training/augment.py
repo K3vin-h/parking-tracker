@@ -24,7 +24,8 @@ class DetectorAugment:
         ColorJitter       — parking cameras vary in white balance and exposure
         RandomGrayscale   — some CCTV feeds are monochrome; 10% probability
         GaussianBlur      — simulates lens blur and compression artefacts
-        RandomHorizontalFlip — vehicles approach from either direction
+        Horizontal flip   — vehicles approach from either direction; updates
+                            YOLO [cx, cy, w, h] boxes when a bbox is supplied
         Normalize         — ImageNet statistics for compatibility with pre-trained backbones
 
     train=False: normalise only (no stochastic transforms during validation/inference).
@@ -38,13 +39,13 @@ class DetectorAugment:
     _STD = [0.229, 0.224, 0.225]
 
     def __init__(self, train: bool = True) -> None:
+        self._train = train
         normalize = v2.Normalize(mean=self._MEAN, std=self._STD)
 
         if train:
             self._transform = v2.Compose([
                 v2.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.3, hue=0.05),
                 v2.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0)),
-                v2.RandomHorizontalFlip(p=0.5),
                 # Normalize before RandomGrayscale: ImageNet mean/std applied to
                 # consistent 3-ch RGB. When grayscale fires, all three channels
                 # hold the same luma value — a valid normalized input for 3-ch
@@ -56,17 +57,34 @@ class DetectorAugment:
         else:
             self._transform = normalize
 
-    def __call__(self, image: torch.Tensor) -> torch.Tensor:
+    def __call__(
+        self,
+        image: torch.Tensor,
+        bbox: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
         Apply augmentation to a float32 image tensor in [0, 1].
 
         Args:
             image: Tensor of shape (3, H, W) in [0, 1].
+            bbox: Optional YOLO-format [cx, cy, w, h] tensor with normalised
+                  coordinates. When the train-time horizontal flip fires, cx is
+                  mirrored to keep the target aligned with the image.
 
         Returns:
-            Augmented tensor of the same shape.
+            Augmented tensor of the same shape, or (image, bbox) when bbox is
+            provided.
         """
-        return self._transform(image)
+        if self._train and torch.rand(()) < 0.5:
+            image = torch.flip(image, dims=(-1,))
+            if bbox is not None:
+                bbox = bbox.clone()
+                bbox[0] = 1.0 - bbox[0]
+
+        image = self._transform(image)
+        if bbox is None:
+            return image
+        return image, bbox
 
 
 class RecognizerAugment:
