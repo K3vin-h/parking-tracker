@@ -7,7 +7,6 @@ solid-colour background image in a tmp_path directory so the function has
 something to open without touching production assets.
 """
 import csv
-import random
 import string
 from pathlib import Path
 
@@ -18,6 +17,7 @@ from PIL import Image
 from apps.cv.training import _image_io
 from apps.cv.training.synthetic_data import (
     PLATE_SIZE,
+    _seed_rng,
     composite_on_background,
     generate_detector_dataset,
     generate_plate_text,
@@ -239,9 +239,9 @@ class TestCompositeOnBackground:
         Image.new("RGB", (640, 480), (0, 0, 255)).save(bg_dir / "b_blue.jpg")
         plate = render_plate_image("DET 111", "US")
 
-        random.seed(42)
+        _seed_rng(42)
         composite_a, bbox_a = composite_on_background(plate, bg_dir)
-        random.seed(42)
+        _seed_rng(42)
         composite_b, bbox_b = composite_on_background(plate, bg_dir)
 
         assert bbox_a == bbox_b
