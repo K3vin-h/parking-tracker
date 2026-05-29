@@ -235,7 +235,7 @@ If any check fails, the image is rejected and an error is logged. Otherwise, the
 Plates are generated for both Canadian and United States formats at 400×120 pixels. A few setup rules apply to the assets:
 
 - Background images and font files are cached to avoid reloading on each generation.
-- Background images must be `.jpg` or `.png`.
+- Background images must be `.jpg`, `.jpeg`, or `.png`.
 - The font must be a TrueType plate font — if the font file is missing or unreadable, Pillow's default font is used as a fallback.
 
 **How a synthetic image is built**
@@ -250,9 +250,66 @@ Plates are generated for both Canadian and United States formats at 400×120 pix
 Two builders use this process to produce the training datasets:
 
 - **Detector dataset** — generates 10,000 plate + background images by default. Before generating, any existing `.jpg` and `.txt` files in the output directory are deleted so re-runs do not mix data from previous runs. Images are saved to `data/detector/images` as `.jpg`. A corresponding `.txt` file is generated for each image in `data/detector/labels`, containing the bounding box in YOLO format: class index, normalized center x, normalized center y, normalized width, and normalized height (all values between 0 and 1).
-- **Recognizer dataset** — generates 50,000 plates by default; only the cropped plate images are saved, in grayscale. Before generating, any existing `.png` files in the output directory are deleted so re-runs do not mix data from previous runs. Plates are saved to `data/recognizer/images` as `.png`. A `labels.csv` file is also generated, containing the filename of the cropped plate image, the plate text, and the country.
+- **Recognizer dataset** — generates 50,000 plates by default; only the cropped plate images are saved, in grayscale. Before generating, any existing `.png` files in the output directory are deleted and `labels.csv` is rewritten from scratch so re-runs do not mix data from previous runs. Plates are saved to `data/recognizer/images` as `.png`. A `labels.csv` file is also generated, containing the filename of the cropped plate image, the plate text, and the country.
 
 Both functions accept an optional `seed` parameter to make the generated dataset reproducible across runs.
+
+### Loading training data — `apps/cv/training/dataset.py`
+
+After `synthetic_data.py` writes files under `data/detector/` and `data/recognizer/`, this module loads them for PyTorch training. Default transforms convert images to tensors with **pixel values in [0, 1]** (not the height/width indices).
+
+**Character encoding (recognizer only)**
+
+- `A→1` … `Z→26`, `0→27` … `9→36`
+- Index `0` is reserved for the CTC blank token
+- **Spaces are skipped** (not encoded)
+- Each `PlateRecognizerDataset` sample returns a **list** of indices; `ctc_collate_fn` builds the batch tensors (below)
+
+**`PlateDetectorDataset`** (`data/detector/`)
+
+1. At startup, scans `images/*.jpg` (skips symlinks) and pairs each file with `labels/<same-stem>.txt`.
+2. Each label file is one YOLO line: `0 cx cy w h`. The leading class `0` is dropped; the four floats are the box `[cx, cy, w, h]` (normalized between 0 and 1).
+3. `__getitem__` loads the JPG with `safe_open_image`, converts to an RGB tensor `(3, H, W)`, and returns `(image_tensor, bbox_tensor)` where `bbox_tensor` has shape `(4,)`.
+4. A `DataLoader` (e.g. batch size 32) uses **default collate** — not using `ctc_collate_fn`. It stacks batches to `(N, 3, H, W)` and `(N, 4)`.
+
+**`PlateRecognizerDataset`** (`data/recognizer/`)
+
+1. At startup, reads `labels.csv` (`filename`, `text`; `country` is stored but not returned per sample).
+2. `__getitem__` loads the matching PNG from `images/`, converts to a grayscale tensor `(1, 32, 128)`, encodes text to a list of indices (spaces skipped), and returns `(image_tensor, label_list)`.
+3. A `DataLoader` must set `collate_fn=ctc_collate_fn` because label lengths vary. For each batch it:
+   - Unzips the list of `(image, label_list)` pairs into separate image and label lists
+   - Stacks images with `torch.stack` → `(N, 1, 32, 128)`
+   - Concatenates all label lists into one 1D `targets` tensor
+   - Builds `target_lengths` (how many indices belong to each sample)
+   - Returns `{"images", "targets", "target_lengths"}` for CTC training
+
+### Augmentations — `apps/cv/training/augment.py`
+
+While the model is **learning**, we slightly change each training image (brighter, blurrier, flipped, and so on) so practice pictures feel more like real parking cameras. This file does **not** load images from disk — `dataset.py` does that first; augment only tweaks the numbers already in memory.
+
+**Two modes**
+
+- **`train=True`** — random changes each time (used during training).
+- **`train=False`** — no random changes; only **normalize** (rescales pixel numbers for the network). Used when checking accuracy.
+
+**Normalize** means: adjust each pixel with a fixed formula `(pixel - mean) / std` so the model gets inputs in the range it expects. This is not resizing the image.
+
+**Detector** (`DetectorAugment`) — full parking-lot photo, color:
+
+- Random brightness/contrast/color tweaks (different lighting).
+- Random slight blur.
+- 50% chance to flip the image left–right (car can come from either direction).
+- Sometimes turn the image grayscale (10% chance), like a black-and-white security camera.
+- Then normalize (ImageNet mean/std — standard for color models).
+
+**Recognizer** (`RecognizerAugment`) — small gray plate crop only:
+
+- Random brightness/contrast tweaks (faded or dirty plates).
+- Random slight blur.
+- 50% chance of a mild “angled camera” warp (not a full flip).
+- Then normalize (simple gray scale: mean 0.5, std 0.5).
+
+**Important:** the recognizer **never** flips the image horizontally. `"ABC 123"` backwards would not match the answer in `labels.csv`. The detector **can** flip because we only care where the plate is, not reading the text yet.
 
 ## Web Application
 

@@ -46,6 +46,7 @@ _CHARS: str = string.ascii_uppercase + string.digits   # A-Z then 0-9
 # Assign indices starting at 1 so index 0 is free for the CTC blank
 CHAR_TO_IDX: dict[str, int] = {ch: i + 1 for i, ch in enumerate(_CHARS)}
 IDX_TO_CHAR: dict[int, str] = {v: k for k, v in CHAR_TO_IDX.items()}
+#A->1, B->2, ... Z->26, 0->27, 1->28, ... 9->36
 
 VOCAB_SIZE: int = len(_CHARS) + 1  # 37
 
