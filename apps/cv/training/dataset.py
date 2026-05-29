@@ -189,7 +189,26 @@ class PlateDetectorDataset(Dataset):
             raise ValueError(
                 f"Malformed label {lbl_path.name}: expected 5 fields, got {len(parts)}."
             )
+        if parts[0] != "0":
+            raise ValueError(
+                f"Malformed label {lbl_path.name}: expected class index 0, got {parts[0]!r}."
+            )
         bbox = torch.tensor([float(v) for v in parts[1:]], dtype=torch.float32)
+        if not torch.isfinite(bbox).all():
+            raise ValueError(
+                f"Malformed label {lbl_path.name}: bbox coordinates must be finite."
+            )
+        cx, cy, w, h = bbox.tolist()
+        if not (
+            0.0 <= cx <= 1.0
+            and 0.0 <= cy <= 1.0
+            and 0.0 < w <= 1.0
+            and 0.0 < h <= 1.0
+        ):
+            raise ValueError(
+                f"Malformed label {lbl_path.name}: bbox must be normalized YOLO "
+                "[cx, cy, w, h] with center in [0, 1] and positive size <= 1."
+            )
 
         img = safe_open_image(img_path).convert("RGB")
         img_t: torch.Tensor = _DETECTOR_DEFAULT_TRANSFORM(img)
@@ -242,7 +261,7 @@ class PlateRecognizerDataset(Dataset):
         self._img_dir = root / "images"
         # Resolve once at init for cheap path-traversal checks in __getitem__
         self._img_dir_resolved = self._img_dir.resolve()
-        self._transform = transform or _RECOGNIZER_DEFAULT_TRANSFORM
+        self._transform = transform
 
         self._samples: list[tuple[str, str, str]] = []  # (filename, plate_text, country)
         with csv_path.open(newline="") as f:
@@ -287,7 +306,9 @@ class PlateRecognizerDataset(Dataset):
             )
 
         img = safe_open_image(img_path)
-        img_t: torch.Tensor = self._transform(img)
+        img_t: torch.Tensor = _RECOGNIZER_DEFAULT_TRANSFORM(img)
+        if self._transform is not None:
+            img_t = self._transform(img_t)
 
         # Spaces are intentionally excluded (no visual signal for the recognizer).
         # Any other unknown character is a data error — raise rather than silently
