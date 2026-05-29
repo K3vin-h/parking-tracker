@@ -67,6 +67,7 @@ AGENTS.md
 data/backgrounds/*
 !data/backgrounds/.gitkeep
 data/detector/
+data/detector_smoke/
 data/recognizer/
 
 # ── Bundled plate font (binary asset — download per assets/README.md) ─────────
