@@ -19,7 +19,6 @@ learns to find plates against realistic clutter.
 
 import csv
 import logging
-import math
 import random
 import string
 from functools import lru_cache
@@ -297,12 +296,12 @@ def composite_on_background(
         angle, resample=Image.BICUBIC, expand=True, fillcolor=(0, 0, 0, 0)
     )
 
-    # Compute the tight AABB of the rotated plate content via the standard formula,
-    # explicit rather than reading plate_rotated.size (Pillow's expand=True uses
-    # ceil rounding and may add 1–2 px of canvas padding beyond the plate corners).
-    rad = math.radians(abs(angle))
-    pw = int(new_w * math.cos(rad) + new_h * math.sin(rad))
-    ph = int(new_w * math.sin(rad) + new_h * math.cos(rad))
+    alpha_bbox = plate_rotated.getchannel("A").getbbox()
+    if alpha_bbox is None:
+        raise ValueError("plate_img must contain visible alpha pixels.")
+    plate_left, plate_top, plate_right, plate_bottom = alpha_bbox
+    pw = plate_right - plate_left
+    ph = plate_bottom - plate_top
 
     # Use the actual canvas dimensions for placement bounds so the full rotated
     # image (including any Pillow rounding pixels) always stays within the frame.
@@ -321,7 +320,7 @@ def composite_on_background(
     # Paste using the plate's own alpha channel as the transparency mask
     bg.paste(plate_rotated, (x, y), mask=plate_rotated)
 
-    return bg.convert("RGB"), [x, y, pw, ph]
+    return bg.convert("RGB"), [x + plate_left, y + plate_top, pw, ph]
 
 
 # ── Dataset generation ────────────────────────────────────────────────────────

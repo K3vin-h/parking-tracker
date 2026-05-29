@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from apps.cv.training import synthetic_data
 from apps.cv.training import _image_io
 from apps.cv.training.synthetic_data import (
     PLATE_SIZE,
@@ -276,6 +277,50 @@ class TestCompositeOnBackground:
         plate = render_plate_image("SIZ 000", "US")
         with pytest.raises(ValueError, match="target_size"):
             composite_on_background(plate, bg_dir, target_size=(8192, 8192))
+
+    def test_rotated_bbox_matches_visible_plate_pixels(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """
+        BBox origin must account for transparent padding added by rotate(expand=True).
+
+        Pillow expands the rotated canvas and offsets the visible plate within it.
+        The returned bbox should describe the visible pixels, not the padded canvas.
+        """
+        bg_colour = np.array([100, 149, 237], dtype=np.uint8)
+        bg_dir = tmp_path / "lossless_bg"
+        bg_dir.mkdir()
+        Image.new("RGB", (640, 480), tuple(int(v) for v in bg_colour)).save(
+            bg_dir / "bg.png"
+        )
+
+        class FixedRandom:
+            def choice(self, values):
+                return values[0]
+
+            def uniform(self, start, end):
+                if (start, end) == (0.15, 0.40):
+                    return 0.30
+                if (start, end) == (-15, 15):
+                    return 15
+                raise AssertionError(f"Unexpected uniform range: {(start, end)}")
+
+            def randint(self, start, end):
+                return 25 if start == 0 else end
+
+        monkeypatch.setattr(synthetic_data, "_rng", FixedRandom())
+        plate = Image.new("RGBA", PLATE_SIZE, (255, 0, 0, 255))
+
+        composite, (x, y, w, h) = composite_on_background(plate, bg_dir)
+        pixels = np.array(composite)
+        visible = np.any(pixels != bg_colour, axis=2)
+        ys, xs = np.where(visible)
+
+        assert (x, y) == (int(xs.min()), int(ys.min()))
+        assert (w, h) == (
+            int(xs.max() - xs.min() + 1),
+            int(ys.max() - ys.min() + 1),
+        )
 
 
 # ── generate_detector_dataset ─────────────────────────────────────────────────
