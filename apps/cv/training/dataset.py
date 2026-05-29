@@ -138,10 +138,12 @@ class PlateDetectorDataset(Dataset):
 
     def __init__(self, root: Path, transform=None) -> None:
         if not root.exists():
-            raise FileNotFoundError(f"Dataset root not found: {root.name}")
+            raise FileNotFoundError(f"Dataset root not found: {root}")
 
         self._img_dir = root / "images"
         self._lbl_dir = root / "labels"
+        if not self._lbl_dir.exists():
+            raise FileNotFoundError(f"Labels directory not found: {self._lbl_dir}")
         self._transform = transform
 
         # Skip symlinks: a tampered dataset directory could otherwise point
@@ -175,6 +177,12 @@ class PlateDetectorDataset(Dataset):
             raise FileNotFoundError(
                 f"Label file {lbl_path.name} is missing for image "
                 f"{img_path.name}. Every image must have a paired label."
+            )
+        lbl_size = lbl_path.stat().st_size
+        if lbl_size > 256:
+            raise ValueError(
+                f"Label file {lbl_path.name} is suspiciously large "
+                f"({lbl_size} bytes); expected ≤40 bytes for a YOLO bbox line."
             )
         parts = lbl_path.read_text().strip().split()
         if len(parts) != 5:
@@ -225,7 +233,7 @@ class PlateRecognizerDataset(Dataset):
 
     def __init__(self, root: Path, transform=None) -> None:
         if not root.exists():
-            raise FileNotFoundError(f"Dataset root not found: {root.name}")
+            raise FileNotFoundError(f"Dataset root not found: {root}")
 
         csv_path = root / "labels.csv"
         if not csv_path.exists():
@@ -236,11 +244,24 @@ class PlateRecognizerDataset(Dataset):
         self._img_dir_resolved = self._img_dir.resolve()
         self._transform = transform or _RECOGNIZER_DEFAULT_TRANSFORM
 
-        self._samples: list[tuple[str, str]] = []  # (filename, plate_text)
+        self._samples: list[tuple[str, str, str]] = []  # (filename, plate_text, country)
         with csv_path.open(newline="") as f:
             reader = csv.DictReader(f)
+            expected = {"filename", "text", "country"}
+            if not expected.issubset(set(reader.fieldnames or [])):
+                raise ValueError(
+                    f"labels.csv is missing required columns. "
+                    f"Expected {sorted(expected)}, got {reader.fieldnames}."
+                )
             for row in reader:
-                self._samples.append((row["filename"], row["text"]))
+                fn = (row.get("filename") or "").strip()
+                txt = (row.get("text") or "").strip()
+                country = (row.get("country") or "").strip()
+                if not fn or not txt:
+                    raise ValueError(
+                        f"labels.csv row {reader.line_num} has missing filename or text."
+                    )
+                self._samples.append((fn, txt, country))
 
         if not self._samples:
             raise ValueError("Dataset is empty: labels.csv has no data rows.")
@@ -255,7 +276,7 @@ class PlateRecognizerDataset(Dataset):
         image_tensor:   float32, shape (1, 32, 128), values in [0, 1].
         label_indices:  list[int] — CHAR_TO_IDX-encoded text, spaces excluded.
         """
-        filename, text = self._samples[idx]
+        filename, text, _country = self._samples[idx]
 
         # Guard against path traversal via a tampered labels.csv (e.g. filename
         # containing "../../../config/settings.py"). Resolve and check containment.
