@@ -17,15 +17,22 @@ See `PLAN.md` for the complete architecture, 12-day work plan, and verification 
 | Admin + model tests + auth tests | Done | `apps/*/admin.py`, `apps/*/tests/` |
 | Seed data command | Done | `apps/parking/management/commands/setup_defaults.py` |
 | CV device auto-detection | Done | `apps/cv/utils/device.py` |
-| CV image preprocessing | Done | `apps/cv/preprocessing.py` (61 tests) |
-| Plate detector / recognizer models | Planned | `PLAN.md` — not in repo yet |
+| CV image preprocessing | Done | `apps/cv/preprocessing.py` (~57 tests) |
+| Plate detector model (`PlateDetectorCNN`) | Done | `apps/cv/models/plate_detector.py` (17 tests) |
+| Plate recognizer model (`PlateRecognizerCRNN`) | Planned | `apps/cv/models/recognizer.py` — not in repo yet |
 | Synthetic training data + augmentations + Datasets | Done | `apps/cv/training/synthetic_data.py`, `augment.py`, `dataset.py` |
-| Training scripts (`train_detector.py`, `train_recognizer.py`) | Planned | `apps/cv/training/` — not in repo yet |
+| Dataset hardening (bbox + background dir validation) | Done | `dataset.py`, `synthetic_data.py` |
+| Detector training script (`train_detector.py`) | Done | `apps/cv/training/train_detector.py` |
+| Recognizer training script (`train_recognizer.py`) | Planned | `apps/cv/training/` — not in repo yet |
 | Session/billing services | Planned | `apps/parking/services.py` — not in repo yet |
 | Dashboard views + HTMX UI | Planned | `apps/dashboard/views.py` is placeholder |
 | REST API (`/api/upload/`, etc.) | Planned | `apps/dashboard/api.py` — not in repo yet |
 
-Current branch focus: **`feat/synthetic-training-data-pipeline`** — synthetic data + augmentation + Dataset classes; next: plate detector/recognizer models.
+Current open PRs:
+- **PR #4** — `feat/synthetic-training-data-pipeline` — synthetic data + augmentation + Dataset classes + review hardening
+- **PR #5** — `feat/plate-detection-cnn` — `PlateDetectorCNN` model + `train_detector.py` + 17 tests (base: PR #4 branch)
+
+Next: plate recognizer CRNN model + `train_recognizer.py` (Day 5).
 
 ## Commands
 
@@ -45,7 +52,7 @@ docker-compose exec web pytest
 # Run tests with coverage (accounts + parking gate only)
 docker-compose exec web pytest --cov=apps/accounts --cov=apps/parking --cov-fail-under=80
 
-# CV tests only (excluded from coverage gate)
+# CV tests only (~188 tests, excluded from coverage gate)
 docker-compose exec web pytest apps/cv/tests/ -v
 
 # Run a single test file
@@ -60,9 +67,13 @@ docker-compose exec web python manage.py cleanup_old_images --dry-run
 # Refresh knowledge graph after code changes (no API cost)
 graphify update .
 
-# Train CV models (run outside Docker, uses MPS on Apple Silicon) — not implemented yet
+# Generate synthetic training data locally (backgrounds required — see Training Data below)
+python -c "from apps.cv.training.synthetic_data import generate_detector_dataset; generate_detector_dataset('data/backgrounds', 'data/detector', n=1000)"
+python -c "from apps.cv.training.synthetic_data import generate_recognizer_dataset; generate_recognizer_dataset('data/recognizer', n=5000)"
+
+# Train CV models (run outside Docker, uses MPS on Apple Silicon)
 python apps/cv/training/train_detector.py --epochs 50 --data-dir data/detector --output apps/cv/weights/detector.pth
-python apps/cv/training/train_recognizer.py --epochs 100 --data-dir data/recognizer --output apps/cv/weights/recognizer.pth
+python apps/cv/training/train_recognizer.py --epochs 100 --data-dir data/recognizer --output apps/cv/weights/recognizer.pth  # not implemented yet
 ```
 
 ## Architecture
@@ -73,7 +84,7 @@ python apps/cv/training/train_recognizer.py --epochs 100 --data-dir data/recogni
 |-----|------|
 | `apps.accounts` | Custom `User(AbstractUser)` — no extra fields |
 | `apps.parking` | Models, admin, `setup_defaults`; **services/billing** planned in `services.py` |
-| `apps.cv` | Preprocessing + device utils (done); models/training/inference planned |
+| `apps.cv` | Preprocessing, device utils, synthetic data, augment, datasets, `PlateDetectorCNN`, `train_detector.py` (done); recognizer model/training/inference pipeline planned |
 | `apps.dashboard` | URL config stub; views/API/templates planned Days 8–10 |
 
 ### CV Pipeline Flow
@@ -94,17 +105,49 @@ Public functions: `load_image`, `bgr_to_rgb`, `resize_for_detector`, `normalize_
 - Max 12 MP (`4000×3000`); rejects decompression bombs and uninspectable headers
 - OpenCV decode only after validation; generic `FileNotFoundError` to callers (no path leaks)
 
+**Implemented** (`apps/cv/models/plate_detector.py`):
+
+```
+… → PlateDetectorCNN → [cx, cy, w, h] bbox (normalised 0–1)
+```
+
+- 3-block CNN (conv+BN+ReLU+MaxPool) → `AdaptiveAvgPool2d(4×4)` → FC 2048→256→4
+- `forward()` applies sigmoid internally — training and inference share the same output space
+- `predict(x)` wraps `forward()` under `@no_grad`; caller sets `model.eval()` for determinism
+- Trained with `SmoothL1Loss` + Adam + `ReduceLROnPlateau` via `train_detector.py`
+- Target: >0.7 IoU on synthetic validation data after 50 epochs
+
 **Planned** (see `PLAN.md`):
 
 ```
-… → PlateDetectorCNN → crop → PlateRecognizerCRNN → plate_text + confidence
+bbox → crop → PlateRecognizerCRNN → plate_text + confidence
 ```
 
-- Detector: CNN → `[x, y, w, h]` bounding box (Smooth L1 loss)
 - Recognizer: CNN backbone + Bidirectional LSTM + CTC loss → plate text
 - Weights live in `apps/cv/weights/` (gitignored)
 - Device auto-detect: MPS → CUDA → CPU (`apps/cv/utils/device.py`)
-- CTC loss may need CPU fallback on MPS — training scripts will handle this
+- CTC loss may need CPU fallback on MPS — recognizer training script will handle this
+
+### Training Data (local, gitignored)
+
+Datasets are generated at runtime, not committed. See `.gitignore` for paths.
+
+| Path | Purpose |
+|------|---------|
+| `data/backgrounds/` | Curated parking-lot photos for detector compositing (must exist before `generate_detector_dataset`) |
+| `data/detector/` | YOLO-format detector set (`images/`, `labels/`) |
+| `data/recognizer/` | Recognizer crops + `labels.csv` |
+| `data/detector_smoke/` | Small local smoke output (10 samples) |
+
+`generate_detector_dataset()` raises if the background directory is missing or has no decodable images — it will not silently produce an empty dataset.
+
+**Dataset classes** (`apps/cv/training/dataset.py`):
+
+- `PlateDetectorDataset` — image + normalised YOLO bbox `[cx, cy, w, h]`; rejects malformed/out-of-range labels
+- `PlateRecognizerDataset` — grayscale crop + encoded label; use `ctc_collate_fn` in DataLoader
+- `CHAR_TO_IDX` / `VOCAB_SIZE=37` — shared CTC encoding (blank at index 0)
+
+**Augmentation** (`apps/cv/training/augment.py`): `DetectorAugment`, `RecognizerAugment` — compose with dataset transforms via `torchvision.transforms.v2.Compose([augment, dataset_transform])`.
 
 ### Session Logic (planned — `apps/parking/services.py`)
 
@@ -157,11 +200,17 @@ Django templates + HTMX + Chart.js. No Node.js, no React.
 
 ## graphify
 
-This project has a knowledge graph at `graphify-out/` (596 nodes, 717 edges as of 2026-05-26). Open `graphify-out/graph.html` in a browser for the interactive tree.
+This project has a knowledge graph at `graphify-out/` (**885 nodes, 1178 edges** as of 2026-05-29, built from `c4ca70e`). Open `graphify-out/graph.html` in a browser for the interactive tree.
 
-**God nodes (highest connectivity):** `load_image()`, `make_bgr_image()`, `make_rgb_image()`, preprocessing helpers, core Django models.
+**God nodes (highest connectivity):** `PlateDetectorDataset`, `render_plate_image()`, `PlateRecognizerDataset`, `load_image()`, `RecognizerAugment`, `generate_detector_dataset()`, `composite_on_background()`.
 
-**Key hyperedge:** CV Inference Chain — Preprocessing → Detector → Recognizer → Plate Text (detector/recognizer nodes are plan-only until models land).
+**Key hyperedges:**
+
+- **CV Training Pipeline** — Synthetic Data → Augmentation → Dataset → Model Training
+- **CV Inference Chain** — Preprocessing → Detector → Recognizer → Plate Text (detector/recognizer model nodes are plan-only until implemented)
+- **Session & Event Flow** — Upload API → CV Pipeline → Parking Services → DB Models (mostly plan-only)
+
+**Named communities:** CV Model Architecture, Synthetic Data & Training, Core Data Models, Session & Billing Logic, Dashboard & Frontend.
 
 Rules:
 - For codebase questions, first run `graphify query "<question>"` when `graphify-out/graph.json` exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts.
