@@ -46,6 +46,11 @@ pytest-cov>=4.1
 # graph_models, and other management commands useful during development.
 django-extensions>=3.2
 
+# --- Training visualisation ---
+# matplotlib: generates the training-progress PNG after each detector/recognizer
+# training run.  Only needed on the host machine (not inside Docker).
+matplotlib>=3.7
+
 # --- Production WSGI server ---
 # gunicorn: production-grade server that replaces manage.py runserver.
 # Referenced in Day 11 Docker polish; included now so the image is complete.

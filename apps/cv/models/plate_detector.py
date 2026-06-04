@@ -137,14 +137,14 @@ class PlateDetectorCNN(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Run a forward pass and return raw bounding box logits.
+        Run a forward pass and return normalised bounding box predictions.
 
         Args:
             x: Float32 tensor, shape (B, 3, H, W), pixel values in [0, 1].
 
         Returns:
-            Tensor of shape (B, 4) — raw [cx, cy, w, h] logits.
-            Apply torch.sigmoid before using for inference.
+            Tensor of shape (B, 4) — sigmoid-activated [cx, cy, w, h] in [0, 1].
+            Sigmoid is applied inside this method; do NOT apply it again externally.
         """
         x = self.block1(x)   # (B, 32,  H/2, W/2)
         x = self.block2(x)   # (B, 64,  H/4, W/4)
@@ -160,12 +160,13 @@ class PlateDetectorCNN(nn.Module):
     @torch.no_grad()
     def predict(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Run inference without gradient tracking.
+        Run deterministic inference without gradient tracking.
 
-        forward() already applies sigmoid, so this is a thin wrapper that
-        disables gradient computation for faster, lower-memory inference.
-        Callers are responsible for setting eval mode (model.eval()) before
-        calling predict() if they want deterministic outputs (no dropout).
+        Temporarily switches the model to eval mode so dropout is disabled,
+        runs a forward pass, then restores the original training/eval state.
+        This makes predict() safe to call at any point — mid-training callbacks,
+        validation loops, or standalone inference — without side effects on the
+        training loop's dropout behaviour.
 
         @torch.no_grad() disables gradient tracking — inference does not need
         gradients, and disabling them halves activation memory and speeds up
@@ -177,4 +178,10 @@ class PlateDetectorCNN(nn.Module):
         Returns:
             Tensor of shape (B, 4) — normalised [cx, cy, w, h] in [0, 1].
         """
-        return self.forward(x)
+        was_training = self.training
+        self.eval()
+        try:
+            return self.forward(x)
+        finally:
+            if was_training:
+                self.train()
