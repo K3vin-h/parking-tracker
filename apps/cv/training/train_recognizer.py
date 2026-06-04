@@ -38,6 +38,16 @@ import logging
 import sys
 from pathlib import Path
 
+# The documented invocation runs this file directly:
+#     python apps/cv/training/train_recognizer.py ...
+# In that mode Python places apps/cv/training on sys.path, not the repository
+# root, so absolute imports such as apps.cv.models.recognizer would fail before
+# main() can run.  Insert the root before importing project modules so the CLI
+# works exactly as documented.
+REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
@@ -474,12 +484,11 @@ def main() -> None:
     # Bound --output to the project root to prevent path-traversal writes
     # (e.g. --output ../../../../etc/cron.d/payload) in CI or shared environments.
     output_path = args.output.resolve()
-    _repo_root  = Path(__file__).resolve().parents[3]
-    if not output_path.is_relative_to(_repo_root):
+    if not output_path.is_relative_to(REPO_ROOT):
         raise SystemExit(
             f"--output path escapes project root.\n"
             f"  Output:       {output_path}\n"
-            f"  Project root: {_repo_root}"
+            f"  Project root: {REPO_ROOT}"
         )
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
