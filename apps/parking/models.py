@@ -54,6 +54,7 @@ RELATIONSHIP DIAGRAM
 from decimal import Decimal
 
 from django.conf import settings
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 
 
@@ -234,6 +235,7 @@ class LotSettings(models.Model):
     # Common use: 15 minutes for quick drop-offs, loading zones, etc.
     grace_period_minutes = models.IntegerField(
         default=15,
+        validators=[MinValueValidator(0)],
         help_text="Sessions shorter than this many minutes are free (charged $0.00).",
     )
 
@@ -261,9 +263,11 @@ class LotSettings(models.Model):
     # How many days to keep uploaded plate images on disk before cleanup.
     # null=True means "keep forever" — the cleanup command skips deletion.
     # The cleanup_old_images management command reads this setting.
+    # MinValueValidator(1): 0 days would delete all images immediately; negative is nonsensical.
     image_retention_days = models.IntegerField(
         null=True,
         blank=True,
+        validators=[MinValueValidator(1)],
         help_text="Delete uploaded images older than this many days. Null means keep forever.",
     )
 
@@ -274,6 +278,7 @@ class LotSettings(models.Model):
     # Default 0.6 means 60% — a reasonable starting threshold for synthetic-trained models.
     confidence_threshold = models.FloatField(
         default=0.6,
+        validators=[MinValueValidator(0.0), MaxValueValidator(1.0)],
         help_text=(
             "CV pipeline confidence threshold (0.0–1.0). "
             "Detections below this score are flagged as low-confidence and queued for review."
