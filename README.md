@@ -7,6 +7,7 @@ A parking lot management system that uses computer vision to read license plates
 - [Database Models](#database-models)
 - [CV Pipeline](#cv-pipeline)
 - [Branch: Synthetic Training Data Pipeline + Plate Detector CNN](#branch-synthetic-training-data-pipeline--plate-detector-cnn)
+- [Branch: Plate Recognizer CRNN](#branch-plate-recognizer-crnn)
 - [Creating the Dataset for Training](#creating-the-dataset-for-training)
 - [Web Application](#web-application)
 - [Docker](#docker)
@@ -209,9 +210,9 @@ Resizes the plate crop to 128×32 pixels and converts it to grayscale. The recog
 </details>
 
 <details>
-<summary><code>PlateRecognizerCRNN</code> <em>(planned)</em></summary>
+<summary><code>PlateRecognizerCRNN</code></summary>
 
-A convolutional–recurrent network (CNN backbone + bidirectional LSTM) that reads the 128×32 grayscale plate image left to right and outputs the plate text character by character, plus a confidence score. Uses CTC (Connectionist Temporal Classification) loss, which handles variable-length plate strings without needing character-level position labels. Weights are stored in `apps/cv/weights/recognizer.pth` (gitignored).
+A convolutional–recurrent network (CNN backbone + bidirectional LSTM) that reads the 128×32 grayscale plate crop and outputs the plate text character by character. The CNN extracts visual features; the LSTM reads those features left-to-right and right-to-left to model character order; a final projection layer turns each position into a probability over the 37-character alphabet (A–Z, 0–9, plus a blank token used during training). Trained with CTC loss, which teaches the model to find the right characters in the right order without needing to know exactly where each character starts or ends in the image. Weights are stored in `apps/cv/weights/recognizer.pth` (gitignored).
 
 </details>
 
@@ -368,11 +369,162 @@ whether the predicted plate box lines up with the real plate box.
 - The model parameter count stays in a reasonable range.
 - The IoU helper returns correct values for perfect, empty, and partial overlap.
 
-### Current limitation
+---
 
-This branch only detects where the license plate is. It does not read the text
-from the plate yet. The next model in the pipeline is the recognizer, which will
-take the cropped plate image and turn it into characters.
+## Branch: Plate Recognizer CRNN
+
+This branch adds the second trainable model in the pipeline: a plate text
+recognizer. Where the detector finds the plate region and draws a box around it,
+the recognizer takes that cropped box and reads the characters on the plate.
+
+Together the two models cover the full CV chain: **find the plate → read the plate**.
+
+### What this branch adds
+
+| File | Purpose |
+| :--- | :--- |
+| `apps/cv/models/recognizer.py` | Defines `PlateRecognizerCRNN`, the model that reads plate text |
+| `apps/cv/training/train_recognizer.py` | Trains `PlateRecognizerCRNN` on the synthetic recognizer dataset |
+| `apps/cv/tests/test_plate_recognizer.py` | Tests the recognizer model and CTC decode logic |
+
+### Recognizer model
+
+`PlateRecognizerCRNN` takes a 128×32 grayscale plate crop and returns a sequence
+of character predictions — one per horizontal position in the image:
+
+```text
+input plate crop:  (B, 1, 32, 128)   — grayscale, height 32, width 128
+output sequence:   (16, B, 37)        — 16 time-steps, 37 possible characters
+```
+
+The 37 characters are `A–Z` (26 letters), `0–9` (10 digits), and one special
+blank token used internally during training.
+
+The model is built in three stages:
+
+```mermaid
+flowchart TD
+    CROP["Plate crop<br/>(B, 1, 32, 128)"]
+    CNN["CNN backbone<br/>3 blocks of Conv + BN + ReLU + MaxPool"]
+    SEQ["Reshape to sequence<br/>16 columns × 2048 features each"]
+    LSTM["Bidirectional LSTM<br/>reads left→right and right→left"]
+    FC["Linear projection<br/>37 character scores per step"]
+    TEXT["Character probabilities<br/>(16 steps × 37 classes)"]
+
+    CROP --> CNN --> SEQ --> LSTM --> FC --> TEXT
+```
+
+**Stage 1 — CNN backbone**
+
+Three convolutional blocks shrink the image while extracting character features.
+The third block uses a non-square pool that keeps the width at 16 columns (one
+per time-step) while compressing the height:
+
+```text
+Block 1: Conv(1→64)  + BN + ReLU + MaxPool(2×2)  → (B, 64,  16, 64)
+Block 2: Conv(64→128)+ BN + ReLU + MaxPool(2×2)  → (B, 128,  8, 32)
+Block 3: Conv(128→256)+ BN + ReLU + MaxPool(1×2) → (B, 256,  8, 16)
+```
+
+**Stage 2 — Reshape to sequence**
+
+The 16 width columns become the 16 time-steps the LSTM will read. Each column
+carries a 2048-dimensional feature vector (256 channels × 8 rows stacked together).
+
+**Stage 3 — Bidirectional LSTM**
+
+A two-layer LSTM reads the feature columns left-to-right and right-to-left
+simultaneously, then combines both directions. Reading both ways helps resolve
+ambiguous characters — for example, distinguishing `D` from `O` is easier when
+the model can also see what letter comes after it.
+
+### What is CTC loss?
+
+CTC stands for **Connectionist Temporal Classification**. It is the training
+technique that teaches the model to produce the right plate text without needing
+to know exactly which pixels map to which character.
+
+Think of it like this: when a human reads a plate, they do not count the exact
+pixels where each letter starts and ends. They just see the letters and know what
+they say. CTC works the same way — it only asks the model to output the right
+letters in the right order, and figures out the alignment on its own.
+
+The blank token (index 0) is how CTC separates repeated characters. For example,
+if a plate has `AA` (two A's), the sequence `A blank A` tells the decoder these
+are two separate letters, not one.
+
+### Training script
+
+`apps/cv/training/train_recognizer.py` trains the recognizer with synthetic data.
+It expects a recognizer dataset that has already been generated:
+
+```text
+data/recognizer/
+├── images/
+│   ├── plate_000000.png
+│   └── ...
+└── labels.csv
+```
+
+Each row in `labels.csv` has the filename, the plate text, and the country:
+
+```text
+filename,text,country
+plate_000000.png,ABC123,US
+plate_000001.png,K3V 4X9,CA
+```
+
+Typical training command:
+
+```bash
+python apps/cv/training/train_recognizer.py \
+    --data-dir data/recognizer \
+    --epochs 100 \
+    --batch-size 32 \
+    --output apps/cv/weights/recognizer.pth
+```
+
+The script:
+
+1. Loads `PlateRecognizerDataset`.
+2. Splits it into 80% training data and 20% validation data.
+3. Trains `PlateRecognizerCRNN` with `CTCLoss`.
+4. Tracks validation loss, character accuracy, and full-plate accuracy each epoch.
+5. Saves the best model weights to `apps/cv/weights/recognizer.pth`.
+6. Saves a training progress chart alongside the weights.
+
+> **Note for Apple Silicon Macs:** PyTorch's Metal (MPS) backend does not support
+> CTC loss. The script detects this automatically and runs the loss step on CPU,
+> while keeping the model itself on the GPU for speed. No extra setup is needed.
+
+### Accuracy metrics
+
+The training script tracks two accuracy metrics per epoch:
+
+| Metric | What it measures |
+| :--- | :--- |
+| **Character accuracy** | What fraction of individual letters and digits were predicted correctly |
+| **Plate accuracy** | What fraction of plates were predicted perfectly (every character correct) |
+
+Plate accuracy is the harder metric — a single wrong character fails the whole
+plate. The target is **>90% character accuracy** and **>80% plate accuracy** on
+the synthetic validation set.
+
+### Tests
+
+`apps/cv/tests/test_plate_recognizer.py` checks the important behavior:
+
+- The model returns shape `(16, batch_size, 37)`.
+- All output values are ≤ 0 (log-probabilities are always non-positive).
+- Exponentiated outputs sum to 1.0 across the character dimension (valid probability distribution).
+- `predict()` does not track gradients.
+- Evaluation mode is deterministic because dropout is disabled.
+- Training mode changes outputs because dropout is enabled.
+- `decode_predictions()` removes blank tokens from the output.
+- `decode_predictions()` collapses consecutive repeated tokens (`[A, A, B]` → `"AB"`).
+- Two identical characters separated by a blank decode to two characters (`[A, blank, A]` → `"AA"`).
+- All-blank sequences decode to an empty string.
+- The model parameter count stays in a reasonable range.
 
 ---
 
