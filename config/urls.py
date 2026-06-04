@@ -35,7 +35,12 @@ def health_check(request):
     Docker, K8s, and load balancers can poll it without credentials.
     """
     try:
-        connection.ensure_connection()
+        # Execute a real query instead of only ensuring a connection object
+        # exists; persistent connections can otherwise look healthy after
+        # Postgres has gone away.
+        with connection.cursor() as cursor:
+            cursor.execute('SELECT 1')
+            cursor.fetchone()
         return JsonResponse({'status': 'ok'})
     except Exception:
         return JsonResponse({'status': 'error'}, status=503)
