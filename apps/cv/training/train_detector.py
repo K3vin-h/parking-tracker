@@ -9,7 +9,7 @@ Typical usage
     # Generate synthetic data first (requires data/backgrounds/):
     python -c "
     from apps.cv.training.synthetic_data import generate_detector_dataset
-    generate_detector_dataset('data/backgrounds', 'data/detector', n=10000)
+    generate_detector_dataset(n=10000, output_dir='data/detector', bg_dir='data/backgrounds')
     "
 
     # Train:
@@ -133,9 +133,15 @@ def _train_epoch(
     criterion: nn.SmoothL1Loss,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
-) -> float:
+) -> tuple[float, list[float]]:
     """
-    Run one full pass over the training set and return the mean loss.
+    Run one full pass over the training set.
+
+    Returns:
+        Tuple of (mean_epoch_loss, per_batch_losses).
+        per_batch_losses contains one value per DataLoader iteration — used by
+        the training-curve plot to show the fine-grained loss signal within
+        each epoch, not just the epoch average.
 
     WHY SmoothL1Loss (Huber loss) for bounding box regression:
     MSE penalises large errors quadratically — a single bad prediction (e.g.
@@ -147,14 +153,15 @@ def _train_epoch(
     The beta parameter controls the boundary between the two regimes.
     """
     model.train()
-    total_loss = 0.0
+    total_loss   = 0.0
+    batch_losses: list[float] = []
 
     for images, bboxes in loader:
         images = images.to(device)
         bboxes = bboxes.to(device)
 
         optimizer.zero_grad()
-        preds = model(images)           # raw logits (B, 4)
+        preds = model(images)
         loss  = criterion(preds, bboxes)
         loss.backward()
 
@@ -163,9 +170,11 @@ def _train_epoch(
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
         optimizer.step()
+        batch_losses.append(loss.item())
         total_loss += loss.item() * images.size(0)
 
-    return total_loss / len(loader.dataset)  # type: ignore[arg-type]
+    mean_loss = total_loss / len(loader.dataset)  # type: ignore[arg-type]
+    return mean_loss, batch_losses
 
 
 @torch.no_grad()
@@ -198,6 +207,211 @@ def _validate_epoch(
 
     n = len(loader.dataset)  # type: ignore[arg-type]
     return total_loss / n, total_iou / n
+
+
+# ── Training-curve helpers ────────────────────────────────────────────────────
+
+def _smooth(values: list[float], weight: float = 0.9) -> list[float]:
+    """
+    Exponential moving average — same algorithm TensorBoard uses by default.
+
+    WHY smooth the batch loss curve: individual batch losses are noisy because
+    each mini-batch is a random sample of the training set.  The raw curve is
+    useful for spotting instability (spikes) but hard to read at scale.  An EMA
+    with weight=0.9 keeps ~10 epochs of memory, revealing the true trend while
+    preserving short-term variation.
+
+    Args:
+        values: Raw signal (typically per-batch training losses).
+        weight: Smoothing factor in [0, 1).  Higher = smoother, more lag.
+
+    Returns:
+        List of smoothed values, same length as input.
+    """
+    if not values:
+        return []
+    smoothed = []
+    last = values[0]
+    for v in values:
+        last = weight * last + (1.0 - weight) * v
+        smoothed.append(last)
+    return smoothed
+
+
+def _plot_training_history(
+    history: dict[str, list],
+    output_path: Path,
+    best_epoch: int,
+) -> Path:
+    """
+    Render and save a dark-themed training-progress figure.
+
+    Three stacked rows:
+      1. Loss  — per-batch train loss (faint) + EMA-smoothed (bold) + val loss (markers)
+      2. IoU   — validation IoU per epoch + dashed target line at 0.7
+      3. LR    — learning rate as a step plot; drops from ReduceLROnPlateau are
+                 immediately visible as vertical steps
+
+    The best epoch (lowest val loss) is marked with a dotted vertical line
+    across all three rows.
+
+    Args:
+        history:     Dict with keys train_loss_batch, batches_per_epoch,
+                     val_loss, val_iou, lr (all lists, one entry per epoch
+                     except train_loss_batch which has one entry per batch).
+        output_path: Path to the .pth weights file; the PNG is saved alongside
+                     it with the same stem + "_training.png".
+        best_epoch:  1-based epoch index of the lowest validation loss.
+
+    Returns:
+        Path to the saved PNG.
+    """
+    # matplotlib.use("Agg") must be called before importing pyplot.
+    # "Agg" is a non-interactive raster backend — it renders to memory and
+    # writes to file without requiring a display.  This is essential for
+    # training runs in headless environments (Docker, CI, SSH sessions).
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.gridspec as gridspec
+
+    # ── Project design tokens ──────────────────────────────────────────────
+    BG_PRIMARY   = "#0f1117"
+    BG_SECONDARY = "#1a1d27"
+    BORDER       = "#2e3039"
+    TEXT_PRIMARY = "#e4e4e7"
+    TEXT_MUTED   = "#a1a1aa"
+    BLUE         = "#3b82f6"
+    GREEN        = "#22c55e"
+    YELLOW       = "#eab308"
+    RED          = "#ef4444"
+
+    epochs    = list(range(1, len(history["val_loss"]) + 1))
+    n_epochs  = len(epochs)
+    batch_losses     = history["train_loss_batch"]
+    batches_per_epoch = history["batches_per_epoch"]
+
+    # Map each batch to a fractional epoch coordinate so the batch-loss curve
+    # shares the same x-axis as the per-epoch metrics.
+    batch_x: list[float] = []
+    for ep, n_batches in enumerate(batches_per_epoch, start=1):
+        for i in range(n_batches):
+            batch_x.append(ep - 1.0 + (i + 0.5) / max(n_batches, 1))
+
+    smoothed = _smooth(batch_losses)
+
+    # ── Figure layout ──────────────────────────────────────────────────────
+    fig = plt.figure(figsize=(12, 9), facecolor=BG_PRIMARY)
+    gs  = gridspec.GridSpec(
+        3, 1, figure=fig,
+        hspace=0.06, top=0.91, bottom=0.07, left=0.08, right=0.97,
+        height_ratios=[2.2, 1.4, 1.0],
+    )
+    ax_loss = fig.add_subplot(gs[0])
+    ax_iou  = fig.add_subplot(gs[1], sharex=ax_loss)
+    ax_lr   = fig.add_subplot(gs[2], sharex=ax_loss)
+
+    for ax in (ax_loss, ax_iou, ax_lr):
+        ax.set_facecolor(BG_SECONDARY)
+        ax.tick_params(colors=TEXT_MUTED, labelsize=9)
+        for spine in ax.spines.values():
+            spine.set_color(BORDER)
+        ax.grid(True, color=BORDER, linewidth=0.5, alpha=0.8)
+        ax.yaxis.label.set_color(TEXT_PRIMARY)
+
+    plt.setp(ax_loss.get_xticklabels(), visible=False)
+    plt.setp(ax_iou.get_xticklabels(), visible=False)
+    ax_lr.tick_params(axis="x", colors=TEXT_MUTED, labelsize=9)
+    ax_lr.set_xlabel("Epoch", color=TEXT_PRIMARY, fontsize=10)
+
+    # ── Best-epoch marker (shared across all rows) ─────────────────────────
+    for ax in (ax_loss, ax_iou, ax_lr):
+        ax.axvline(best_epoch, color=TEXT_MUTED, linewidth=0.9, linestyle=":", alpha=0.55)
+
+    # ── Row 1: Loss ────────────────────────────────────────────────────────
+    # Raw batch losses — very thin and transparent, shows true noise level
+    ax_loss.plot(
+        batch_x, batch_losses,
+        color=BLUE, linewidth=0.4, alpha=0.18,
+    )
+    # EMA-smoothed train loss — main train curve
+    ax_loss.plot(
+        batch_x, smoothed,
+        color=BLUE, linewidth=1.8, label="Train loss (smoothed)",
+    )
+    # Validation loss — one point per epoch, circle markers
+    ax_loss.plot(
+        epochs, history["val_loss"],
+        color=GREEN, linewidth=1.6,
+        marker="o", markersize=5,
+        markerfacecolor=BG_PRIMARY, markeredgewidth=1.8,
+        label="Val loss",
+    )
+    ax_loss.set_ylabel("Loss", color=TEXT_PRIMARY, fontsize=10)
+    ax_loss.legend(
+        facecolor=BG_SECONDARY, edgecolor=BORDER,
+        labelcolor=TEXT_PRIMARY, fontsize=9, loc="upper right",
+    )
+
+    # Annotate best epoch on the loss curve
+    best_val = history["val_loss"][best_epoch - 1]
+    x_offset = max(0.8, n_epochs * 0.04)
+    ax_loss.annotate(
+        f"best  epoch {best_epoch}\n{best_val:.4f}",
+        xy=(best_epoch, best_val),
+        xytext=(best_epoch + x_offset, best_val),
+        color=TEXT_MUTED, fontsize=8,
+        arrowprops=dict(arrowstyle="->", color=TEXT_MUTED, lw=0.9),
+        va="center",
+    )
+
+    # ── Row 2: IoU ─────────────────────────────────────────────────────────
+    ax_iou.axhline(
+        0.7, color=RED, linewidth=1.1, linestyle="--", alpha=0.75,
+        label="Target  IoU = 0.70",
+    )
+    ax_iou.plot(
+        epochs, history["val_iou"],
+        color=YELLOW, linewidth=1.6,
+        marker="s", markersize=4,
+        markerfacecolor=BG_PRIMARY, markeredgewidth=1.8,
+        label="Val IoU",
+    )
+    ax_iou.set_ylim(-0.05, 1.08)
+    ax_iou.set_ylabel("IoU", color=TEXT_PRIMARY, fontsize=10)
+    ax_iou.legend(
+        facecolor=BG_SECONDARY, edgecolor=BORDER,
+        labelcolor=TEXT_PRIMARY, fontsize=9, loc="lower right",
+    )
+
+    # ── Row 3: Learning rate ───────────────────────────────────────────────
+    # step plot makes LR drops from ReduceLROnPlateau appear as sharp
+    # vertical drops rather than diagonal lines — more accurate to reality.
+    ax_lr.step(
+        epochs, history["lr"],
+        color=TEXT_MUTED, linewidth=1.3, where="post",
+        label="Learning rate",
+    )
+    ax_lr.set_ylabel("LR", color=TEXT_PRIMARY, fontsize=10)
+    ax_lr.yaxis.set_major_formatter(
+        plt.FuncFormatter(lambda v, _: f"{v:.0e}")
+    )
+    ax_lr.legend(
+        facecolor=BG_SECONDARY, edgecolor=BORDER,
+        labelcolor=TEXT_PRIMARY, fontsize=9,
+    )
+
+    # ── Title ──────────────────────────────────────────────────────────────
+    fig.suptitle(
+        "PlateDetectorCNN — Training Progress",
+        color=TEXT_PRIMARY, fontsize=13, fontweight="bold", y=0.965,
+    )
+
+    # ── Save ───────────────────────────────────────────────────────────────
+    plot_path = output_path.parent / (output_path.stem + "_training.png")
+    fig.savefig(plot_path, dpi=150, facecolor=BG_PRIMARY, bbox_inches="tight")
+    plt.close(fig)
+    return plot_path
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -296,6 +510,7 @@ def main() -> None:
 
     # ── Training loop ──────────────────────────────────────────────────────
     best_val_loss = float("inf")
+    best_epoch    = 1
 
     # Resolve the output path and bound it to the project root so a crafted
     # --output like ../../etc/cron.d/payload cannot create directories outside
@@ -310,15 +525,34 @@ def main() -> None:
         )
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # History accumulated across epochs for the training-curve plot.
+    # train_loss_batch contains one loss value per DataLoader iteration (all
+    # epochs concatenated) — this gives the plot its batch-level resolution.
+    history: dict[str, list] = {
+        "train_loss_epoch": [],
+        "train_loss_batch": [],
+        "batches_per_epoch": [],
+        "val_loss": [],
+        "val_iou": [],
+        "lr": [],
+    }
+
     logger.info("Starting training for %d epochs …", args.epochs)
     logger.info("%-6s  %-12s  %-12s  %-10s  %-10s", "Epoch", "Train Loss", "Val Loss", "Val IoU", "LR")
 
     for epoch in range(1, args.epochs + 1):
-        train_loss             = _train_epoch(model, train_loader, criterion, optimizer, device)
-        val_loss, val_iou      = _validate_epoch(model, val_loader, criterion, device)
+        train_loss, batch_losses = _train_epoch(model, train_loader, criterion, optimizer, device)
+        val_loss, val_iou        = _validate_epoch(model, val_loader, criterion, device)
 
         scheduler.step(val_loss)
         current_lr = optimizer.param_groups[0]["lr"]
+
+        history["train_loss_epoch"].append(train_loss)
+        history["train_loss_batch"].extend(batch_losses)
+        history["batches_per_epoch"].append(len(batch_losses))
+        history["val_loss"].append(val_loss)
+        history["val_iou"].append(val_iou)
+        history["lr"].append(current_lr)
 
         logger.info(
             "%-6d  %-12.6f  %-12.6f  %-10.4f  %-10.6f",
@@ -332,11 +566,23 @@ def main() -> None:
         # what class is being loaded and avoids pickle-based class loading.
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+            best_epoch    = epoch
             torch.save(model.state_dict(), output_path)
             logger.info("  ↳ New best (val_loss=%.6f) → saved to %s", best_val_loss, output_path)
 
     logger.info("Training complete. Best val loss: %.6f  |  Weights: %s", best_val_loss, output_path)
     logger.info("Load with: model.load_state_dict(torch.load(%r, weights_only=True))", str(output_path))
+
+    # ── Training curve ─────────────────────────────────────────────────────
+    try:
+        plot_path = _plot_training_history(history, output_path, best_epoch)
+        logger.info("Training curve → %s", plot_path)
+        # Open the PNG in the system viewer on macOS (non-blocking).
+        # Fails silently everywhere else — the PNG is always saved regardless.
+        import subprocess
+        subprocess.Popen(["open", str(plot_path)])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not save training curve: %s", exc)
 
 
 if __name__ == "__main__":
