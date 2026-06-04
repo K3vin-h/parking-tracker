@@ -1,0 +1,18 @@
+# Development-only dependencies.
+# Install with: pip install -r requirements-dev.txt
+# (This file includes -r requirements.txt so it extends the production set.)
+-r requirements.txt
+
+# --- Test runner ---
+pytest>=7.4
+pytest-django>=4.7
+pytest-cov>=4.1
+
+# --- Dev utilities ---
+# shell_plus (auto-imports all models), show_urls, graph_models, etc.
+django-extensions>=3.2
+
+# --- Training visualisation ---
+# Generates training-progress PNGs after detector/recognizer training runs.
+# Only needed on the host machine; not required inside Docker.
+matplotlib>=3.7
