@@ -10,6 +10,10 @@ Fixtures
 No external files are needed.  Tests construct random input tensors directly.
 """
 
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 import torch
 
@@ -265,3 +269,31 @@ class TestPlateRecognizerCRNN:
             out = model(_random_plate_batch(batch_size=3))
         for s in model.decode_predictions(out):
             assert isinstance(s, str), f"decode_predictions returned non-str: {type(s)}"
+
+
+@pytest.mark.unit
+def test_train_recognizer_script_runs_with_documented_path() -> None:
+    """
+    The README command uses a file path, so --help must import cleanly.
+
+    WHY this matters:
+    Running ``python apps/cv/training/train_recognizer.py`` makes Python put
+    apps/cv/training on sys.path instead of the repository root.  This test
+    catches regressions where top-level ``apps.cv`` imports break that documented
+    command before argument parsing can even display help.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "apps/cv/training/train_recognizer.py",
+            "--help",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "--data-dir" in result.stdout
