@@ -368,6 +368,9 @@ if not DEBUG:
 
     # Redirect all HTTP requests to HTTPS at the Django level.
     # In production, nginx/load-balancer should do this too — defence in depth.
+    # The proxy must pass X-Forwarded-Proto=https so Django does not redirect
+    # already-secure client traffic that arrived over HTTP from the TLS proxy.
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
     SECURE_SSL_REDIRECT = True
 
     # Session and CSRF cookies must only be sent over HTTPS.

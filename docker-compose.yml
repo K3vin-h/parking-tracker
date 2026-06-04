@@ -61,7 +61,10 @@ services:
   # web — Django application
   # ──────────────────────────────────────────────────────────
   web:
-    build: .
+    build:
+      context: .
+      args:
+        INSTALL_DEV_REQUIREMENTS: "true"
 
     # Start the Django development server.
     # entrypoint.sh (from the Dockerfile ENTRYPOINT) runs first:

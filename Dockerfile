@@ -39,8 +39,16 @@ ENV PATH="/venv/bin:$PATH"
 # Copy only requirements first for layer-caching.
 # If requirements.txt hasn't changed, Docker reuses this cached pip layer
 # even when source code changes — much faster rebuilds.
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt requirements-dev.txt ./
+
+# Production builds install only runtime dependencies. docker-compose opts into
+# requirements-dev.txt so DEBUG=True can load django_extensions locally.
+ARG INSTALL_DEV_REQUIREMENTS=false
+RUN if [ "$INSTALL_DEV_REQUIREMENTS" = "true" ]; then \
+        pip install --no-cache-dir -r requirements-dev.txt; \
+    else \
+        pip install --no-cache-dir -r requirements.txt; \
+    fi
 
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
