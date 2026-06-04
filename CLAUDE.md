@@ -68,8 +68,8 @@ docker-compose exec web python manage.py cleanup_old_images --dry-run
 graphify update .
 
 # Generate synthetic training data locally (backgrounds required — see Training Data below)
-python -c "from apps.cv.training.synthetic_data import generate_detector_dataset; generate_detector_dataset('data/backgrounds', 'data/detector', n=1000)"
-python -c "from apps.cv.training.synthetic_data import generate_recognizer_dataset; generate_recognizer_dataset('data/recognizer', n=5000)"
+python -c "from apps.cv.training.synthetic_data import generate_detector_dataset; generate_detector_dataset(n=1000, output_dir='data/detector', bg_dir='data/backgrounds')"
+python -c "from apps.cv.training.synthetic_data import generate_recognizer_dataset; generate_recognizer_dataset(n=5000, output_dir='data/recognizer')"
 
 # Train CV models (run outside Docker, uses MPS on Apple Silicon)
 python apps/cv/training/train_detector.py --epochs 50 --data-dir data/detector --output apps/cv/weights/detector.pth
