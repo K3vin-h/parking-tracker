@@ -9,7 +9,7 @@ Typical usage
     # Generate synthetic data first (requires data/backgrounds/):
     python -c "
     from apps.cv.training.synthetic_data import generate_detector_dataset
-    generate_detector_dataset('data/backgrounds', 'data/detector', n=10000)
+    generate_detector_dataset(n=10000, output_dir='data/detector', bg_dir='data/backgrounds')
     "
 
     # Train:
