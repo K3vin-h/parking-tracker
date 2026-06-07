@@ -47,8 +47,10 @@ services:
     # Health check: pg_isready exits 0 when Postgres accepts connections.
     # Used by 'web' depends_on so Django never attempts to migrate against
     # a Postgres that isn't ready yet.
+    # The double dollar signs pass the variables through to the db container;
+    # a single $ would be interpolated by Compose before the container starts.
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
       timeout: 5s
       retries: 5
