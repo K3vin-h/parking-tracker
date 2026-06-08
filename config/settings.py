@@ -103,11 +103,6 @@ INSTALLED_APPS = [
     'django.contrib.messages',     # One-time flash messages (e.g., "Settings saved!")
     'django.contrib.staticfiles',  # Serves CSS/JS files from app directories in development
 
-    # ── Third-party ───────────────────────────────────────────────────────────
-    # django-extensions: adds shell_plus (auto-imports all models into the shell),
-    # show_urls (lists all URL patterns), and ~30 other dev utilities.
-    'django_extensions',
-
     # ── Our apps ─────────────────────────────────────────────────────────────
     # Listed after built-ins so Django resolves built-in models first.
     'apps.accounts',    # Custom User model (Day 1)
@@ -201,6 +196,9 @@ DATABASES = {
         'PASSWORD': _require_env('DB_PASSWORD'),
         'HOST': os.environ.get('DB_HOST', 'localhost'),
         'PORT': os.environ.get('DB_PORT', '5432'),
+        # Reuse DB connections for up to 60 seconds instead of opening a new
+        # connection on every request.  Reduces connection overhead under load.
+        'CONN_MAX_AGE': 60,
     }
 }
 
@@ -345,3 +343,37 @@ LOGGING = {
         },
     },
 }
+
+
+# ── Development-only apps ─────────────────────────────────────────────────────
+
+# django-extensions provides shell_plus, show_urls, graph_models, etc.
+# These are development tools only — they add no value in production and
+# increase the attack surface slightly, so they're excluded from prod images.
+if DEBUG:
+    INSTALLED_APPS += ['django_extensions']
+
+
+# ── Production security settings ─────────────────────────────────────────────
+
+# These settings are only meaningful when running behind HTTPS (production).
+# Enabling them in development (where there is no TLS) would break the dev server.
+if not DEBUG:
+    # Tell browsers: "only ever connect to this site over HTTPS for 1 year."
+    # Once this header is seen, the browser will refuse HTTP connections for the
+    # site — protecting users even if they type http:// manually.
+    SECURE_HSTS_SECONDS = 31_536_000       # 1 year
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True  # apply to all subdomains too
+    SECURE_HSTS_PRELOAD = True             # eligible for browser HSTS preload list
+
+    # Redirect all HTTP requests to HTTPS at the Django level.
+    # In production, nginx/load-balancer should do this too — defence in depth.
+    # The proxy must pass X-Forwarded-Proto=https so Django does not redirect
+    # already-secure client traffic that arrived over HTTP from the TLS proxy.
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    SECURE_SSL_REDIRECT = True
+
+    # Session and CSRF cookies must only be sent over HTTPS.
+    # Without these, a network attacker could steal session/CSRF tokens over HTTP.
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
