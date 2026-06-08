@@ -18,11 +18,40 @@ URL STRUCTURE:
 """
 
 from django.contrib import admin
+from django.db import connection
+from django.http import JsonResponse
 from django.urls import include, path
 from django.conf import settings
 from django.conf.urls.static import static
 
+
+def health_check(request):
+    """
+    Liveness + readiness probe for Docker HEALTHCHECK and load-balancer checks.
+
+    Verifies that Django is running AND the database connection is alive.
+    Returns 200 {"status": "ok"} on success, 503 {"status": "error"} on failure.
+    No authentication required — this endpoint is intentionally public so that
+    Docker, K8s, and load balancers can poll it without credentials.
+    """
+    try:
+        # Execute a real query instead of only ensuring a connection object
+        # exists; persistent connections can otherwise look healthy after
+        # Postgres has gone away.
+        with connection.cursor() as cursor:
+            cursor.execute('SELECT 1')
+            cursor.fetchone()
+        return JsonResponse({'status': 'ok'})
+    except Exception:
+        return JsonResponse({'status': 'error'}, status=503)
+
+
 urlpatterns = [
+    # ── Health ────────────────────────────────────────────────────────────────
+    # Polled by Dockerfile HEALTHCHECK, docker-compose healthcheck, and future
+    # Kubernetes liveness/readiness probes.  Must be first to keep latency low.
+    path('health/', health_check),
+
     # ── Admin ──────────────────────────────────────────────────────────────────
     # Django's built-in admin site — browse and edit all registered models.
     # Only accessible to users with is_staff=True.

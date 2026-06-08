@@ -33,24 +33,6 @@ opencv-python-headless>=4.8
 torch>=2.2.0
 torchvision>=0.17.0
 
-# --- Testing ---
-# pytest: test runner (preferred over Django's built-in test runner for plugins).
-# pytest-django: Django integration — sets up the test database automatically.
-# pytest-cov: generates coverage reports; enforces the 80% gate via --cov-fail-under.
-pytest>=7.4
-pytest-django>=4.7
-pytest-cov>=4.1
-
-# --- Dev utilities ---
-# django-extensions: adds shell_plus (auto-imports all models), show_urls,
-# graph_models, and other management commands useful during development.
-django-extensions>=3.2
-
-# --- Training visualisation ---
-# matplotlib: generates the training-progress PNG after each detector/recognizer
-# training run.  Only needed on the host machine (not inside Docker).
-matplotlib>=3.7
-
 # --- Production WSGI server ---
 # gunicorn: production-grade server that replaces manage.py runserver.
 # Referenced in Day 11 Docker polish; included now so the image is complete.

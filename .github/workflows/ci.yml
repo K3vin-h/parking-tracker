@@ -1,0 +1,80 @@
+name: CI
+
+# Run on every push to any branch and on PRs targeting main.
+# This catches regressions in feature branches before they reach main.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test (Python 3.12 + PostgreSQL 16)
+    runs-on: ubuntu-latest
+
+    services:
+      # Spin up a real PostgreSQL instance — same version as production.
+      # WHY not SQLite? The codebase requires PostgreSQL for DecimalField
+      # precision (billing math) and concurrent-write safety. Tests must
+      # run against the same engine as production.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: parking_tracker_test
+          POSTGRES_USER: ci_user
+          POSTGRES_PASSWORD: ci_password
+        options: >-
+          --health-cmd "pg_isready -U ci_user -d parking_tracker_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          # Cache pip downloads keyed on both requirements files so the cache
+          # invalidates correctly when either changes.
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        # requirements-dev.txt includes -r requirements.txt so this installs
+        # both production and development packages.
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests with coverage gate
+        env:
+          SECRET_KEY: ci-only-not-a-real-secret-key-for-testing
+          DB_NAME: parking_tracker_test
+          DB_USER: ci_user
+          DB_PASSWORD: ci_password
+          DB_HOST: localhost
+          DB_PORT: "5432"
+          # DEBUG=True in CI: keeps the dev server settings active so
+          # SECURE_SSL_REDIRECT and other production-only middleware don't
+          # interfere with test client requests.
+          DEBUG: "True"
+        run: |
+          pytest apps/accounts/ apps/parking/ \
+            --cov=apps/accounts \
+            --cov=apps/parking \
+            --cov-fail-under=80 \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            -v
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          retention-days: 7
