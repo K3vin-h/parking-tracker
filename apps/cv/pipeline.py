@@ -49,6 +49,50 @@ LOW_CONFIDENCE_THRESHOLD: float = 0.6
 _MIN_BBOX_SIZE: float = 0.05
 
 
+def _detector_bbox_to_original_image(
+    bbox: list[float],
+    original_shape: tuple[int, int],
+    detector_size: tuple[int, int] = (640, 480),
+) -> list[float]:
+    """
+    Convert a detector-canvas bbox back to original-image coordinates.
+
+    resize_for_detector() preserves aspect ratio by letterboxing the original
+    image into a fixed detector canvas.  The detector's bbox is therefore
+    normalized to the padded 640×480 canvas.  PlateDetectionEvent.bounding_box
+    is consumed by dashboard overlays on the original upload, so returning the
+    canvas-space box would shift boxes on non-4:3 images.  This helper removes
+    that padding and re-normalizes the box to the original image area.
+    """
+    x, y, w, h = bbox
+    original_h, original_w = original_shape
+    detector_w, detector_h = detector_size
+
+    scale = min(detector_w / original_w, detector_h / original_h)
+    resized_w = max(1, int(round(original_w * scale)))
+    resized_h = max(1, int(round(original_h * scale)))
+    pad_x = detector_w - resized_w
+    pad_y = detector_h - resized_h
+    left = pad_x // 2
+    top = pad_y // 2
+
+    # Convert normalized detector-canvas coordinates to detector pixels, remove
+    # letterbox padding, then normalize to the unpadded resized image.  Since the
+    # resized content has the same aspect ratio as the original, these normalized
+    # values also align with the original image dimensions.
+    x1 = (x * detector_w - left) / resized_w
+    y1 = (y * detector_h - top) / resized_h
+    x2 = ((x + w) * detector_w - left) / resized_w
+    y2 = ((y + h) * detector_h - top) / resized_h
+
+    x1 = max(0.0, min(1.0, x1))
+    y1 = max(0.0, min(1.0, y1))
+    x2 = max(0.0, min(1.0, x2))
+    y2 = max(0.0, min(1.0, y2))
+
+    return [x1, y1, max(0.0, x2 - x1), max(0.0, y2 - y1)]
+
+
 class PipelineResult(TypedDict):
     """Return type for PlateRecognitionPipeline.process()."""
 
@@ -131,9 +175,11 @@ class PlateRecognitionPipeline:
         resolution.  Cropping the same resized image ensures the pixel region
         the detector "saw" is what gets passed to the recognizer.
 
-        WHY return bounding_box in top-left format (not YOLO center): the
-        PlateDetectionEvent model stores bounding_box as [x, y, w, h] top-left
-        + size.  Converting here keeps all callers consistent.
+        WHY return bounding_box in original image space: crop_plate_region()
+        uses detector-canvas coordinates because the recognizer should receive
+        the same resized pixels the detector saw.  PlateDetectionEvent stores
+        boxes for dashboard overlays on the original upload, so the returned
+        bounding_box is converted back through the inverse letterbox transform.
 
         Args:
             image_path: Path to the uploaded image.  Must be inside MEDIA_ROOT
@@ -149,6 +195,7 @@ class PlateRecognitionPipeline:
         """
         # ── Step 1: load and preprocess for the detector ──────────────────
         bgr = load_image(image_path)                          # (H, W, 3) uint8 BGR
+        original_shape = bgr.shape[:2]
         rgb = bgr_to_rgb(bgr)                                 # (H, W, 3) uint8 RGB
         rgb_resized = resize_for_detector(rgb)                # (480, 640, 3) uint8 RGB
         tensor = to_tensor(normalize_pixels(rgb_resized))     # (3, 480, 640) float32
@@ -168,7 +215,10 @@ class PlateRecognitionPipeline:
             return {
                 "plate_text": "",
                 "confidence": 0.0,
-                "bounding_box": [cx - w / 2, cy - h / 2, w, h],
+                "bounding_box": _detector_bbox_to_original_image(
+                    [cx - w / 2, cy - h / 2, w, h],
+                    original_shape,
+                ),
                 "is_low_confidence": True,
             }
 
@@ -186,7 +236,7 @@ class PlateRecognitionPipeline:
             return {
                 "plate_text": "",
                 "confidence": 0.0,
-                "bounding_box": [x, y, w, h],
+                "bounding_box": _detector_bbox_to_original_image([x, y, w, h], original_shape),
                 "is_low_confidence": True,
             }
         crop_tensor = prepare_for_recognizer(crop)             # (1, 32, 128) float32
@@ -217,14 +267,14 @@ class PlateRecognitionPipeline:
         is_low_confidence = confidence < LOW_CONFIDENCE_THRESHOLD
 
         logger.debug(
-            "Detected plate=%r confidence=%.3f low_conf=%s",
-            plate_text, confidence, is_low_confidence,
+            "Plate recognition complete confidence=%.3f low_conf=%s",
+            confidence, is_low_confidence,
         )
 
         return {
             "plate_text": plate_text,
             "confidence": confidence,
-            "bounding_box": [x, y, w, h],
+            "bounding_box": _detector_bbox_to_original_image([x, y, w, h], original_shape),
             "is_low_confidence": is_low_confidence,
         }
 

@@ -63,12 +63,13 @@ def _run_process(
     bbox: list[float],
     log_probs: torch.Tensor,
     plate_text: str = "ABC123",
+    image_shape: tuple[int, int, int] = (480, 640, 3),
 ) -> dict:
     """
     Run pipeline.process() with mocked load_image and model outputs.
 
-    Passes a 640×480 zero-value uint8 array as the image so the preprocessing
-    chain runs normally without a real file on disk.
+    Passes a zero-value uint8 array as the image so the preprocessing chain
+    runs normally without a real file on disk.
     """
     pipeline.detector.predict.return_value = torch.tensor([bbox])  # (1, 4)
     pipeline.recognizer.predict.return_value = log_probs
@@ -76,7 +77,7 @@ def _run_process(
 
     with patch(
         "apps.cv.pipeline.load_image",
-        return_value=np.zeros((480, 640, 3), dtype=np.uint8),
+        return_value=np.zeros(image_shape, dtype=np.uint8),
     ):
         return pipeline.process("media/fake.jpg")
 
@@ -171,6 +172,38 @@ class TestPlateRecognitionPipelineProcess:
         assert abs(y - 0.4) < 1e-5
         assert abs(w - 0.4) < 1e-5
         assert abs(h - 0.2) < 1e-5
+
+    def test_bounding_box_unletterboxes_to_original_image(self) -> None:
+        """
+        Returned bounding_box is normalized to the original upload, not padding.
+
+        A 1920×1080 frame letterboxes into 640×480 as 640×360 with 60 px top
+        and bottom padding.  Detector-space y=0.375 therefore maps to original
+        y=(180 - 60) / 360 = 0.333..., while x is unchanged because there is no
+        horizontal padding.
+        """
+        pipeline = _make_pipeline()
+        result = _run_process(
+            pipeline,
+            [0.5, 0.5, 0.25, 0.25],
+            torch.zeros(16, 1, 37),
+            image_shape=(1080, 1920, 3),
+        )
+        x, y, w, h = result["bounding_box"]
+        assert abs(x - 0.375) < 1e-5
+        assert abs(y - (1 / 3)) < 1e-5
+        assert abs(w - 0.25) < 1e-5
+        assert abs(h - (1 / 3)) < 1e-5
+
+    def test_success_log_does_not_include_plate_text(self) -> None:
+        """Successful inference logs confidence metadata without raw plate text."""
+        pipeline = _make_pipeline()
+        with patch("apps.cv.pipeline.logger.debug") as debug_log:
+            _run_process(pipeline, _VALID_BBOX, torch.zeros(16, 1, 37), plate_text="SECRET123")
+
+        logged_args = " ".join(str(arg) for call in debug_log.call_args_list for arg in call.args)
+        assert "SECRET123" not in logged_args
+        assert "Plate recognition complete" in logged_args
 
     def test_is_low_confidence_false_when_decisive_non_blank(self) -> None:
         """
