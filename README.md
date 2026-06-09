@@ -208,90 +208,36 @@ Resizes the plate crop to 128×32 pixels and converts it to grayscale. The recog
 ---
 ### Plate Detector CNN
 
-`PlateDetectorCNN` is a custom convolutional neural network that finds where the
-license plate is in the full image. It does not read the plate text; it predicts
-one bounding box so the next model can crop the plate and recognize the
-characters.
+The `PlateDetectorCNN` is a custom convolutional neural network which contains 2 main parts:
+1. The convolutional backbone which looks through the image and extracts patterns,
+2. A fully connected layer which outputs the bounding box of the plate in YOLO format [cx, cy, w, h] where all values are normalised to the range [0, 1] relative to the image dimensions.
 
-For a full beginner walkthrough, see
-[`docs/plate-detector-cnn-explained.md`](docs/plate-detector-cnn-explained.md).
-
-The detector has 3 main parts:
-
-1. A convolutional backbone which extracts visual patterns from the image.
-2. An adaptive pooling layer which reduces those patterns to a fixed `4 x 4` grid.
-3. A fully connected regression head which outputs the plate box as `[cx, cy, w, h]`.
-
-All four output values are normalized to `[0, 1]` relative to the image size.
-The model uses `Dropout(0.3)` before the final output layer to reduce
-overfitting on synthetic training data.
+Note that the drop out rate is set to 0.3 to prevent overfitting on the synthetic data.
 
 #### Convolutional Backbone
+The detector recieves input in the form of (batch size, number of channels, height, width).
+The convolutional backbone contains 3 layers:
+In each layer, the input is processed through the following steps:
+1. Conv2d which looks and defines patterns within the image. For example, it might detect the edge of the plate, or where the first letter of the plate is located.
+2. BatchNorm2d which keeps the numbers stable during training, this prevents the model from constantly changing the weights of the nodes in the network. The normalize helps the model learn faster and reduces chaos.
+3. ReLU which keeps useful positive signals and sets all negative signals to 0. This introduces non-linearity into the network and allows for the model to learn more complex patterns. inplace=True is used to avoid creating a new tensor and just overwriting the existing one each time.
+4. MaxPool2d which shrinks the image size by taken the maximum value of the window. kernal size refers to the size of the window, and stride refers to the number of pixels to move the window by each time. In layer 3, the height is kept the same to prevent the model from losing information when trying to predict the plate text. For example, B and 8 would be hard to tell apart if the height was cut in half.
 
-The detector receives input in this tensor shape:
+Layer 1 is focused mainly detecting the edges of the plate and possible letters within the plate. Layer 2 is focused on detecting the where the letters are located within the plate. Layer 3 is focused on detecting what the letters are.
+The output becomes (batch size, feature channels, height, width) which is then flattened into a 1D tensor with shape (batch size, feature channels * height * width). Low -> medium -> high level features. The padding is used to ensure that the output has the same shape as the input, and bias is prevent overfitting.
 
-```text
-(batch size, 3, height, width)
-```
-
-The `3` means RGB color channels. Each convolution block uses:
-
-```text
-Conv2d -> BatchNorm2d -> ReLU -> MaxPool2d
-```
-
-- `Conv2d` learns visual patterns such as edges, corners, borders, and plate-like regions.
-- `BatchNorm2d` keeps internal values stable so training is less chaotic.
-- `ReLU` keeps useful positive signals and turns negative values into zero.
-- `MaxPool2d` shrinks the feature map while keeping the strongest signals.
-
-The three detector blocks learn increasingly abstract patterns:
-
-1. Block 1 learns low-level details such as edges and color changes.
-2. Block 2 combines those details into lines, borders, and rectangular outlines.
-3. Block 3 learns higher-level plate-like regions with text-like texture inside.
-
-For the normal `480 x 640` detector input, the spatial size changes like this:
-
-```text
-480 x 640
--> 240 x 320
--> 120 x 160
--> 60 x 80
-```
-
-Then `AdaptiveAvgPool2d((4, 4))` compresses the features to `(batch size, 128, 4, 4)`.
-Flattening turns that into `2048` feature values per image.
+After the third layer, the output is flattened into a 1D tensor with shape (batch size, feature channels * height * width [feature values]).
 
 #### Fully Connected Layer
-
-The fully connected head compresses the `2048` features into `256` values and
-then into `4` values:
-
-```text
-[cx, cy, w, h]
-```
-
-These represent the center position, width, and height of the plate box.
-`sigmoid` is applied inside `forward()` so the output always stays in `[0, 1]`.
+The learned features outputed from the third layer is compressed into 256 and then into 4 feature value which represent the bounding box of the plate in YOLO format [cx, cy, w, h] where all values are normalised to the range [0, 1] relative to the image dimensions by using the sigmoid function.
 
 #### Training the Model
-
-The model receives a batch of images and the expected bounding box for each
-image. It predicts boxes, compares them to the expected boxes with
-`SmoothL1Loss`, and uses backpropagation with the Adam optimizer to update the
-weights. The detector training script is configured from command-line arguments;
-the documented target is validation IoU above `0.7` after 50 epochs on
-synthetic data.
+The model is given a batch of images and the expected bounding box. The model then outputs the predicted bounding box based on the input image. The loss is calculated using the Smooth L1 loss function, which calculates the loss between the predicted bounding box and the expected bounding box. The loss is then backpropagated through the network to update the weights of the nodes in the network. The adam optimizer is used to update the weights of the nodes in the network. The learning rate is set to 0.001 and the batch size is set to 32. The model is trained for 100 epochs.
 
 #### Evaluation the Model
-
-The model is evaluated on a held-out validation set. The training script reports
-IoU, or Intersection over Union, which measures how much the predicted box
-overlaps the correct box. Higher IoU values are better.
+The model is evaluated on a held out dataset of images and the expected bounding box. The model then outputs the predicted bounding box based on the input image. The IoU (Intersection over Union) is calculated between the predicted bounding box and the expected bounding box. The IoU is then used to evaluate the accuracy of the model. Higher IoU values are better.
 
 #### Saving the Model
-
 The model is saved to the `apps/cv/weights/detector.pth` file.
 
 
