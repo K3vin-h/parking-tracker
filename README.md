@@ -208,58 +208,91 @@ Resizes the plate crop to 128×32 pixels and converts it to grayscale. The recog
 ---
 ### Plate Detector CNN
 
-`PlateDetectorCNN` is a custom convolutional neural network which contains 3 main parts:
-1. The convolutional backbone which looks through the image and extracts patterns,
-2. A pooling layer which reduces the size of the image to a fixed size,
-3. A fully connected layer which outputs the bounding box of the plate.
+`PlateDetectorCNN` is a custom convolutional neural network that finds where the
+license plate is in the full image. It does not read the plate text; it predicts
+one bounding box so the next model can crop the plate and recognize the
+characters.
 
-The four output values are normalized between `0` and `1`:
+For a full beginner walkthrough, see
+[`docs/plate-detector-cnn-explained.md`](docs/plate-detector-cnn-explained.md).
 
-- `cx` is the plate center position from left to right.
-- `cy` is the plate center position from top to bottom.
-- `w` is the plate width compared to the full image width.
-- `h` is the plate height compared to the full image height.
+The detector has 3 main parts:
 
-Example:
+1. A convolutional backbone which extracts visual patterns from the image.
+2. An adaptive pooling layer which reduces those patterns to a fixed `4 x 4` grid.
+3. A fully connected regression head which outputs the plate box as `[cx, cy, w, h]`.
+
+All four output values are normalized to `[0, 1]` relative to the image size.
+The model uses `Dropout(0.3)` before the final output layer to reduce
+overfitting on synthetic training data.
+
+#### Convolutional Backbone
+
+The detector receives input in this tensor shape:
 
 ```text
-[0.50, 0.60, 0.22, 0.08]
+(batch size, 3, height, width)
 ```
 
-This means the plate is centered halfway across the image, 60% down the image,
-22% as wide as the image, and 8% as tall as the image.
-
-The model structure is:
-
-```mermaid
-flowchart TD
-    IMG["RGB image tensor<br/>(B, 3, H, W)"]
-    B1["Conv block 1<br/>edges, corners, colour changes"]
-    B2["Conv block 2<br/>simple shapes and outlines"]
-    B3["Conv block 3<br/>plate-like regions"]
-    POOL["AdaptiveAvgPool2d<br/>fixed 4 x 4 feature grid"]
-    FLAT["Flatten<br/>2048 features"]
-    FC1["Linear layer<br/>2048 -> 256"]
-    FC2["Linear layer<br/>256 -> 4"]
-    BOX["Bounding box<br/>[cx, cy, w, h]"]
-
-    IMG --> B1 --> B2 --> B3 --> POOL --> FLAT --> FC1 --> FC2 --> BOX
-```
-
-Each convolution block uses this pattern:
+The `3` means RGB color channels. Each convolution block uses:
 
 ```text
 Conv2d -> BatchNorm2d -> ReLU -> MaxPool2d
 ```
 
-- `Conv2d` learns visual patterns.
-- `BatchNorm2d` keeps the numbers stable during training.
-- `ReLU` keeps useful positive signals.
-- `MaxPool2d` shrinks the image features while keeping the strongest signals.
+- `Conv2d` learns visual patterns such as edges, corners, borders, and plate-like regions.
+- `BatchNorm2d` keeps internal values stable so training is less chaotic.
+- `ReLU` keeps useful positive signals and turns negative values into zero.
+- `MaxPool2d` shrinks the feature map while keeping the strongest signals.
 
-The final layer uses `sigmoid`, so predictions stay inside `[0, 1]`. That keeps
-training and inference in the same coordinate format.
+The three detector blocks learn increasingly abstract patterns:
 
+1. Block 1 learns low-level details such as edges and color changes.
+2. Block 2 combines those details into lines, borders, and rectangular outlines.
+3. Block 3 learns higher-level plate-like regions with text-like texture inside.
+
+For the normal `480 x 640` detector input, the spatial size changes like this:
+
+```text
+480 x 640
+-> 240 x 320
+-> 120 x 160
+-> 60 x 80
+```
+
+Then `AdaptiveAvgPool2d((4, 4))` compresses the features to `(batch size, 128, 4, 4)`.
+Flattening turns that into `2048` feature values per image.
+
+#### Fully Connected Layer
+
+The fully connected head compresses the `2048` features into `256` values and
+then into `4` values:
+
+```text
+[cx, cy, w, h]
+```
+
+These represent the center position, width, and height of the plate box.
+`sigmoid` is applied inside `forward()` so the output always stays in `[0, 1]`.
+
+#### Training the Model
+
+The model receives a batch of images and the expected bounding box for each
+image. It predicts boxes, compares them to the expected boxes with
+`SmoothL1Loss`, and uses backpropagation with the Adam optimizer to update the
+weights. The detector training script is configured from command-line arguments;
+the documented target is validation IoU above `0.7` after 50 epochs on
+synthetic data.
+
+#### Evaluation the Model
+
+The model is evaluated on a held-out validation set. The training script reports
+IoU, or Intersection over Union, which measures how much the predicted box
+overlaps the correct box. Higher IoU values are better.
+
+#### Saving the Model
+
+The model is saved to the `apps/cv/weights/detector.pth` file.
 
 
 ### Plate Recognizer CRNN
