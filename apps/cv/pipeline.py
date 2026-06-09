@@ -126,14 +126,20 @@ class PlateRecognitionPipeline:
         recognizer_path: str,
         device: torch.device | None = None,
     ) -> None:
+        # WHY generic error messages: the raised text may end up serialized in
+        # an API response by a future view's error handler.  Embedding the
+        # filesystem path there would disclose server layout (CWE-209), so the
+        # full path is logged server-side only and callers get a generic hint.
         if not os.path.isfile(detector_path):
+            logger.warning("Detector weights missing at %r", detector_path)
             raise FileNotFoundError(
-                f"Detector weights not found: {detector_path!r}. "
+                "Detector model weights are not available. "
                 "Train the detector first: python apps/cv/training/train_detector.py"
             )
         if not os.path.isfile(recognizer_path):
+            logger.warning("Recognizer weights missing at %r", recognizer_path)
             raise FileNotFoundError(
-                f"Recognizer weights not found: {recognizer_path!r}. "
+                "Recognizer model weights are not available. "
                 "Train the recognizer first: python apps/cv/training/train_recognizer.py"
             )
 
@@ -141,21 +147,50 @@ class PlateRecognitionPipeline:
 
         # WHY weights_only=True: prevents arbitrary code execution that would
         # be possible with a pickle-based load of an untrusted .pth file.
+        #
+        # WHY the try/except: a weight file can exist but be corrupt, truncated
+        # (failed training run), or saved from an incompatible architecture.
+        # torch.load / load_state_dict raise RuntimeError, UnpicklingError, or
+        # EOFError in those cases — without this guard the raw PyTorch traceback
+        # (with internal paths) would crash the first upload request.  The full
+        # error is logged server-side; callers get a clean, actionable message.
         self.detector = PlateDetectorCNN()
-        self.detector.load_state_dict(
-            torch.load(detector_path, map_location=self.device, weights_only=True)
-        )
+        self._load_weights(self.detector, detector_path, model_name="detector")
         self.detector.to(self.device)
         self.detector.eval()
 
         self.recognizer = PlateRecognizerCRNN()
-        self.recognizer.load_state_dict(
-            torch.load(recognizer_path, map_location=self.device, weights_only=True)
-        )
+        self._load_weights(self.recognizer, recognizer_path, model_name="recognizer")
         self.recognizer.to(self.device)
         self.recognizer.eval()
 
         logger.info("PlateRecognitionPipeline ready device=%s", self.device)
+
+    def _load_weights(
+        self, model: torch.nn.Module, path: str, model_name: str
+    ) -> None:
+        """
+        Load a state dict into `model`, converting corruption / mismatch errors
+        into clean RuntimeErrors.
+
+        WHY a helper: both models need identical guard logic, and keeping the
+        except clause in one place ensures the no-path-leak policy (full path
+        logged internally, generic message raised) stays consistent.
+        torch.load fails on corrupt/truncated files; load_state_dict fails on
+        architecture mismatches — both must be guarded.
+        """
+        try:
+            state_dict = torch.load(path, map_location=self.device, weights_only=True)
+            model.load_state_dict(state_dict)
+        except Exception as exc:
+            logger.error(
+                "Failed to load %s weights from %r: %s", model_name, path, exc
+            )
+            raise RuntimeError(
+                f"Failed to load {model_name} model weights — the file may be "
+                "corrupt or from an incompatible model version. Retrain or "
+                "replace the weights file."
+            ) from exc
 
     def process(self, image_path: str) -> PipelineResult:
         """
@@ -191,7 +226,8 @@ class PlateRecognitionPipeline:
 
         Raises:
             FileNotFoundError: If the image cannot be loaded.
-            ValueError:        If image_path is outside MEDIA_ROOT.
+            UnsafeImagePathError: If image_path is outside MEDIA_ROOT
+                               (subclass of ValueError) — map to HTTP 400.
         """
         # ── Step 1: load and preprocess for the detector ──────────────────
         bgr = load_image(image_path)                          # (H, W, 3) uint8 BGR
@@ -208,7 +244,11 @@ class PlateRecognitionPipeline:
 
         # ── Step 3: reject tiny / missing plate ───────────────────────────
         if w < _MIN_BBOX_SIZE or h < _MIN_BBOX_SIZE:
-            logger.debug(
+            # WHY info (not debug): this is the most common degraded outcome
+            # (empty lot frame, badly trained detector).  Operators must be
+            # able to distinguish "no plate found" from pipeline errors at the
+            # default production log level.
+            logger.info(
                 "Plate bbox too small w=%.3f h=%.3f — treating as no plate detected",
                 w, h,
             )
@@ -232,7 +272,13 @@ class PlateRecognitionPipeline:
         except ValueError as exc:
             # bbox passed the size check but produces a zero-area crop after
             # integer conversion and clamping (e.g. plate at image edge).
-            logger.debug("crop_plate_region raised on edge bbox: %s", exc)
+            # WHY warning: the detector produced a plausible box that then
+            # failed to crop — an actionable anomaly that must be visible in
+            # production logs, unlike the expected tiny-bbox path above.
+            logger.warning(
+                "crop_plate_region raised on edge bbox [%.3f, %.3f, %.3f, %.3f]: %s",
+                x, y, w, h, exc,
+            )
             return {
                 "plate_text": "",
                 "confidence": 0.0,
@@ -256,9 +302,11 @@ class PlateRecognitionPipeline:
         # Restricting to non-blank argmax positions gives a cleaner signal.
         # Fallback to the full mean when all steps are blank (all-blank output
         # means the model saw nothing; preserving the low value is correct).
+        # WHY [:, 0] not squeeze(1): explicit batch indexing — squeeze would
+        # silently misbehave if the batch dimension ever exceeded 1.
         probs = torch.exp(log_probs)                           # (16, 1, 37)
-        max_probs = probs.max(dim=-1).values.squeeze(1)        # (16,)
-        argmax = log_probs.argmax(dim=-1).squeeze(1)           # (16,)
+        max_probs = probs.max(dim=-1).values[:, 0]             # (16,)
+        argmax = log_probs.argmax(dim=-1)[:, 0]                # (16,)
         char_mask = argmax != BLANK_IDX                        # (16,) bool
         char_probs = max_probs[char_mask]
         confidence: float = (

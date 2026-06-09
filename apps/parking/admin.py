@@ -32,6 +32,10 @@ class LicensePlateAdmin(admin.ModelAdmin):
 
     # Show plate text, owner, primary flag, and label at a glance.
     list_display = ['plate_text', 'user', 'is_primary', 'label']
+    # WHY list_select_related: rendering 'user' calls str(obj.user) per row —
+    # without the JOIN that is one extra query per plate on every list page
+    # load (classic N+1).
+    list_select_related = ['user']
     list_filter = ['is_primary']
     # Operators can search by plate text or by the owning user's credentials.
     search_fields = ['plate_text', 'user__username', 'user__email']
@@ -60,6 +64,8 @@ class LotSettingsAdmin(admin.ModelAdmin):
         'image_retention_days',
         'confidence_threshold',
     ]
+    # Avoid one query per row when rendering str(obj.lot) in the list view.
+    list_select_related = ['lot']
     list_filter = ['billing_unit', 'daily_cap_enabled']
 
 
@@ -85,6 +91,8 @@ class ParkingSessionAdmin(admin.ModelAdmin):
         'has_duplicate_warning',
         'was_orphaned',
     ]
+    # Avoid one query per row when rendering str(obj.lot) in the list view.
+    list_select_related = ['lot']
     list_filter = ['status', 'lot', 'has_duplicate_warning', 'was_orphaned']
     search_fields = ['plate_text']
     # Newest sessions first — operators monitoring the lot want recent activity.

@@ -336,9 +336,13 @@ LOGGING = {
         },
         # Logger for our application code.
         # Usage: import logging; logger = logging.getLogger(__name__)
+        # WHY INFO in production: app code may legitimately log sensitive
+        # context (plate text, charges) at DEBUG while developing.  Keeping
+        # DEBUG enabled in production would forward that PII to whatever log
+        # aggregator collects container output (CWE-532).
         'apps': {
             'handlers': ['console'],
-            'level': 'DEBUG',
+            'level': 'DEBUG' if DEBUG else 'INFO',
             'propagate': False,
         },
     },
@@ -372,6 +376,12 @@ if not DEBUG:
     # already-secure client traffic that arrived over HTTP from the TLS proxy.
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
     SECURE_SSL_REDIRECT = True
+
+    # The Docker HEALTHCHECK probes /health/ over plain HTTP from inside the
+    # container — exempting it here is safer than having the probe spoof an
+    # X-Forwarded-Proto: https header, which would normalize trusting that
+    # spoofable header from localhost traffic.
+    SECURE_REDIRECT_EXEMPT = [r'^health/$']
 
     # Session and CSRF cookies must only be sent over HTTPS.
     # Without these, a network attacker could steal session/CSRF tokens over HTTP.
