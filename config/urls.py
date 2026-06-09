@@ -17,12 +17,32 @@ URL STRUCTURE:
   /api/         → Dashboard API endpoints (populated in Day 8)
 """
 
+import ipaddress
+
 from django.contrib import admin
 from django.db import connection
-from django.http import JsonResponse
+from django.http import HttpResponseForbidden, JsonResponse
 from django.urls import include, path
 from django.conf import settings
 from django.conf.urls.static import static
+
+
+def _is_internal_probe(request) -> bool:
+    """
+    True when the request originates from loopback or a private network.
+
+    WHY: /health/ executes a real database query on every call with no
+    authentication or rate limiting.  Left open to the internet it becomes a
+    free DB-connectivity oracle an attacker can hammer.  Docker HEALTHCHECK
+    (loopback inside the container), docker-compose, K8s probes, and load
+    balancers all connect from loopback or RFC1918 addresses, so restricting
+    to those keeps every legitimate prober working.
+    """
+    try:
+        addr = ipaddress.ip_address(request.META.get('REMOTE_ADDR', ''))
+    except ValueError:
+        return False
+    return addr.is_loopback or addr.is_private
 
 
 def health_check(request):
@@ -31,9 +51,11 @@ def health_check(request):
 
     Verifies that Django is running AND the database connection is alive.
     Returns 200 {"status": "ok"} on success, 503 {"status": "error"} on failure.
-    No authentication required — this endpoint is intentionally public so that
-    Docker, K8s, and load balancers can poll it without credentials.
+    No authentication required, but the caller must be on loopback or a
+    private network (see _is_internal_probe) — public clients get 403.
     """
+    if not _is_internal_probe(request):
+        return HttpResponseForbidden()
     try:
         # Execute a real query instead of only ensuring a connection object
         # exists; persistent connections can otherwise look healthy after

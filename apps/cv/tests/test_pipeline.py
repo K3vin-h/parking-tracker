@@ -90,7 +90,7 @@ class TestPlateRecognitionPipelineInit:
 
     def test_raises_if_detector_weights_missing(self) -> None:
         """FileNotFoundError when the detector .pth file does not exist."""
-        with pytest.raises(FileNotFoundError, match="Detector weights"):
+        with pytest.raises(FileNotFoundError, match="Detector model weights"):
             PlateRecognitionPipeline(
                 detector_path="/nonexistent/detector.pth",
                 recognizer_path="/nonexistent/recognizer.pth",
@@ -104,20 +104,45 @@ class TestPlateRecognitionPipelineInit:
         with (
             patch("apps.cv.pipeline.torch.load", return_value={}),
             patch("apps.cv.pipeline.PlateDetectorCNN"),
-            pytest.raises(FileNotFoundError, match="Recognizer weights"),
+            pytest.raises(FileNotFoundError, match="Recognizer model weights"),
         ):
             PlateRecognitionPipeline(
                 detector_path=det_path,
                 recognizer_path="/nonexistent/recognizer.pth",
             )
 
-    def test_error_message_includes_path(self) -> None:
-        """The FileNotFoundError message names the missing file."""
-        with pytest.raises(FileNotFoundError, match="/no/such/detector.pth"):
+    def test_error_message_excludes_path(self) -> None:
+        """
+        The FileNotFoundError message must NOT name the missing file.
+
+        WHY: the raised text may be serialized into an API response by a
+        future view's error handler — embedding the filesystem path there
+        would disclose server layout (CWE-209).  The full path is logged
+        server-side instead.
+        """
+        with pytest.raises(FileNotFoundError) as exc_info:
             PlateRecognitionPipeline(
                 detector_path="/no/such/detector.pth",
                 recognizer_path="/no/such/recognizer.pth",
             )
+        assert "/no/such/detector.pth" not in str(exc_info.value)
+
+    def test_corrupt_weights_raise_clean_runtime_error(self, tmp_path: Path) -> None:
+        """
+        A weights file that exists but cannot be loaded raises RuntimeError
+        with a generic message (no filesystem path leaked).
+        """
+        det_path = tmp_path / "detector.pth"
+        det_path.write_bytes(b"not a real torch checkpoint")
+        rec_path = tmp_path / "recognizer.pth"
+        rec_path.write_bytes(b"also not a checkpoint")
+
+        with pytest.raises(RuntimeError, match="detector model weights") as exc_info:
+            PlateRecognitionPipeline(
+                detector_path=str(det_path),
+                recognizer_path=str(rec_path),
+            )
+        assert str(det_path) not in str(exc_info.value)
 
     def test_both_models_set_to_eval_mode(self) -> None:
         """detector.eval() and recognizer.eval() are called during init."""

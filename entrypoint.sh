@@ -19,7 +19,12 @@ echo "Waiting for PostgreSQL at ${DB_HOST}:${DB_PORT}..."
 
 # Use psycopg2 (already installed) to test connectivity — avoids needing
 # the postgresql-client system package (pg_isready) in the runtime image.
-until python - <<'PYEOF' 2>/dev/null
+#
+# WHY the probe prints its error: with a silent `except: exit(1)` a missing
+# psycopg2 package or a wrong DB_PASSWORD was indistinguishable from
+# "Postgres not ready yet" — the loop would burn all retries and report a
+# generic timeout while the real cause never appeared in the container log.
+until python - <<'PYEOF'
 import os, sys
 try:
     import psycopg2
@@ -30,7 +35,8 @@ try:
         password=os.environ.get('DB_PASSWORD', ''),
         dbname=os.environ.get('DB_NAME', 'parking_tracker'),
     ).close()
-except Exception:
+except Exception as exc:
+    print(f"  DB probe failed: {type(exc).__name__}: {exc}", file=sys.stderr)
     sys.exit(1)
 PYEOF
 do
