@@ -86,6 +86,13 @@ DEBUG = os.environ.get('DEBUG', 'False').strip().lower() == 'true'
 _raw_hosts = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1')
 ALLOWED_HOSTS = [h.strip() for h in _raw_hosts.split(',') if h.strip()]
 
+# Optional shared secret for reverse-proxy/load-balancer health probes.
+# WHY optional: local Docker healthchecks originate from loopback and do not
+# need a secret, but production probes that arrive through a private proxy need
+# an explicit authenticator because REMOTE_ADDR would otherwise be the proxy IP
+# for every public client.
+HEALTH_CHECK_TOKEN = os.environ.get('HEALTH_CHECK_TOKEN', '').strip()
+
 
 # ── Installed Applications ────────────────────────────────────────────────────
 
