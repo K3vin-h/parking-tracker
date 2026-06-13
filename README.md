@@ -208,58 +208,37 @@ Resizes the plate crop to 128×32 pixels and converts it to grayscale. The recog
 ---
 ### Plate Detector CNN
 
-`PlateDetectorCNN` is a custom convolutional neural network which contains 3 main parts:
+The `PlateDetectorCNN` is a custom convolutional neural network which contains 2 main parts:
 1. The convolutional backbone which looks through the image and extracts patterns,
-2. A pooling layer which reduces the size of the image to a fixed size,
-3. A fully connected layer which outputs the bounding box of the plate.
+2. A fully connected layer which outputs the bounding box of the plate in YOLO format [cx, cy, w, h] where all values are normalised to the range [0, 1] relative to the image dimensions.
 
-The four output values are normalized between `0` and `1`:
+Note that the drop out rate is set to 0.3 to prevent overfitting on the synthetic data.
 
-- `cx` is the plate center position from left to right.
-- `cy` is the plate center position from top to bottom.
-- `w` is the plate width compared to the full image width.
-- `h` is the plate height compared to the full image height.
+#### Convolutional Backbone
+The detector recieves input in the form of (batch size, number of channels, height, width).
+The convolutional backbone contains 3 layers:
+In each layer, the input is processed through the following steps:
+1. Conv2d which looks and defines patterns within the image. For example, it might detect the edge of the plate, or where the first letter of the plate is located.
+2. BatchNorm2d which keeps the numbers stable during training, this prevents the model from constantly changing the weights of the nodes in the network. The normalize helps the model learn faster and reduces chaos.
+3. ReLU which keeps useful positive signals and sets all negative signals to 0. This introduces non-linearity into the network and allows for the model to learn more complex patterns. inplace=True is used to avoid creating a new tensor and just overwriting the existing one each time.
+4. MaxPool2d which shrinks the image size by taken the maximum value of the window. kernal size refers to the size of the window, and stride refers to the number of pixels to move the window by each time. In layer 3, the height is kept the same to prevent the model from losing information when trying to predict the plate text. For example, B and 8 would be hard to tell apart if the height was cut in half.
 
-Example:
+Layer 1 is focused mainly detecting the edges of the plate and possible letters within the plate. Layer 2 is focused on detecting the where the letters are located within the plate. Layer 3 is focused on detecting what the letters are.
+The output becomes (batch size, feature channels, height, width) which is then flattened into a 1D tensor with shape (batch size, feature channels * height * width). Low -> medium -> high level features. The padding is used to ensure that the output has the same shape as the input, and bias is prevent overfitting.
 
-```text
-[0.50, 0.60, 0.22, 0.08]
-```
+After the third layer, the output is flattened into a 1D tensor with shape (batch size, feature channels * height * width [feature values]).
 
-This means the plate is centered halfway across the image, 60% down the image,
-22% as wide as the image, and 8% as tall as the image.
+#### Fully Connected Layer
+The learned features outputed from the third layer is compressed into 256 and then into 4 feature value which represent the bounding box of the plate in YOLO format [cx, cy, w, h] where all values are normalised to the range [0, 1] relative to the image dimensions by using the sigmoid function.
 
-The model structure is:
+#### Training the Model
+The model is given a batch of images and the expected bounding box. The model then outputs the predicted bounding box based on the input image. The loss is calculated using the Smooth L1 loss function, which calculates the loss between the predicted bounding box and the expected bounding box. The loss is then backpropagated through the network to update the weights of the nodes in the network. The adam optimizer is used to update the weights of the nodes in the network. The learning rate is set to 0.001 and the batch size is set to 32. The model is trained for 100 epochs.
 
-```mermaid
-flowchart TD
-    IMG["RGB image tensor<br/>(B, 3, H, W)"]
-    B1["Conv block 1<br/>edges, corners, colour changes"]
-    B2["Conv block 2<br/>simple shapes and outlines"]
-    B3["Conv block 3<br/>plate-like regions"]
-    POOL["AdaptiveAvgPool2d<br/>fixed 4 x 4 feature grid"]
-    FLAT["Flatten<br/>2048 features"]
-    FC1["Linear layer<br/>2048 -> 256"]
-    FC2["Linear layer<br/>256 -> 4"]
-    BOX["Bounding box<br/>[cx, cy, w, h]"]
+#### Evaluation the Model
+The model is evaluated on a held out dataset of images and the expected bounding box. The model then outputs the predicted bounding box based on the input image. The IoU (Intersection over Union) is calculated between the predicted bounding box and the expected bounding box. The IoU is then used to evaluate the accuracy of the model. Higher IoU values are better.
 
-    IMG --> B1 --> B2 --> B3 --> POOL --> FLAT --> FC1 --> FC2 --> BOX
-```
-
-Each convolution block uses this pattern:
-
-```text
-Conv2d -> BatchNorm2d -> ReLU -> MaxPool2d
-```
-
-- `Conv2d` learns visual patterns.
-- `BatchNorm2d` keeps the numbers stable during training.
-- `ReLU` keeps useful positive signals.
-- `MaxPool2d` shrinks the image features while keeping the strongest signals.
-
-The final layer uses `sigmoid`, so predictions stay inside `[0, 1]`. That keeps
-training and inference in the same coordinate format.
-
+#### Saving the Model
+The model is saved to the `apps/cv/weights/detector.pth` file.
 
 
 ### Plate Recognizer CRNN

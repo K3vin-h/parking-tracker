@@ -32,6 +32,7 @@ from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
+from django.db import transaction
 
 from apps.parking.models import LotSettings, ParkingLot
 
@@ -52,15 +53,22 @@ class Command(BaseCommand):
         """
         Main entry point for the management command.
 
-        Django calls handle() when the command is invoked. We create each
-        object inside a try/except block so one failure doesn't block the rest.
+        Django calls handle() when the command is invoked.
+
+        WHY transaction.atomic: the three creation steps are one logical unit.
+        Without it, a failure in _create_lot_settings would leave a lot with
+        no settings — and because get_or_create makes re-runs report the lot
+        as "already exists (skipped)", the missing settings would be masked
+        on every subsequent run.  Atomic rollback keeps the database in a
+        clean all-or-nothing state.
 
         The self.stdout.write() and self.style.SUCCESS() calls produce
         colored console output — green for success, yellow for skipped.
         """
-        self._create_superuser()
-        lot = self._create_parking_lot()
-        self._create_lot_settings(lot)
+        with transaction.atomic():
+            self._create_superuser()
+            lot = self._create_parking_lot()
+            self._create_lot_settings(lot)
 
         self.stdout.write(self.style.SUCCESS('\nsetup_defaults complete. Ready to go!'))
 
@@ -95,7 +103,7 @@ class Command(BaseCommand):
         # filter().exists() is preferred over get() because it returns False
         # instead of raising an exception when the user doesn't exist.
         if User.objects.filter(email=email).exists():
-            self.stdout.write(f'  Superuser already exists: {email} (skipped)')
+            self.stdout.write('  Superuser already exists (skipped)')
             return
 
         # create_superuser() hashes the password before storing it.
@@ -105,7 +113,11 @@ class Command(BaseCommand):
             email=email,
             password=password,
         )
-        self.stdout.write(self.style.SUCCESS(f'  Superuser created: {email}'))
+        # WHY no email in the output: this command runs during container
+        # initialization, so stdout lands in CI/CD build logs.  The admin
+        # email is a username and PII — printing it there invites targeted
+        # phishing.
+        self.stdout.write(self.style.SUCCESS('  Superuser created successfully.'))
 
     def _create_parking_lot(self):
         """

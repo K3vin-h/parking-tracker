@@ -17,12 +17,38 @@ URL STRUCTURE:
   /api/         → Dashboard API endpoints (populated in Day 8)
 """
 
+import ipaddress
+import secrets
+
 from django.contrib import admin
 from django.db import connection
-from django.http import JsonResponse
+from django.http import HttpResponseForbidden, JsonResponse
 from django.urls import include, path
 from django.conf import settings
 from django.conf.urls.static import static
+
+
+def _is_internal_probe(request) -> bool:
+    """
+    True when the request is a trusted health probe.
+
+    WHY: /health/ executes a real database query on every call with no user
+    session, so it must not be public.  We trust loopback for local Docker
+    HEALTHCHECK calls, and we trust a shared probe token for production
+    load-balancer checks.  We intentionally do NOT trust private REMOTE_ADDR
+    values because reverse proxies usually appear as RFC1918 addresses for
+    every public client.
+    """
+    expected_token = getattr(settings, 'HEALTH_CHECK_TOKEN', '')
+    supplied_token = request.META.get('HTTP_X_HEALTH_CHECK_TOKEN', '')
+    if expected_token and secrets.compare_digest(supplied_token, expected_token):
+        return True
+
+    try:
+        addr = ipaddress.ip_address(request.META.get('REMOTE_ADDR', ''))
+    except ValueError:
+        return False
+    return addr.is_loopback
 
 
 def health_check(request):
@@ -31,9 +57,12 @@ def health_check(request):
 
     Verifies that Django is running AND the database connection is alive.
     Returns 200 {"status": "ok"} on success, 503 {"status": "error"} on failure.
-    No authentication required — this endpoint is intentionally public so that
-    Docker, K8s, and load balancers can poll it without credentials.
+    No user authentication required, but the caller must either be loopback or
+    provide the configured X-Health-Check-Token header (see _is_internal_probe).
+    Public clients without that proof get 403.
     """
+    if not _is_internal_probe(request):
+        return HttpResponseForbidden()
     try:
         # Execute a real query instead of only ensuring a connection object
         # exists; persistent connections can otherwise look healthy after
