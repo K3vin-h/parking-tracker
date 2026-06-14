@@ -354,6 +354,10 @@ def get_pipeline(detector_path: str, recognizer_path: str) -> PlateRecognitionPi
     global _instance
     if _instance is None:
         with _lock:
-            if _instance is None:  # double-checked locking
+            # Double-checked locking: the second check guards against a thread
+            # that passed the first check before the lock was acquired. Relies
+            # on CPython GIL atomicity of the reference assignment below; a
+            # free-threaded build would need an explicit memory barrier here.
+            if _instance is None:
                 _instance = PlateRecognitionPipeline(detector_path, recognizer_path)
     return _instance

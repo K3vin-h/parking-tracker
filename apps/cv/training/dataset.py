@@ -193,7 +193,17 @@ class PlateDetectorDataset(Dataset):
             raise ValueError(
                 f"Malformed label {lbl_path.name}: expected class index 0, got {parts[0]!r}."
             )
-        bbox = torch.tensor([float(v) for v in parts[1:]], dtype=torch.float32)
+        # WHY the try/except: a corrupt label like "0 0.5 abc 0.5 0.3" makes
+        # float() raise a bare ValueError with no filename, breaking the
+        # labelled-error contract every other check in this block honours.
+        try:
+            coords = [float(v) for v in parts[1:]]
+        except ValueError as exc:
+            raise ValueError(
+                f"Malformed label {lbl_path.name}: bbox coordinates must be "
+                f"numeric ({exc})."
+            ) from exc
+        bbox = torch.tensor(coords, dtype=torch.float32)
         if not torch.isfinite(bbox).all():
             raise ValueError(
                 f"Malformed label {lbl_path.name}: bbox coordinates must be finite."
