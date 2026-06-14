@@ -580,5 +580,5 @@ def prepare_for_recognizer(plate_crop: np.ndarray) -> torch.Tensor:
     # Step 4: normalize to [0, 1]
     gray = gray.astype(np.float32) / 255.0
 
-    # Step 5: (H, W, C) → (C, H, W), ensure contiguous memory layout
+    # Step 5: (H, W, 1) → (1, H, W), ensure contiguous memory layout
     return torch.from_numpy(gray).permute(2, 0, 1).contiguous()

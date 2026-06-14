@@ -8,6 +8,7 @@ A parking lot management system that uses computer vision to read license plates
 - [CV Pipeline](#cv-pipeline)
 - [Branch: Synthetic Training Data Pipeline + Plate Detector CNN](#branch-synthetic-training-data-pipeline--plate-detector-cnn)
 - [Branch: Plate Recognizer CRNN](#branch-plate-recognizer-crnn)
+- [Branch: CV Inference Pipeline](#plate-recognition-pipeline)
 - [Creating the Dataset for Training](#creating-the-dataset-for-training)
 - [Web Application](#web-application)
 - [Docker](#docker)
@@ -120,6 +121,30 @@ The CV logging system — records every entry and exit event from the CV pipelin
 | `corrected_plate` | The manually corrected plate text |
 | `bounding_box` | Plate bounding box as a JSON array `[x, y, w, h]` |
 | `timestamp` | Time the event was created |
+
+---
+
+### Database Integrity Rules
+
+The database itself enforces a set of rules so bad data can't sneak in. Django validators only run when a model is saved through a form or `full_clean()` — `bulk_create`, `update()`, and raw SQL skip them entirely. Anything that protects billing math is therefore duplicated as a database-level constraint.
+
+| Rule&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | Description |
+| :--- | :--- |
+| No duplicate plates per user | A user cannot register the same `plate_text` twice |
+| Unique lot names | `setup_defaults` uses `get_or_create` — duplicate names would make it return an arbitrary row |
+| Sessions survive lot deletion | Sessions are billing records, so deleting a lot with sessions is blocked (`PROTECT`) instead of cascading and wiping revenue history |
+| Charges can't be negative | Enforced by both a validator and a database check |
+| Exit after entry | A car cannot exit before it entered — clock skew would otherwise produce negative durations |
+| No negative durations | `duration_seconds` must be zero or greater |
+| Voided sessions carry no charge | A voided session with a charge would corrupt revenue totals |
+| Confidence stays in range | `confidence_score` must be between 0.0 and 1.0 |
+
+<details>
+<summary><strong>Partial Indexes</strong></summary>
+
+Active sessions are a tiny fraction of the table once months of completed sessions pile up. Two partial indexes (`plate_text` and `lot`, each filtered to `status='active'`) cover only the rows the entry/exit matcher and the 10-second dashboard poll actually touch, so they stay small enough to live in cache. A third partial index covers unreviewed low-confidence detection events for the manual review queue.
+
+</details>
 
 ---
 
@@ -240,6 +265,9 @@ The model is evaluated on a held out dataset of images and the expected bounding
 #### Saving the Model
 The model is saved to the `apps/cv/weights/detector.pth` file.
 
+#### Training Results
+![Plate detector training curves](apps/cv/weights/detector_training.png)
+
 
 ### Plate Recognizer CRNN
 
@@ -270,6 +298,75 @@ The function takes the predicted probabilities and turns them into a plate text.
 
 #### Training the Model
 The model is given a batch of plate images and the expected plate text. The model then outputs the predicted plate text based on the input image. The loss is calculated using the CTC loss function, which calculates the loss between the predicted plate text and the expected plate text. The loss is then backpropagated through the network to update the weights of the nodes in the network. The adam optimizer is used to update the weights of the nodes in the network. The learning rate is set to 0.001 and the batch size is set to 32. The model is trained for 100 epochs.
+
+#### Training Results
+![Plate recognizer training curves](apps/cv/weights/recognizer_training.png)
+
+### Plate Recognition Pipeline
+
+`PlateRecognitionPipeline` is the glue that connects every CV piece above into a single call. It takes one image path and runs the whole chain — load, preprocess, detect, crop, recognize — and returns one result:
+
+```python
+result = pipeline.process(image_path)
+# {"plate_text": "ABC123", "confidence": 0.87, "bounding_box": [x, y, w, h], "is_low_confidence": False}
+```
+
+```mermaid
+flowchart TD
+    IMG(["image path"])
+    PRE["load + preprocess<br/>640×480 tensor"]
+    DET(["PlateDetectorCNN"])
+    SIZE{"bbox at least 5%<br/>of the image?"}
+    EMPTY["empty plate text<br/>confidence 0.0"]
+    CROP["crop plate region<br/>128×32 grayscale"]
+    RECOG(["PlateRecognizerCRNN"])
+    CONF["greedy CTC decode<br/>+ confidence score"]
+    RESULT(["plate text, confidence,<br/>bounding box, low-confidence flag"])
+
+    IMG --> PRE --> DET --> SIZE
+    SIZE -- no --> EMPTY
+    SIZE -- yes --> CROP --> RECOG --> CONF --> RESULT
+    EMPTY --> RESULT
+
+    classDef preproc fill:#1e40af,stroke:#1d4ed8,color:#fff
+    classDef model fill:#6d28d9,stroke:#7c3aed,color:#fff
+    classDef io fill:#0f766e,stroke:#0d9488,color:#fff
+
+    class PRE,CROP,CONF,EMPTY preproc
+    class DET,RECOG model
+    class IMG,RESULT io
+```
+
+#### Loading the Models
+
+Both models are loaded once when the pipeline is created, not on every request. Loading weights from disk takes hundreds of milliseconds, so reloading per upload would make every request slow. After loading, the models are moved to the best available device (MPS → CUDA → CPU) and switched to eval mode, so `process()` calls are stateless and safe to run from multiple threads.
+
+Weights are loaded with `weights_only=True`, which blocks the arbitrary code execution that a pickle-based load of an untrusted `.pth` file would allow. If a weight file is missing, the pipeline raises a `FileNotFoundError` telling you to train that model first. If the file exists but is corrupt, truncated, or saved from an incompatible model version, it raises a `RuntimeError` instead. In both cases the error message never contains the file path — the full path is only written to the server logs, so a future API error response can't leak the server's folder layout.
+
+#### Processing an Image
+
+1. **Load and preprocess** — the image goes through the same preprocessing chain shown at the top of [CV Pipeline](#cv-pipeline), ending as a 640×480 normalized tensor.
+2. **Detect** — `PlateDetectorCNN` predicts the plate's bounding box in YOLO center format `[cx, cy, w, h]`.
+3. **Reject tiny plates** — if the box is narrower or shorter than 5% of the image, the detector found nothing meaningful (a 5% plate would be ~32 pixels wide — too small to read). The pipeline returns early with an empty plate text and confidence `0.0`.
+4. **Crop** — the YOLO center box is converted to a top-left `[x, y, w, h]` box and the plate region is cropped out of the resized image. The crop comes from the resized image (not the original) because the detector was trained on 640×480 inputs — its coordinates describe the image it actually saw.
+5. **Recognize** — the crop is resized to 128×32 grayscale and `PlateRecognizerCRNN` reads the text using the greedy CTC decoder.
+6. **Score** — a confidence score is computed (below) and compared against the threshold.
+
+#### Confidence Score
+
+The recognizer emits 16 time-steps for every plate regardless of length, so on a 6-character plate most steps are just the blank token. The confidence score is the average of the model's certainty at each **non-blank** step — including the blank steps would inflate the score and hide genuine uncertainty on the actual characters. If every step is blank (the model saw nothing), the plain average is used so the low value is preserved.
+
+If the confidence falls below `0.6`, the result is flagged `is_low_confidence=True`. This mirrors the default `confidence_threshold` in `LotSettings`, and flagged events land in the operator's manual review queue rather than being silently trusted.
+
+#### Bounding Box in the Result
+
+The detector sees a letterboxed 640×480 canvas — the original photo is shrunk to fit and padded with neutral bars, so the detector's box is relative to the padded canvas. The dashboard, however, draws boxes on the **original** upload. The pipeline removes the padding and re-normalizes the box to the original image, so the returned `bounding_box` lines up with the photo the user actually uploaded. It is stored as `[x, y, w, h]` (top-left corner plus size, all values between 0 and 1), matching the `PlateDetectionEvent.bounding_box` field.
+
+#### One Shared Pipeline
+
+`get_pipeline()` returns a module-level singleton — the first call creates the pipeline and every later call reuses it, so all Django requests in a process share one loaded copy of the models. Creation is guarded by double-checked locking so two simultaneous first requests can't each load the models.
+
+The singleton is created lazily on the first request rather than at Django startup. Startup code also runs during management commands like `migrate` and `collectstatic`, where the weight files may not exist and inference is never needed — loading eagerly would crash migrations in CI just because the models weren't trained yet.
 
 ## Creating the Dataset for Training
 
@@ -308,6 +405,8 @@ Two builders use this process to produce the training datasets:
 - **Recognizer dataset** — generates 50,000 plates by default; only the cropped plate images are saved, in grayscale. Before generating, any existing `.png` files in the output directory are deleted and `labels.csv` is rewritten from scratch so re-runs do not mix data from previous runs. Plates are saved to `data/recognizer/images` as `.png`. A `labels.csv` file is also generated, containing the filename of the cropped plate image, the plate text, and the country.
 
 Both functions accept an optional `seed` parameter to make the generated dataset reproducible across runs.
+
+Both builders also count how many images they actually produced. If fewer than 90% of the requested samples were generated, the run aborts with an error instead of silently writing an undersized dataset — a high skip rate means something is systematically broken (corrupt backgrounds, a full disk), not a stray bad file.
 
 ### Loading training data — `apps/cv/training/dataset.py`
 
