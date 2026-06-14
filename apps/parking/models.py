@@ -133,7 +133,16 @@ class LicensePlate(models.Model):
         # Resolution strategy: match via session.plate_text directly; use .first()
         # on the LicensePlate lookup and document that cross-user plate conflicts
         # are a known edge case (two people share a plate — unlikely in practice).
-        unique_together = [('user', 'plate_text')]
+        #
+        # WHY UniqueConstraint (not unique_together): unique_together is
+        # deprecated since Django 4.2; the named-constraint form also allows
+        # adding condition/deferrable options later without restructuring.
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'plate_text'],
+                name='licenseplate_user_plate_unique',
+            ),
+        ]
 
     def __str__(self):
         # "ABC123 (Work Truck)" or just "ABC123" if no label.
@@ -158,8 +167,12 @@ class ParkingLot(models.Model):
       This is the "multi-lot ready" design referenced in PLAN.md's Notes section.
     """
 
+    # unique=True: setup_defaults uses get_or_create(name='Main Lot') — without
+    # uniqueness two rows could share a name and get_or_create would silently
+    # return whichever the database happens to order first.
     name = models.CharField(
         max_length=200,
+        unique=True,
         help_text="Human-readable name for this parking lot, e.g. 'Main Lot' or 'North Garage'.",
     )
 
@@ -355,10 +368,14 @@ class ParkingSession(models.Model):
     # ── Lot ───────────────────────────────────────────────────────────────────
 
     # Every session belongs to exactly one lot.
-    # CASCADE: if a lot is deleted, all its sessions are deleted too.
+    # PROTECT: sessions are billing records — financial history must survive
+    # lot deletion.  Deleting a lot that still has sessions raises
+    # ProtectedError, forcing an explicit two-step process (archive or
+    # reassign the sessions first).  CASCADE here would silently wipe revenue
+    # history along with every linked PlateDetectionEvent.
     lot = models.ForeignKey(
         ParkingLot,
-        on_delete=models.CASCADE,
+        on_delete=models.PROTECT,
         related_name='sessions',
         help_text="The parking lot where this session occurred.",
     )
@@ -400,6 +417,7 @@ class ParkingSession(models.Model):
         max_digits=10,
         decimal_places=2,
         default=Decimal('0.00'),
+        validators=[MinValueValidator(Decimal('0.00'))],
         help_text="Final charge for this session in dollars. Always use Decimal, never float.",
     )
 
@@ -410,11 +428,14 @@ class ParkingSession(models.Model):
         ('completed', 'Completed'),   # Car has exited normally
         ('void', 'Void'),             # Session was cancelled (orphan handling)
     ]
+    # WHY no db_index here: the composite indexes in Meta (plate_text+status,
+    # lot+status) already cover every status-filtered query, and a standalone
+    # index on a 3-value column has selectivity too poor for PostgreSQL to
+    # ever prefer it — it would be pure write overhead.
     status = models.CharField(
         max_length=20,
         choices=STATUS_CHOICES,
         default='active',
-        db_index=True,
         help_text="Current lifecycle state of the session.",
     )
 
@@ -455,6 +476,51 @@ class ParkingSession(models.Model):
             models.Index(
                 fields=['lot', 'status'],
                 name='session_lot_status_idx',
+            ),
+            # ── Partial indexes for the hot path ──────────────────────────────
+            # WHY partial: active sessions are a tiny fraction of the table once
+            # months of completed sessions accumulate.  These indexes cover only
+            # the rows the entry/exit matcher and the 10-second dashboard poll
+            # actually touch, so they stay small enough to live in cache while
+            # the full composite indexes keep serving historical queries.
+            models.Index(
+                fields=['plate_text'],
+                condition=models.Q(status='active'),
+                name='session_active_plate_idx',
+            ),
+            models.Index(
+                fields=['lot'],
+                condition=models.Q(status='active'),
+                name='session_active_lot_idx',
+            ),
+        ]
+        constraints = [
+            # WHY DB-level CheckConstraints (validators are not enough):
+            # Django validators only run in full_clean()/ModelForm paths —
+            # bulk_create, update(), and raw SQL bypass them entirely.  These
+            # invariants protect revenue math, so they belong in the database.
+            models.CheckConstraint(
+                condition=models.Q(charge_amount__gte=Decimal('0.00')),
+                name='session_charge_non_negative',
+            ),
+            # A car cannot exit before it entered; clock skew or a data-entry
+            # bug would otherwise produce negative durations that corrupt the
+            # average-duration dashboard stat.
+            models.CheckConstraint(
+                condition=models.Q(exit_time__isnull=True)
+                | models.Q(exit_time__gt=models.F('entry_time')),
+                name='session_exit_after_entry',
+            ),
+            models.CheckConstraint(
+                condition=models.Q(duration_seconds__gte=0),
+                name='session_duration_non_negative',
+            ),
+            # Voided sessions are excluded from revenue by definition — a void
+            # session with a non-zero charge would silently inflate totals.
+            models.CheckConstraint(
+                condition=~models.Q(status='void')
+                | models.Q(charge_amount=Decimal('0.00')),
+                name='session_void_no_charge',
             ),
         ]
 
@@ -531,6 +597,7 @@ class PlateDetectionEvent(models.Model):
     # Computed as the average per-character softmax probability from the CRNN output.
     # Scores below LotSettings.confidence_threshold trigger is_low_confidence=True.
     confidence_score = models.FloatField(
+        validators=[MinValueValidator(0.0), MaxValueValidator(1.0)],
         help_text="CV recognizer confidence score, 0.0–1.0.",
     )
 
@@ -599,6 +666,25 @@ class PlateDetectionEvent(models.Model):
             models.Index(
                 fields=['timestamp'],
                 name='detection_event_timestamp_idx',
+            ),
+            # Used by the /errors/ review queue (Day 9).  Partial: only the
+            # unreviewed low-confidence rows are indexed, so the queue page
+            # stays fast even as total event volume grows.
+            # Query pattern: .filter(is_low_confidence=True, manually_corrected=False)
+            models.Index(
+                fields=['is_low_confidence'],
+                condition=models.Q(is_low_confidence=True, manually_corrected=False),
+                name='detection_unreviewed_idx',
+            ),
+        ]
+        constraints = [
+            # DB-level guarantee that confidence stays in [0, 1] — the field
+            # validators above only run in full_clean()/form paths, and this
+            # value is written directly by the CV pipeline, not through forms.
+            models.CheckConstraint(
+                condition=models.Q(confidence_score__gte=0.0)
+                & models.Q(confidence_score__lte=1.0),
+                name='event_confidence_score_range',
             ),
         ]
 

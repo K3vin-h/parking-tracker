@@ -133,6 +133,31 @@ def _train_epoch(
     return mean_loss, batch_losses
 
 
+def _levenshtein(a: str, b: str) -> int:
+    """
+    Edit distance between two strings (substitutions, insertions, deletions).
+
+    WHY hand-rolled: avoids a third-party dependency for ~15 lines of
+    textbook dynamic programming.  Plate strings are ≤ 8 characters, so the
+    O(len(a)·len(b)) cost is negligible even across a full validation set.
+    """
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, start=1):
+        curr = [i]
+        for j, cb in enumerate(b, start=1):
+            curr.append(min(
+                prev[j] + 1,                      # deletion
+                curr[j - 1] + 1,                  # insertion
+                prev[j - 1] + (ca != cb),         # substitution / match
+            ))
+        prev = curr
+    return prev[-1]
+
+
 @torch.no_grad()
 def _validate_epoch(
     model: PlateRecognizerCRNN,
@@ -151,12 +176,13 @@ def _validate_epoch(
 
     Returns:
         (mean_val_loss, char_accuracy, plate_accuracy)
-        - char_accuracy:  fraction of individual characters predicted correctly
+        - char_accuracy:  1 − character error rate (edit distance / gt length),
+                          clamped to [0, 1]
         - plate_accuracy: fraction of plates where every character is correct
     """
     model.eval()
     total_loss      = 0.0
-    correct_chars   = 0
+    edit_errors     = 0
     total_chars     = 0
     exact_matches   = 0
     total_plates    = 0
@@ -188,18 +214,20 @@ def _validate_epoch(
             if pred == gt:
                 exact_matches += 1
 
-            # Character-level accuracy: use max(len(pred), len(gt)) as the
-            # denominator so that extra characters in the prediction (insertions)
-            # are penalised rather than silently ignored.  zip() stops at the
-            # shorter length, so unmatched tail characters add to total_chars
-            # without adding to correct_chars.
-            n_ref          = max(len(gt), len(pred))
-            total_chars   += n_ref
-            correct_chars += sum(1 for pc, gc in zip(pred, gt) if pc == gc)
+            # Character-level accuracy via edit distance (1 − CER).
+            # WHY not positional zip() matching: a single shifted character
+            # (e.g. pred="XABC12" vs gt="ABC123") makes every position wrong
+            # under zip even though 5 of 6 characters are present — the metric
+            # would report ~0 % for a near-correct prediction.  Levenshtein
+            # distance counts the true number of substitutions / insertions /
+            # deletions, so the reported accuracy tracks model quality.
+            total_chars += max(len(gt), 1)
+            edit_errors += _levenshtein(pred, gt)
 
     n = len(loader.dataset)
-    char_acc  = correct_chars  / max(total_chars, 1)
-    plate_acc = exact_matches  / max(total_plates, 1)
+    # Insertions can push edit distance past len(gt); clamp so accuracy ≥ 0.
+    char_acc  = max(0.0, 1.0 - edit_errors / max(total_chars, 1))
+    plate_acc = exact_matches / max(total_plates, 1)
     return total_loss / n, char_acc, plate_acc
 
 
@@ -542,13 +570,25 @@ def main() -> None:
     logger.info("Load with: model.load_state_dict(torch.load(%r, weights_only=True))", str(output_path))
 
     # ── Training curve ─────────────────────────────────────────────────────
+    # WHY two separate guards: bundling plot-save and viewer-launch in one
+    # try block meant a Popen failure (e.g. `open` does not exist on Linux)
+    # was reported as "Could not save training curve" even though the PNG
+    # saved fine — and vice versa, a savefig failure after the info log left
+    # operators believing a file existed that was never written.
+    plot_path = None
     try:
         plot_path = _plot_training_history(history, output_path, best_epoch)
         logger.info("Training curve → %s", plot_path)
-        import subprocess
-        subprocess.Popen(["open", str(plot_path)])
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not save training curve: %s", exc)
+
+    # `open` is macOS-only; on Linux/CI skip the viewer instead of failing.
+    if plot_path is not None and sys.platform == "darwin":
+        import subprocess
+        try:
+            subprocess.Popen(["open", str(plot_path)])
+        except OSError as exc:
+            logger.warning("Could not open training curve viewer: %s", exc)
 
 
 if __name__ == "__main__":

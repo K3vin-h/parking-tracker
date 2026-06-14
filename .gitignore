@@ -57,6 +57,10 @@ Thumbs.db
 # ── Analysis artifacts ────────────────────────────────────────────────────────
 graphify-out/
 
+# ── Local documentation drafts ────────────────────────────────────────────────
+# Long-form learning notes and PR walkthroughs stay local only.
+docs/
+
 # ── AI agent instructions (local only) ───────────────────────────────────────
 AGENTS.md
 CLAUDE.md

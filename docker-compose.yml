@@ -79,6 +79,10 @@ services:
       - .env
 
     volumes:
+      # DEV-ONLY bind mount for live code reload.  It also makes .env (with
+      # SECRET_KEY / DB_PASSWORD) readable inside the container at /app/.env —
+      # acceptable locally, but NEVER replicate this mount in staging or
+      # production; inject secrets via the orchestrator instead.
       - .:/app
       - media:/app/media
       - staticfiles:/app/staticfiles
