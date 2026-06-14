@@ -193,7 +193,17 @@ class PlateDetectorDataset(Dataset):
             raise ValueError(
                 f"Malformed label {lbl_path.name}: expected class index 0, got {parts[0]!r}."
             )
-        bbox = torch.tensor([float(v) for v in parts[1:]], dtype=torch.float32)
+        # WHY the try/except: a corrupt label like "0 0.5 abc 0.5 0.3" makes
+        # float() raise a bare ValueError with no filename, breaking the
+        # labelled-error contract every other check in this block honours.
+        try:
+            coords = [float(v) for v in parts[1:]]
+        except ValueError as exc:
+            raise ValueError(
+                f"Malformed label {lbl_path.name}: bbox coordinates must be "
+                f"numeric ({exc})."
+            ) from exc
+        bbox = torch.tensor(coords, dtype=torch.float32)
         if not torch.isfinite(bbox).all():
             raise ValueError(
                 f"Malformed label {lbl_path.name}: bbox coordinates must be finite."
@@ -216,6 +226,18 @@ class PlateDetectorDataset(Dataset):
             try:
                 transformed = self._transform(img_t, bbox)
             except TypeError as exc:
+                # WHY the warning: this fallback exists for image-only
+                # transforms that reject a second argument.  But a TypeError
+                # raised *inside* a bbox-aware transform lands here too, and
+                # silently retrying without the bbox would pair an augmented
+                # image with an un-augmented label — corrupted training data
+                # with no symptom.  Logging makes the degraded path visible
+                # so a buggy transform can't hide behind the API probe.
+                logger.warning(
+                    "Transform %r rejected (img, bbox) call (%s); retrying "
+                    "image-only — bbox will pass through unaugmented.",
+                    type(self._transform).__name__, exc,
+                )
                 try:
                     transformed = self._transform(img_t)
                 except TypeError:

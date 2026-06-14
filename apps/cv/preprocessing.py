@@ -52,6 +52,18 @@ Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 _ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "WEBP"}
 
 
+class UnsafeImagePathError(ValueError):
+    """
+    Raised when an image path resolves outside MEDIA_ROOT.
+
+    WHY a distinct type: a path-traversal rejection is a security signal, not
+    an ordinary bad-input error.  Views must be able to catch it specifically
+    and map it to HTTP 400 — catching plain ValueError would also swallow
+    unrelated validation errors.  Subclasses ValueError so existing callers
+    that catch ValueError keep working.
+    """
+
+
 def _image_load_error() -> FileNotFoundError:
     return FileNotFoundError(
         "Could not load the image. "
@@ -110,7 +122,9 @@ def _assert_safe_path(path: str) -> None:
         )
     resolved = os.path.realpath(path)
     if not resolved.startswith(media_root + os.sep):
-        raise ValueError("Image path is outside the permitted media directory.")
+        raise UnsafeImagePathError(
+            "Image path is outside the permitted media directory."
+        )
 
 
 def _validate_image_dimensions(raw: bytes) -> None:
@@ -227,7 +241,8 @@ def load_image(path: str) -> np.ndarray:
 
     Raises:
         FileNotFoundError: If the file cannot be loaded by OpenCV.
-        ValueError: If the path is outside MEDIA_ROOT (path traversal guard).
+        UnsafeImagePathError: If the path is outside MEDIA_ROOT (path
+            traversal guard).  Subclass of ValueError.
     """
     _assert_safe_path(path)
 
@@ -471,10 +486,13 @@ def crop_plate_region(image: np.ndarray, bbox: list[float]) -> np.ndarray:
         raise ValueError(f"bbox has non-positive dimensions: w={bw}, h={bh}")
 
     img_h, img_w = image.shape[:2]
-    x_px = int(x * img_w)
-    y_px = int(y * img_h)
-    w_px = int(bw * img_w)
-    h_px = int(bh * img_h)
+    # WHY round (not int): int() truncates toward zero, so a small-but-valid
+    # bbox like w=0.004 on a 128px image becomes int(0.512)=0 pixels and the
+    # crop degenerates.  round() keeps sub-pixel boxes that should survive.
+    x_px = round(x * img_w)
+    y_px = round(y * img_h)
+    w_px = round(bw * img_w)
+    h_px = round(bh * img_h)
 
     # Clamp to image dimensions to handle floating-point boundary edge cases
     x1 = max(0, x_px)
@@ -562,5 +580,5 @@ def prepare_for_recognizer(plate_crop: np.ndarray) -> torch.Tensor:
     # Step 4: normalize to [0, 1]
     gray = gray.astype(np.float32) / 255.0
 
-    # Step 5: (H, W, C) → (C, H, W), ensure contiguous memory layout
+    # Step 5: (H, W, 1) → (1, H, W), ensure contiguous memory layout
     return torch.from_numpy(gray).permute(2, 0, 1).contiguous()

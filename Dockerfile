@@ -99,12 +99,17 @@ USER appuser
 
 # Health check: verify Django is running and the DB connection is alive.
 # --start-period=30s: don't count health failures during initial startup.
-# The /health/ endpoint returns 200 if DB is reachable, 503 if not.
-# X-Forwarded-Proto keeps this internal HTTP probe from being redirected when
-# production settings enable SECURE_SSL_REDIRECT behind a TLS proxy.
+# The /health/ endpoint returns 200 if DB is reachable, 503 if not.  When
+# HEALTH_CHECK_TOKEN is configured, even loopback probes must send it because
+# same-host reverse proxies can make public traffic appear to originate from
+# 127.0.0.1.
+# /health/ is exempted from SECURE_SSL_REDIRECT in settings.py
+# (SECURE_REDIRECT_EXEMPT), so this plain-HTTP probe needs no spoofed
+# X-Forwarded-Proto header — trusting that header from localhost would
+# let any in-container process bypass the SSL redirect.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD python -c \
-        "import urllib.request; req=urllib.request.Request('http://localhost:8000/health/', headers={'X-Forwarded-Proto':'https'}); urllib.request.urlopen(req)" \
+        "import os, urllib.request; req = urllib.request.Request('http://localhost:8000/health/'); token = os.environ.get('HEALTH_CHECK_TOKEN', '').strip(); token and req.add_header('X-Health-Check-Token', token); urllib.request.urlopen(req)" \
         || exit 1
 
 # entrypoint.sh waits for Postgres and runs migrations before starting the server.

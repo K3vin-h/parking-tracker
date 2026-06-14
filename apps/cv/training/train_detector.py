@@ -36,6 +36,16 @@ import logging
 import sys
 from pathlib import Path
 
+# The documented invocation runs this file directly:
+#     python apps/cv/training/train_detector.py ...
+# In that mode Python places apps/cv/training on sys.path, not the repository
+# root, so absolute imports such as apps.cv.models.plate_detector would fail
+# before main() can run.  Insert the root before importing project modules so
+# the CLI works exactly as documented (same pattern as train_recognizer.py).
+REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
@@ -574,15 +584,25 @@ def main() -> None:
     logger.info("Load with: model.load_state_dict(torch.load(%r, weights_only=True))", str(output_path))
 
     # ── Training curve ─────────────────────────────────────────────────────
+    # WHY two separate guards: bundling plot-save and viewer-launch in one
+    # try block meant a Popen failure (e.g. `open` does not exist on Linux)
+    # was reported as "Could not save training curve" even though the PNG
+    # saved fine — and vice versa, a savefig failure after the info log left
+    # operators believing a file existed that was never written.
+    plot_path = None
     try:
         plot_path = _plot_training_history(history, output_path, best_epoch)
         logger.info("Training curve → %s", plot_path)
-        # Open the PNG in the system viewer on macOS (non-blocking).
-        # Fails silently everywhere else — the PNG is always saved regardless.
-        import subprocess
-        subprocess.Popen(["open", str(plot_path)])
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not save training curve: %s", exc)
+
+    # `open` is macOS-only; on Linux/CI skip the viewer instead of failing.
+    if plot_path is not None and sys.platform == "darwin":
+        import subprocess
+        try:
+            subprocess.Popen(["open", str(plot_path)])
+        except OSError as exc:
+            logger.warning("Could not open training curve viewer: %s", exc)
 
 
 if __name__ == "__main__":
