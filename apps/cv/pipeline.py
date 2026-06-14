@@ -304,6 +304,11 @@ class PlateRecognitionPipeline:
         # means the model saw nothing; preserving the low value is correct).
         # WHY [:, 0] not squeeze(1): explicit batch indexing — squeeze would
         # silently misbehave if the batch dimension ever exceeded 1.
+        # WHY .cpu() first: boolean-mask indexing (max_probs[char_mask]) is
+        # fragile on MPS in some PyTorch versions.  The tensors are tiny
+        # (16x37 floats), so the transfer is latency-free — move to CPU and
+        # do the masking there where the semantics are stable.
+        log_probs = log_probs.cpu()
         probs = torch.exp(log_probs)                           # (16, 1, 37)
         max_probs = probs.max(dim=-1).values[:, 0]             # (16,)
         argmax = log_probs.argmax(dim=-1)[:, 0]                # (16,)
@@ -359,5 +364,17 @@ def get_pipeline(detector_path: str, recognizer_path: str) -> PlateRecognitionPi
             # on CPython GIL atomicity of the reference assignment below; a
             # free-threaded build would need an explicit memory barrier here.
             if _instance is None:
-                _instance = PlateRecognitionPipeline(detector_path, recognizer_path)
+                # Build fully, tag with its paths, THEN publish to the global so
+                # a concurrent reader never sees an instance without _weight_paths.
+                pipeline = PlateRecognitionPipeline(detector_path, recognizer_path)
+                pipeline._weight_paths = (detector_path, recognizer_path)
+                _instance = pipeline
+    elif _instance._weight_paths != (detector_path, recognizer_path):
+        # The singleton is path-pinned to its first construction.  Calling with
+        # different paths silently returns the original instance — surface that
+        # so a misconfigured caller is not debugging a phantom model swap.
+        logger.warning(
+            "get_pipeline called with paths differing from the cached singleton; "
+            "the original instance is returned and the new paths are ignored"
+        )
     return _instance

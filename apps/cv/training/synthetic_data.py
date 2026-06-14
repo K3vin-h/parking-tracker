@@ -416,8 +416,9 @@ def generate_detector_dataset(
     _validate_sample_count(n)
     _seed_rng(seed)
 
-    output_dir = output_dir.resolve()  # canonicalize before any deletion
-    bg_dir = bg_dir.resolve()
+    # Accept str or Path from callers; canonicalize before any deletion.
+    output_dir = Path(output_dir).resolve()
+    bg_dir = Path(bg_dir).resolve()
     _collect_bg_files(bg_dir)
 
     img_dir = output_dir / "images"
@@ -510,7 +511,8 @@ def generate_recognizer_dataset(
     _validate_sample_count(n)
     _seed_rng(seed)
 
-    output_dir = output_dir.resolve()  # canonicalize before any deletion
+    # Accept str or Path from callers; canonicalize before any deletion.
+    output_dir = Path(output_dir).resolve()
 
     img_dir = output_dir / "images"
     img_dir.mkdir(parents=True, exist_ok=True)
