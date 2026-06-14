@@ -256,6 +256,21 @@ class TestPlateRecognitionPipelineProcess:
         result = _run_process(pipeline, _VALID_BBOX, uniform_log_probs)
         assert result["is_low_confidence"] is True
 
+    def test_all_blank_output_is_low_confidence_even_with_high_blank_probability(self) -> None:
+        """
+        Empty decoded text is a manual-review case even when blank probability is high.
+
+        A poorly trained or unreadable recognizer can emit the CTC blank class for
+        every timestep with near-certain probability.  That means "no readable
+        plate", not a confident plate recognition.
+        """
+        log_probs = torch.full((16, 1, 37), -100.0)
+        log_probs[:, :, BLANK_IDX] = 0.0
+        pipeline = _make_pipeline()
+        result = _run_process(pipeline, _VALID_BBOX, log_probs, plate_text="")
+        assert result["confidence"] == 0.0
+        assert result["is_low_confidence"] is True
+
     def test_confidence_excludes_blank_dominated_steps(self) -> None:
         """
         Blank-dominated time-steps are excluded from the confidence mean.
