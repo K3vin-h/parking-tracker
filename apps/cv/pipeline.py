@@ -300,8 +300,11 @@ class PlateRecognitionPipeline:
         # are blank-dominated (high probability on index 0).  Including them
         # inflates the mean and can mask genuine uncertainty on character steps.
         # Restricting to non-blank argmax positions gives a cleaner signal.
-        # Fallback to the full mean when all steps are blank (all-blank output
-        # means the model saw nothing; preserving the low value is correct).
+        # Empty decoded text, or logits with no non-blank timesteps, is always low
+        # confidence.  The recognizer may assign very high probability to the CTC
+        # blank class on unreadable crops, especially before training converges;
+        # using that blank probability as confidence would incorrectly mark
+        # "no plate text" as a good read.
         # WHY [:, 0] not squeeze(1): explicit batch indexing — squeeze would
         # silently misbehave if the batch dimension ever exceeded 1.
         # WHY .cpu() first: boolean-mask indexing (max_probs[char_mask]) is
@@ -314,10 +317,12 @@ class PlateRecognitionPipeline:
         argmax = log_probs.argmax(dim=-1)[:, 0]                # (16,)
         char_mask = argmax != BLANK_IDX                        # (16,) bool
         char_probs = max_probs[char_mask]
-        confidence: float = (
-            char_probs.mean().item() if char_mask.any() else max_probs.mean().item()
-        )
-        is_low_confidence = confidence < LOW_CONFIDENCE_THRESHOLD
+        if not plate_text or not char_mask.any():
+            confidence = 0.0
+            is_low_confidence = True
+        else:
+            confidence = char_probs.mean().item()
+            is_low_confidence = confidence < LOW_CONFIDENCE_THRESHOLD
 
         logger.debug(
             "Plate recognition complete confidence=%.3f low_conf=%s",
