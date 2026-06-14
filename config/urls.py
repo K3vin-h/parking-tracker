@@ -33,16 +33,17 @@ def _is_internal_probe(request) -> bool:
     True when the request is a trusted health probe.
 
     WHY: /health/ executes a real database query on every call with no user
-    session, so it must not be public.  We trust loopback for local Docker
-    HEALTHCHECK calls, and we trust a shared probe token for production
-    load-balancer checks.  We intentionally do NOT trust private REMOTE_ADDR
-    values because reverse proxies usually appear as RFC1918 addresses for
-    every public client.
+    session, so it must not be public.  When a shared probe token is configured,
+    it is authoritative and even loopback requests must present it; same-host
+    reverse proxies commonly forward public traffic to Django over 127.0.0.1.
+    Without a token, we trust loopback only for local Docker HEALTHCHECK calls.
+    We intentionally do NOT trust private REMOTE_ADDR values because reverse
+    proxies usually appear as RFC1918 addresses for every public client.
     """
     expected_token = getattr(settings, 'HEALTH_CHECK_TOKEN', '')
     supplied_token = request.META.get('HTTP_X_HEALTH_CHECK_TOKEN', '')
-    if expected_token and secrets.compare_digest(supplied_token, expected_token):
-        return True
+    if expected_token:
+        return secrets.compare_digest(supplied_token, expected_token)
 
     try:
         addr = ipaddress.ip_address(request.META.get('REMOTE_ADDR', ''))
@@ -57,9 +58,10 @@ def health_check(request):
 
     Verifies that Django is running AND the database connection is alive.
     Returns 200 {"status": "ok"} on success, 503 {"status": "error"} on failure.
-    No user authentication required, but the caller must either be loopback or
-    provide the configured X-Health-Check-Token header (see _is_internal_probe).
-    Public clients without that proof get 403.
+    No user authentication required, but the caller must provide the configured
+    X-Health-Check-Token header when present, or be loopback in local setups with
+    no configured token (see _is_internal_probe). Public clients without that
+    proof get 403.
     """
     if not _is_internal_probe(request):
         return HttpResponseForbidden()

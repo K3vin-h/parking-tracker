@@ -46,6 +46,24 @@ class TestHealthProbeAccess:
 
         assert _is_internal_probe(request) is False
 
+    @override_settings(HEALTH_CHECK_TOKEN='probe-secret')
+    def test_loopback_without_configured_token_header_is_rejected(self) -> None:
+        """A configured token prevents same-host reverse proxies bypassing auth."""
+        request = RequestFactory().get('/health/', REMOTE_ADDR='127.0.0.1')
+
+        assert _is_internal_probe(request) is False
+
+    @override_settings(HEALTH_CHECK_TOKEN='probe-secret')
+    def test_loopback_with_wrong_token_is_rejected(self) -> None:
+        """Loopback is not trusted when a token is configured but does not match."""
+        request = RequestFactory().get(
+            '/health/',
+            HTTP_X_HEALTH_CHECK_TOKEN='wrong-secret',
+            REMOTE_ADDR='127.0.0.1',
+        )
+
+        assert _is_internal_probe(request) is False
+
     def test_forbidden_probe_does_not_query_database(self) -> None:
         """Denied callers should get 403 before any database cursor is opened."""
         request = RequestFactory().get('/health/', REMOTE_ADDR='10.0.0.5')
