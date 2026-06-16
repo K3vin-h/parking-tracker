@@ -539,6 +539,8 @@ class PlateDetectionEvent(models.Model):
 
       Low-confidence events may also appear without a clean session linkage,
       and corrections add implicit event-level changes tracked by manually_corrected.
+      Those orphan review events still keep lot context so an operator's manual
+      correction can safely reconcile them with the right active session.
 
     WHY STORE THE RAW IMAGE?
       Audit trail and manual correction. When the CV pipeline reads "ABE123" but
@@ -564,6 +566,19 @@ class PlateDetectionEvent(models.Model):
         blank=True,
         related_name='detection_events',
         help_text="The parking session this detection is linked to.",
+    )
+
+    # Stored separately from session because unmatched exit events intentionally
+    # have session=None until an operator corrects them. Without the lot, a
+    # corrected exit could not safely choose which active same-plate session to
+    # close in a multi-lot deployment.
+    lot = models.ForeignKey(
+        ParkingLot,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='detection_events',
+        help_text="Parking lot where this detection occurred.",
     )
 
     # Django's ImageField does two things:
@@ -666,6 +681,12 @@ class PlateDetectionEvent(models.Model):
             models.Index(
                 fields=['timestamp'],
                 name='detection_event_timestamp_idx',
+            ),
+            # Used when an operator corrects an unmatched exit event and the
+            # service must reconcile it with an active session in the same lot.
+            models.Index(
+                fields=['lot', 'event_type'],
+                name='detection_lot_event_idx',
             ),
             # Used by the /errors/ review queue (Day 9).  Partial: only the
             # unreviewed low-confidence rows are indexed, so the queue page
