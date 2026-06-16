@@ -19,6 +19,7 @@ import logging
 from datetime import timedelta
 
 from django.core.management.base import BaseCommand
+from django.db.models import Q
 from django.utils import timezone
 
 from apps.parking.models import LotSettings, PlateDetectionEvent
@@ -68,10 +69,11 @@ class Command(BaseCommand):
             cutoff = timezone.now() - timedelta(days=lot_settings.image_retention_days)
 
             # Events in this lot, older than the retention cutoff. The direct
-            # lot FK includes unmatched exit review events with session=None,
-            # so their images obey the same retention policy as session events.
+            # lot FK includes unmatched exit review events with session=None.
+            # session__lot remains as a compatibility fallback for older or
+            # manually-created session-linked events where event.lot is NULL.
             old_events = PlateDetectionEvent.objects.filter(
-                lot=lot,
+                Q(lot=lot) | Q(lot__isnull=True, session__lot=lot),
                 timestamp__lt=cutoff,
             )
 

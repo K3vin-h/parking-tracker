@@ -15,7 +15,12 @@ import pytest
 from django.core.management import call_command
 from django.utils import timezone
 
-from apps.parking.models import LotSettings, ParkingLot, PlateDetectionEvent
+from apps.parking.models import (
+    LotSettings,
+    ParkingLot,
+    ParkingSession,
+    PlateDetectionEvent,
+)
 
 
 @pytest.mark.django_db
@@ -43,3 +48,30 @@ class TestCleanupOldImages:
         call_command('cleanup_old_images', '--dry-run', stdout=stdout)
 
         assert '"Cleanup Lot": would delete 1 event(s)' in stdout.getvalue()
+
+    def test_dry_run_counts_session_event_with_null_lot(self):
+        """Legacy session-linked events with lot=None still clean via session.lot."""
+        lot = ParkingLot.objects.create(name='Legacy Cleanup Lot')
+        LotSettings.objects.create(lot=lot, image_retention_days=1)
+        session = ParkingSession.objects.create(
+            plate_text='LEGACY1',
+            lot=lot,
+            entry_time=timezone.now() - timedelta(days=3),
+            status='active',
+        )
+        event = PlateDetectionEvent.objects.create(
+            session=session,
+            lot=None,
+            image='plates/legacy-session-old.jpg',
+            raw_plate_text='LEGACY1',
+            confidence_score=0.9,
+            event_type='entry',
+        )
+        PlateDetectionEvent.objects.filter(pk=event.pk).update(
+            timestamp=timezone.now() - timedelta(days=2)
+        )
+
+        stdout = StringIO()
+        call_command('cleanup_old_images', '--dry-run', stdout=stdout)
+
+        assert '"Legacy Cleanup Lot": would delete 1 event(s)' in stdout.getvalue()
