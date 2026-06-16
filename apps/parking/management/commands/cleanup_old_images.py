@@ -67,10 +67,11 @@ class Command(BaseCommand):
             lot = lot_settings.lot
             cutoff = timezone.now() - timedelta(days=lot_settings.image_retention_days)
 
-            # Events attached to sessions in this lot, older than the retention cutoff.
-            # Events with session=None are excluded (no lot affiliation to match against).
+            # Events in this lot, older than the retention cutoff. The direct
+            # lot FK includes unmatched exit review events with session=None,
+            # so their images obey the same retention policy as session events.
             old_events = PlateDetectionEvent.objects.filter(
-                session__lot=lot,
+                lot=lot,
                 timestamp__lt=cutoff,
             )
 

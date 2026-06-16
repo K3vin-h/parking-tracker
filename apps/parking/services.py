@@ -609,7 +609,12 @@ def correct_plate(event_id: int, corrected_text: str) -> PlateDetectionEvent:
         settings = _get_lot_settings(event.lot)
         session = (
             ParkingSession.objects.select_for_update()
-            .filter(lot=event.lot, plate_text=normalized, status="active")
+            .filter(
+                lot=event.lot,
+                plate_text=normalized,
+                status="active",
+                entry_time__lt=event.timestamp,
+            )
             .order_by("entry_time")
             .first()
         )
