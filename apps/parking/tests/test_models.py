@@ -345,6 +345,7 @@ class TestPlateDetectionEvent:
         )
         assert event.pk is not None
         assert event.session == active_session
+        assert event.lot is None
         assert event.raw_plate_text == 'ABC 123'
         assert event.confidence_score == 0.92
         assert event.event_type == 'entry'
@@ -424,8 +425,10 @@ class TestPlateDetectionEvent:
             raw_plate_text='ORPHAN1',
             confidence_score=0.80,
             event_type='entry',
+            lot=parking_lot,
         )
         assert event.session is None
+        assert event.lot == parking_lot
 
     def test_detection_event_str(self, active_session):
         """__str__ includes the event type and raw plate text."""

@@ -33,7 +33,8 @@ CONCURRENCY:
 import logging
 import math
 from datetime import timedelta
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_CEILING, ROUND_HALF_UP
+from hashlib import sha256
 
 from django.db import transaction
 from django.utils import timezone
@@ -58,6 +59,47 @@ _MONEY_QUANTUM = Decimal("0.01")
 # validate at this boundary so a hostile/garbled over-length read fails fast
 # with a clear ValueError rather than an opaque DB error.
 MAX_PLATE_LEN = 20
+
+
+def _plate_log_token(plate_text: str) -> str:
+    """
+    Return a stable, non-reversible token for plate values written to logs.
+
+    WHY: license plates are vehicle movement PII. Operators still need to
+    correlate repeated log messages for the same plate while debugging, but
+    INFO/WARNING logs must not expose the raw normalized plate to centralized
+    logging systems.
+    """
+    if not plate_text:
+        return "empty"
+    return sha256(plate_text.encode("utf-8")).hexdigest()[:12]
+
+
+def _duration_seconds_decimal(start, end) -> Decimal:
+    """
+    Return an exact Decimal duration in seconds, preserving microseconds.
+
+    WHY: timedelta.total_seconds() returns float. Truncating or using binary
+    float would under-bill boundary cases such as 60.5 seconds with per-minute
+    billing. This helper keeps billing comparisons and ceil() inputs exact.
+    """
+    delta = end - start
+    whole_seconds = (delta.days * 24 * 60 * 60) + delta.seconds
+    return Decimal(whole_seconds) + (Decimal(delta.microseconds) / Decimal(1_000_000))
+
+
+def _ceil_duration_seconds(start, end) -> int:
+    """
+    Convert an exact duration to stored integer seconds by rounding up.
+
+    WHY: duration_seconds is an IntegerField used for analytics, while billing
+    charges any fractional occupied second. Rounding up preserves that same
+    boundary behavior in the stored duration.
+    """
+    seconds = _duration_seconds_decimal(start, end)
+    if seconds <= 0:
+        return 0
+    return int(seconds.to_integral_value(rounding=ROUND_CEILING))
 
 
 def _require_plate_within_limits(plate_text: str) -> None:
@@ -134,10 +176,10 @@ def calculate_charge(entry_time, exit_time, lot_settings: LotSettings) -> Decima
       3. billing_unit == 'hour'                  -> ceil(total_hours)   * rate
       4. daily_cap_enabled and charge > cap      -> charge = cap
 
-    All arithmetic stays in Decimal. We build the duration from INTEGER seconds
-    (never Decimal(float)) to avoid binary-float artifacts polluting the cents.
+    All arithmetic stays in Decimal. We preserve fractional seconds so grace
+    periods and ceil() billing never under-bill just-over-boundary sessions.
     """
-    total_seconds = int((exit_time - entry_time).total_seconds())
+    total_seconds = _duration_seconds_decimal(entry_time, exit_time)
     if total_seconds <= 0:
         # Defensive: exit should always be after entry (handle_exit guarantees
         # it), but a non-positive duration must never produce a charge.
@@ -223,8 +265,8 @@ def _match_registered_plate(normalized_plate: str) -> LicensePlate | None:
     )
     if len(matches) > 1:
         logger.warning(
-            "Plate %s matches multiple registrations; linking to lowest pk %s",
-            normalized_plate,
+            "Plate hash %s matches multiple registrations; linking to lowest pk %s",
+            _plate_log_token(normalized_plate),
             matches[0].pk,
         )
     return matches[0] if matches else None
@@ -290,9 +332,9 @@ def handle_entry(
     has_duplicate = voided > 0
     if has_duplicate:
         logger.info(
-            "Voided %d orphaned session(s) for plate %s in lot %s",
+            "Voided %d orphaned session(s) for plate_hash=%s in lot %s",
             voided,
-            normalized,
+            _plate_log_token(normalized),
             lot.pk,
         )
 
@@ -311,6 +353,7 @@ def handle_entry(
 
     PlateDetectionEvent.objects.create(
         session=session,
+        lot=lot,
         image=image,
         raw_plate_text=plate_text,  # store the ORIGINAL read for audit/correction
         confidence_score=_clamp_confidence(confidence),
@@ -320,9 +363,9 @@ def handle_entry(
     )
 
     logger.info(
-        "Entry: session %s plate=%s lot=%s guest=%s low_conf=%s duplicate=%s",
+        "Entry: session %s plate_hash=%s lot=%s guest=%s low_conf=%s duplicate=%s",
         session.pk,
-        normalized,
+        _plate_log_token(normalized),
         lot.pk,
         registered is None,
         is_low_conf,
@@ -375,6 +418,7 @@ def handle_exit(
         # Exit-without-entry: flag for review, no session created.
         PlateDetectionEvent.objects.create(
             session=None,
+            lot=lot,
             image=image,
             raw_plate_text=plate_text,
             confidence_score=_clamp_confidence(confidence),
@@ -385,10 +429,9 @@ def handle_exit(
             bounding_box=_sanitize_bounding_box(bounding_box),
         )
         logger.warning(
-            "Exit with no active session for raw=%r normalized=%s lot=%s; "
+            "Exit with no active session for plate_hash=%s lot=%s; "
             "flagged for review",
-            plate_text,
-            normalized,
+            _plate_log_token(normalized),
             lot.pk,
         )
         return None
@@ -406,19 +449,11 @@ def handle_exit(
         )
         now = session.entry_time + timedelta(seconds=1)
 
-    duration_seconds = max(1, int((now - session.entry_time).total_seconds()))
-    charge = calculate_charge(session.entry_time, now, settings)
-
-    session.status = "completed"
-    session.exit_time = now
-    session.duration_seconds = duration_seconds
-    session.charge_amount = charge
-    session.save(
-        update_fields=["status", "exit_time", "duration_seconds", "charge_amount"]
-    )
+    _complete_session_for_exit(session, now, settings)
 
     PlateDetectionEvent.objects.create(
         session=session,
+        lot=lot,
         image=image,
         raw_plate_text=plate_text,
         confidence_score=_clamp_confidence(confidence),
@@ -428,15 +463,75 @@ def handle_exit(
     )
 
     logger.info(
-        "Exit: session %s plate=%s lot=%s duration=%ss charge=%s low_conf=%s",
+        "Exit: session %s plate_hash=%s lot=%s duration=%ss low_conf=%s",
         session.pk,
-        normalized,
+        _plate_log_token(normalized),
         lot.pk,
-        duration_seconds,
-        charge,
+        session.duration_seconds,
         is_low_conf,
     )
     return session
+
+
+def _complete_session_for_exit(
+    session: ParkingSession,
+    exit_time,
+    settings: LotSettings,
+) -> Decimal:
+    """
+    Close an active session at a known exit time and return its final charge.
+
+    WHY: both normal exits and manually corrected unmatched-exit events must
+    run exactly the same billing/status transition. Keeping the mutation here
+    prevents review corrections from drifting away from handle_exit behavior.
+    """
+    duration_seconds = max(1, _ceil_duration_seconds(session.entry_time, exit_time))
+    charge = calculate_charge(session.entry_time, exit_time, settings)
+
+    session.status = "completed"
+    session.exit_time = exit_time
+    session.duration_seconds = duration_seconds
+    session.charge_amount = charge
+    session.save(
+        update_fields=["status", "exit_time", "duration_seconds", "charge_amount"]
+    )
+    return charge
+
+
+def _void_duplicate_active_sessions(
+    lot: ParkingLot,
+    normalized_plate: str,
+    keep_session_id: int,
+) -> int:
+    """
+    Void active sessions that would duplicate a corrected active session.
+
+    WHY: manual correction can change an active session's matching key after it
+    was opened. This must preserve the same "one active session per lot/plate"
+    invariant as handle_entry's orphan handling.
+    """
+    voided = (
+        ParkingSession.objects.filter(
+            lot=lot,
+            plate_text=normalized_plate,
+            status="active",
+        )
+        .exclude(pk=keep_session_id)
+        .update(
+            status="void",
+            charge_amount=Decimal("0.00"),
+            was_orphaned=True,
+        )
+    )
+    if voided:
+        logger.info(
+            "Voided %d duplicate active session(s) during correction for "
+            "plate_hash=%s in lot %s",
+            voided,
+            _plate_log_token(normalized_plate),
+            lot.pk,
+        )
+    return voided
 
 
 @transaction.atomic
@@ -473,29 +568,90 @@ def correct_plate(event_id: int, corrected_text: str) -> PlateDetectionEvent:
         raise ValueError("corrected plate text is empty after normalization")
     event.manually_corrected = True
     event.corrected_plate = normalized
-    event.save(update_fields=["manually_corrected", "corrected_plate"])
 
     if event.session_id is not None:
         # Lock the session row too so the relink can't race a concurrent exit.
         session = ParkingSession.objects.select_for_update().get(pk=event.session_id)
+        duplicate_voided = 0
+        if session.status == "active":
+            duplicate_voided = _void_duplicate_active_sessions(
+                session.lot,
+                normalized,
+                session.pk,
+            )
         session.plate_text = normalized
+        if duplicate_voided:
+            session.has_duplicate_warning = True
         registered = _match_registered_plate(normalized)
         session.license_plate = registered
         session.user = registered.user if registered else None
-        session.save(update_fields=["plate_text", "license_plate", "user"])
+        session.save(
+            update_fields=[
+                "plate_text",
+                "has_duplicate_warning",
+                "license_plate",
+                "user",
+            ]
+        )
+        if event.lot_id is None:
+            event.lot = session.lot
+        event.save(update_fields=["manually_corrected", "corrected_plate", "lot"])
         logger.info(
-            "Corrected event %s -> plate=%s; session %s relinked (guest=%s)",
+            "Corrected event %s -> plate_hash=%s; session %s relinked "
+            "(guest=%s duplicate_voided=%d)",
             event_id,
-            normalized,
+            _plate_log_token(normalized),
             session.pk,
             registered is None,
+            duplicate_voided,
         )
+    elif event.event_type == "exit" and event.lot_id is not None:
+        settings = _get_lot_settings(event.lot)
+        session = (
+            ParkingSession.objects.select_for_update()
+            .filter(lot=event.lot, plate_text=normalized, status="active")
+            .order_by("entry_time")
+            .first()
+        )
+        if session is not None:
+            exit_time = event.timestamp
+            if exit_time <= session.entry_time:
+                logger.warning(
+                    "Corrected exit event %s timestamp not after entry for "
+                    "session %s; bumping +1s",
+                    event_id,
+                    session.pk,
+                )
+                exit_time = session.entry_time + timedelta(seconds=1)
+            _complete_session_for_exit(session, exit_time, settings)
+            event.session = session
+            event.save(
+                update_fields=["manually_corrected", "corrected_plate", "session"]
+            )
+            logger.info(
+                "Corrected unmatched exit event %s closed session %s for "
+                "plate_hash=%s in lot %s",
+                event_id,
+                session.pk,
+                _plate_log_token(normalized),
+                event.lot_id,
+            )
+        else:
+            event.save(update_fields=["manually_corrected", "corrected_plate"])
+            logger.info(
+                "Corrected unmatched exit event %s found no active session for "
+                "plate_hash=%s in lot %s",
+                event_id,
+                _plate_log_token(normalized),
+                event.lot_id,
+            )
     else:
-        # Orphan-exit event has no session to update; only the event changes.
+        # Orphan event without lot context cannot be reconciled to a session.
+        event.save(update_fields=["manually_corrected", "corrected_plate"])
         logger.info(
-            "Corrected event %s -> plate=%s; no linked session to relink",
+            "Corrected event %s -> plate_hash=%s; no linked session to relink",
             event_id,
-            normalized,
+            _plate_log_token(normalized),
         )
 
     return event

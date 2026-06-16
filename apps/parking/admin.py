@@ -114,13 +114,16 @@ class PlateDetectionEventAdmin(admin.ModelAdmin):
 
     list_display = [
         'raw_plate_text',
+        'lot',
         'event_type',
         'confidence_score',
         'is_low_confidence',
         'manually_corrected',
         'timestamp',
     ]
-    list_filter = ['event_type', 'is_low_confidence', 'manually_corrected']
+    # lot is stored directly because unmatched exit events have no session yet.
+    list_select_related = ['lot', 'session']
+    list_filter = ['lot', 'event_type', 'is_low_confidence', 'manually_corrected']
     search_fields = ['raw_plate_text', 'corrected_plate']
     ordering = ['-timestamp']
     # timestamp is auto-set at creation; bounding_box is set by the CV pipeline.

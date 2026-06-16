@@ -154,6 +154,12 @@ class TestCalculateCharge:
         entry, exit_ = self._span(minutes=15)
         assert calculate_charge(entry, exit_, _settings()) == Decimal('0.00')
 
+    def test_fractional_second_over_grace_is_billed(self):
+        """15 min + 0.5 s is outside grace and bills the first full hour."""
+        entry = timezone.now()
+        exit_ = entry + timedelta(minutes=15, milliseconds=500)
+        assert calculate_charge(entry, exit_, _settings()) == Decimal('5.00')
+
     def test_hour_exact_boundary(self):
         """60 minutes → ceil(1.0h) = 1 unit → $5.00."""
         entry, exit_ = self._span(minutes=60)
@@ -180,6 +186,17 @@ class TestCalculateCharge:
         settings = _settings(billing_unit='minute', rate=Decimal('0.25'))
         entry, exit_ = self._span(minutes=90, seconds=1)
         assert calculate_charge(entry, exit_, settings) == Decimal('22.75')
+
+    def test_per_minute_fractional_second_rounds_up(self):
+        """60.5 seconds at per-minute billing consumes 2 billed minutes."""
+        settings = _settings(
+            billing_unit='minute',
+            rate=Decimal('0.25'),
+            grace_period_minutes=0,
+        )
+        entry = timezone.now()
+        exit_ = entry + timedelta(seconds=60, milliseconds=500)
+        assert calculate_charge(entry, exit_, settings) == Decimal('0.50')
 
     def test_daily_cap_applied(self):
         """8 hours = $40 but capped at $25.00."""
@@ -240,6 +257,7 @@ class TestHandleEntry:
         assert session.license_plate is None
         event = PlateDetectionEvent.objects.get(session=session)
         assert event.event_type == 'entry'
+        assert event.lot == parking_lot
         assert event.is_low_confidence is False
 
     def test_registered_entry_links_user_and_plate(self, parking_lot, lot_settings, license_plate, user):
@@ -374,6 +392,7 @@ class TestHandleExit:
         assert not ParkingSession.objects.filter(plate_text='NOENTRY').exists()
         event = PlateDetectionEvent.objects.get(raw_plate_text='NOENTRY')
         assert event.session is None
+        assert event.lot == parking_lot
         assert event.event_type == 'exit'
         assert event.is_low_confidence is True  # forced flag despite high confidence
 
@@ -446,6 +465,23 @@ class TestCorrectPlate:
         session.refresh_from_db()
         assert session.plate_text == 'RIGHT2'
 
+    def test_entry_correction_voids_duplicate_active_session(self, parking_lot, lot_settings):
+        """Correcting an active entry preserves orphan handling for duplicates."""
+        existing = handle_entry('RIGHT2', 0.9, [], PLATE_IMAGE, parking_lot)
+        corrected = handle_entry('WRONG2', 0.4, [], PLATE_IMAGE, parking_lot)
+        event = PlateDetectionEvent.objects.get(session=corrected)
+
+        correct_plate(event.pk, 'RIGHT2')
+
+        existing.refresh_from_db()
+        corrected.refresh_from_db()
+        assert existing.status == 'void'
+        assert existing.was_orphaned is True
+        assert existing.charge_amount == Decimal('0.00')
+        assert corrected.status == 'active'
+        assert corrected.plate_text == 'RIGHT2'
+        assert corrected.has_duplicate_warning is True
+
     def test_correction_relinks_to_registered_plate(self, parking_lot, lot_settings, license_plate, user):
         """Correcting to a registered plate links the session to its owner."""
         session = handle_entry('MISRED', 0.4, [], PLATE_IMAGE, parking_lot)
@@ -468,8 +504,8 @@ class TestCorrectPlate:
         assert session.license_plate is None
         assert session.user is None
 
-    def test_correction_of_orphan_exit_event(self, parking_lot, lot_settings):
-        """Correcting an unmatched-exit event (session=None) doesn't crash."""
+    def test_correction_of_orphan_exit_event_without_match(self, parking_lot, lot_settings):
+        """Correcting an unmatched-exit event with no active match keeps it queued."""
         handle_exit('GHOST1', 0.4, [], PLATE_IMAGE, parking_lot)
         event = PlateDetectionEvent.objects.get(raw_plate_text='GHOST1')
         assert event.session is None
@@ -477,6 +513,50 @@ class TestCorrectPlate:
         result = correct_plate(event.pk, 'FIXED1')
         assert result.manually_corrected is True
         assert result.corrected_plate == 'FIXED1'
+        result.refresh_from_db()
+        assert result.session is None
+
+    def test_correction_of_orphan_exit_closes_active_session(self, parking_lot, lot_settings):
+        """Correcting a misread exit reconciles it with the same-lot active session."""
+        active = ParkingSession.objects.create(
+            plate_text='ABC123',
+            lot=parking_lot,
+            entry_time=timezone.now() - timedelta(minutes=90),
+            status='active',
+        )
+        handle_exit('ABC128', 0.4, [], PLATE_IMAGE, parking_lot)
+        event = PlateDetectionEvent.objects.get(raw_plate_text='ABC128')
+        assert event.session is None
+        assert event.lot == parking_lot
+
+        result = correct_plate(event.pk, 'ABC123')
+
+        active.refresh_from_db()
+        result.refresh_from_db()
+        assert active.status == 'completed'
+        assert active.charge_amount == Decimal('10.00')
+        assert active.exit_time is not None
+        assert result.session == active
+
+    def test_orphan_exit_correction_is_scoped_to_lot(self, parking_lot, lot_settings):
+        """Corrected exits close only active sessions in the event's lot."""
+        other_lot = ParkingLot.objects.create(name='Other Lot')
+        LotSettings.objects.create(lot=other_lot, rate=Decimal('5.00'))
+        other_active = ParkingSession.objects.create(
+            plate_text='ABC123',
+            lot=other_lot,
+            entry_time=timezone.now() - timedelta(minutes=90),
+            status='active',
+        )
+        handle_exit('ABC128', 0.4, [], PLATE_IMAGE, parking_lot)
+        event = PlateDetectionEvent.objects.get(raw_plate_text='ABC128')
+
+        result = correct_plate(event.pk, 'ABC123')
+
+        other_active.refresh_from_db()
+        result.refresh_from_db()
+        assert other_active.status == 'active'
+        assert result.session is None
 
     def test_correction_invalid_id_raises(self, db):
         """An unknown event id raises DoesNotExist (explicit failure)."""
