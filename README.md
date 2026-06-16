@@ -9,6 +9,7 @@ A parking lot management system that uses computer vision to read license plates
 - [Branch: Synthetic Training Data Pipeline + Plate Detector CNN](#branch-synthetic-training-data-pipeline--plate-detector-cnn)
 - [Branch: Plate Recognizer CRNN](#branch-plate-recognizer-crnn)
 - [Branch: CV Inference Pipeline](#plate-recognition-pipeline)
+- [Session & Billing](#session--billing)
 - [Creating the Dataset for Training](#creating-the-dataset-for-training)
 - [Web Application](#web-application)
 - [Docker](#docker)
@@ -367,6 +368,106 @@ The detector sees a letterboxed 640×480 canvas — the original photo is shrunk
 `get_pipeline()` returns a module-level singleton — the first call creates the pipeline and every later call reuses it, so all Django requests in a process share one loaded copy of the models. Creation is guarded by double-checked locking so two simultaneous first requests can't each load the models.
 
 The singleton is created lazily on the first request rather than at Django startup. Startup code also runs during management commands like `migrate` and `collectstatic`, where the weight files may not exist and inference is never needed — loading eagerly would crash migrations in CI just because the models weren't trained yet.
+
+## Session & Billing
+
+The CV pipeline answers *"what plate is in this photo?"*. The session & billing layer (`apps/parking/services.py`) answers the next question: *"what should happen now?"* — open a session, close one and charge for it, void a duplicate, or flag a bad read for an operator. It is the bridge between the CV output and the [database models](#database-models).
+
+```mermaid
+flowchart TD
+    CV(["CV pipeline result<br/>plate text, confidence, box"])
+    ENTRY{"entry or exit?"}
+
+    HE["handle_entry()"]
+    HX["handle_exit()"]
+
+    ORPHAN["void prior active<br/>session if any"]
+    NEWSESS(["new active<br/>ParkingSession"])
+
+    MATCH{"matches an<br/>active session?"}
+    BILL["calculate_charge()<br/>complete + bill session"]
+    REVIEW(["flagged event<br/>session = None"])
+
+    EVENT(["PlateDetectionEvent"])
+
+    CV --> ENTRY
+    ENTRY -- entry --> HE --> ORPHAN --> NEWSESS --> EVENT
+    ENTRY -- exit --> HX --> MATCH
+    MATCH -- yes --> BILL --> EVENT
+    MATCH -- no --> REVIEW
+
+    classDef logic fill:#1e40af,stroke:#1d4ed8,color:#fff
+    classDef io fill:#0f766e,stroke:#0d9488,color:#fff
+    classDef warn fill:#92400e,stroke:#b45309,color:#fff
+
+    class HE,HX,ORPHAN,BILL logic
+    class CV,NEWSESS,EVENT io
+    class REVIEW warn
+```
+
+This layer is **pure business logic** — it never loads CV model weights or calls the pipeline. The caller runs the pipeline first and passes the already-extracted detection data (`plate_text`, `confidence`, `bounding_box`, `image`, `lot`) into these functions. That keeps it fast and trivially unit-testable (47 tests, no `.pth` files required). Two more rules hold throughout: **all money is `Decimal`, never `float`** (float rounding errors accumulate into wrong revenue totals), and **no silent failures** — every branch logs, returns an explicit value, or raises.
+
+The five public functions:
+
+<details>
+<summary><code>normalize_plate(raw_text)</code></summary>
+
+Collapses a raw plate reading into one canonical matching key. CV output and human input vary in spacing and case — `"abc 123"`, `"ABC 123"`, and `" abc123 "` all mean the same car — so all whitespace is stripped and the result is uppercased (`"ABC123"`). Hyphens and other characters are kept deliberately: the project uses an **exact-match policy**, so `"ABC-123"` stays distinct from `"ABC123"` and the system never guesses that two similar plates are the same vehicle. Empty, `None`, or whitespace-only input returns `""` (and logs a warning) rather than crashing — the caller decides what an empty plate means.
+
+</details>
+
+<details>
+<summary><code>calculate_charge(entry_time, exit_time, lot_settings)</code></summary>
+
+Turns parking duration into a charge, in dollars, as a `Decimal`. It is pure (no database writes) and isolated so the one place a bug costs real money can be tested against every boundary. The duration is built from **integer seconds**, never `Decimal(float)`, so binary-float noise can never pollute the cents. Four rules apply, in order:
+
+1. **Grace period** — duration at or under `grace_period_minutes` is free (`$0.00`).
+2. **Per-minute billing** — `ceil(total_minutes) × rate`.
+3. **Per-hour billing** — `ceil(total_hours) × rate`. The billed quantity always rounds **up** because a car that parks 61 minutes occupied the spot into a second hour.
+4. **Daily cap** — if `daily_cap_enabled` and the charge exceeds `daily_cap_amount`, the cap wins. If the cap is enabled but no amount is set, the charge is **not** silently zeroed — it logs a warning and bills the uncapped amount. An unknown `billing_unit` falls back to per-hour with a loud log.
+
+The final result is rounded to the cent (`ROUND_HALF_UP`) before it returns.
+
+</details>
+
+<details>
+<summary><code>handle_entry(plate_text, confidence, bounding_box, image, lot)</code></summary>
+
+Opens an active session when a car arrives, and records the entry event. Wrapped in `transaction.atomic()` because it may void a prior session **and** create a new session **and** create a detection event — those must commit together or not at all.
+
+- **Low confidence** is judged against the lot's **own** `confidence_threshold` (configurable per lot), not the CV pipeline's fixed `0.6` constant, so operators can tune sensitivity per lot.
+- **Orphan handling** — if the plate already has an active session in this lot, a single atomic `UPDATE` voids it (`status="void"`, `charge_amount=0`, `was_orphaned=True`) and the new session is flagged `has_duplicate_warning=True`. One `UPDATE` statement (rather than read-then-write) leaves no race window for two concurrent entries.
+- **Guest vs registered** — if the normalized plate matches a registered `LicensePlate`, the session links to that user; otherwise it's a guest (`user=None`).
+- An **empty plate** after normalization raises `ValueError` — an empty key would "match" every other blank read and corrupt the orphan/billing logic. Unreadable reads are the caller's job to queue for review.
+
+</details>
+
+<details>
+<summary><code>handle_exit(plate_text, confidence, bounding_box, image, lot)</code></summary>
+
+Closes the matching active session when a car leaves and bills it. Also `transaction.atomic()`. It locks the oldest active session for the plate with `select_for_update()` so a concurrent exit can't double-bill, ordered by `entry_time` for a deterministic choice.
+
+- **Exit without entry** — if no active session matches, it does **not** auto-create one and does **not** raise. It records a flagged event with `session=None` and `is_low_confidence=True` (forced, so it always lands in the review queue) and returns `None`. An empty/unreadable plate naturally takes this same path.
+- **Clock-skew guard** — to satisfy the *exit-after-entry* and *non-negative-duration* database constraints even with clock skew or sub-second turnaround, the exit time is bumped to at least one second after entry, and duration is `max(1, ...)`.
+- On success it sets `status="completed"`, `exit_time`, `duration_seconds`, and `charge_amount` (via `calculate_charge`), saving only those changed fields, then records the exit event and returns the completed session.
+
+</details>
+
+<details>
+<summary><code>correct_plate(event_id, corrected_text)</code></summary>
+
+Applies an operator's manual correction to a detection event that landed in the review queue. Also `transaction.atomic()`. It marks the event `manually_corrected`, updates the linked session's `plate_text`, and **re-evaluates the registration link** — the corrected plate might now match a registered user, or no longer match (reverting the session to a guest). Both the event and session rows are locked with `select_for_update()` so the relink can't race a concurrent exit.
+
+> **Authorization:** this service performs **no** access control. The caller (the planned `PATCH /api/events/<id>/correct/` view) **must** restrict it to staff / lot operators — otherwise any caller could rewrite any event and relink any session to any registered user.
+
+</details>
+
+<details>
+<summary><strong>Boundary validation</strong></summary>
+
+`services.py` is a system boundary — data arrives from CV output and web requests, both of which can be wrong or hostile — so inputs are cleaned before they reach the database. Plate text over 20 characters raises `ValueError` instead of being truncated (a truncated plate is a silently wrong matching key that would mis-bill the wrong car). An untrusted `bounding_box` is coerced to a 4-float list clamped to `[0, 1]`, or `[]` if malformed. Confidence is clamped to `[0.0, 1.0]` so an out-of-range value can't trip the `confidence_score` check constraint mid-insert.
+
+</details>
 
 ## Creating the Dataset for Training
 
