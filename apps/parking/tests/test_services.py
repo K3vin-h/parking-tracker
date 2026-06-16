@@ -558,6 +558,25 @@ class TestCorrectPlate:
         assert other_active.status == 'active'
         assert result.session is None
 
+    def test_orphan_exit_correction_ignores_later_reentry(self, parking_lot, lot_settings):
+        """A corrected old exit must not close a session opened after that event."""
+        handle_exit('ABC128', 0.4, [], PLATE_IMAGE, parking_lot)
+        event = PlateDetectionEvent.objects.get(raw_plate_text='ABC128')
+        later_session = ParkingSession.objects.create(
+            plate_text='ABC123',
+            lot=parking_lot,
+            entry_time=event.timestamp + timedelta(hours=1),
+            status='active',
+        )
+
+        result = correct_plate(event.pk, 'ABC123')
+
+        later_session.refresh_from_db()
+        result.refresh_from_db()
+        assert later_session.status == 'active'
+        assert later_session.exit_time is None
+        assert result.session is None
+
     def test_correction_invalid_id_raises(self, db):
         """An unknown event id raises DoesNotExist (explicit failure)."""
         with pytest.raises(PlateDetectionEvent.DoesNotExist):
