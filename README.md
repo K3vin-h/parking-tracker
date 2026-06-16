@@ -373,37 +373,15 @@ The singleton is created lazily on the first request rather than at Django start
 
 The CV pipeline answers *"what plate is in this photo?"*. The session & billing layer (`apps/parking/services.py`) answers the next question: *"what should happen now?"* — open a session, close one and charge for it, void a duplicate, or flag a bad read for an operator. It is the bridge between the CV output and the [database models](#database-models).
 
-```mermaid
-flowchart TD
-    CV(["CV pipeline result<br/>plate text, confidence, box"])
-    ENTRY{"entry or exit?"}
+Every detection from the CV pipeline (`plate_text`, `confidence`, `bounding_box`) is routed to one of two entry points based on whether the car is arriving or leaving:
 
-    HE["handle_entry()"]
-    HX["handle_exit()"]
-
-    ORPHAN["void prior active<br/>session if any"]
-    NEWSESS(["new active<br/>ParkingSession"])
-
-    MATCH{"matches an<br/>active session?"}
-    BILL["calculate_charge()<br/>complete + bill session"]
-    REVIEW(["flagged event<br/>session = None"])
-
-    EVENT(["PlateDetectionEvent"])
-
-    CV --> ENTRY
-    ENTRY -- entry --> HE --> ORPHAN --> NEWSESS --> EVENT
-    ENTRY -- exit --> HX --> MATCH
-    MATCH -- yes --> BILL --> EVENT
-    MATCH -- no --> REVIEW
-
-    classDef logic fill:#1e40af,stroke:#1d4ed8,color:#fff
-    classDef io fill:#0f766e,stroke:#0d9488,color:#fff
-    classDef warn fill:#92400e,stroke:#b45309,color:#fff
-
-    class HE,HX,ORPHAN,BILL logic
-    class CV,NEWSESS,EVENT io
-    class REVIEW warn
-```
+- **Entry** → `handle_entry()`:
+  - Voids any prior active session for the same plate (a missed exit), then opens a new active `ParkingSession`.
+  - Records a `PlateDetectionEvent` for the entry.
+- **Exit** → `handle_exit()`:
+  - If it matches an active session, `calculate_charge()` bills it and the session is completed.
+  - If no active session matches, a flagged event is recorded with `session = None` for the operator review queue.
+  - Records a `PlateDetectionEvent` for the exit.
 
 This layer is **pure business logic** — it never loads CV model weights or calls the pipeline. The caller runs the pipeline first and passes the already-extracted detection data (`plate_text`, `confidence`, `bounding_box`, `image`, `lot`) into these functions. That keeps it fast and trivially unit-testable (47 tests, no `.pth` files required). Two more rules hold throughout: **all money is `Decimal`, never `float`** (float rounding errors accumulate into wrong revenue totals), and **no silent failures** — every branch logs, returns an explicit value, or raises.
 
