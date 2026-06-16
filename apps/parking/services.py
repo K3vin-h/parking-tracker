@@ -37,6 +37,7 @@ from decimal import Decimal, ROUND_CEILING, ROUND_HALF_UP
 from hashlib import sha256
 
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from apps.parking.models import (
@@ -492,8 +493,17 @@ def _complete_session_for_exit(
     session.exit_time = exit_time
     session.duration_seconds = duration_seconds
     session.charge_amount = charge
+    # A corrected exit can turn a previously voided orphan back into a real,
+    # billed stay. Once completed, the row is no longer an orphaned void.
+    session.was_orphaned = False
     session.save(
-        update_fields=["status", "exit_time", "duration_seconds", "charge_amount"]
+        update_fields=[
+            "status",
+            "exit_time",
+            "duration_seconds",
+            "charge_amount",
+            "was_orphaned",
+        ]
     )
     return charge
 
@@ -612,9 +622,9 @@ def correct_plate(event_id: int, corrected_text: str) -> PlateDetectionEvent:
             .filter(
                 lot=event.lot,
                 plate_text=normalized,
-                status="active",
                 entry_time__lt=event.timestamp,
             )
+            .filter(Q(status="active") | Q(status="void", was_orphaned=True))
             .order_by("entry_time")
             .first()
         )

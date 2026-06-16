@@ -577,6 +577,34 @@ class TestCorrectPlate:
         assert later_session.exit_time is None
         assert result.session is None
 
+    def test_orphan_exit_correction_reconciles_voided_reentry_session(self, parking_lot, lot_settings):
+        """A later re-entry void may be reversed when the queued exit is corrected."""
+        original = ParkingSession.objects.create(
+            plate_text='ABC123',
+            lot=parking_lot,
+            entry_time=timezone.now() - timedelta(minutes=90),
+            status='active',
+        )
+        handle_exit('ABC128', 0.4, [], PLATE_IMAGE, parking_lot)
+        event = PlateDetectionEvent.objects.get(raw_plate_text='ABC128')
+        reentry = handle_entry('ABC123', 0.9, [], PLATE_IMAGE, parking_lot)
+
+        original.refresh_from_db()
+        assert original.status == 'void'
+        assert original.was_orphaned is True
+
+        result = correct_plate(event.pk, 'ABC123')
+
+        original.refresh_from_db()
+        reentry.refresh_from_db()
+        result.refresh_from_db()
+        assert original.status == 'completed'
+        assert original.was_orphaned is False
+        assert original.exit_time == event.timestamp
+        assert original.charge_amount == Decimal('10.00')
+        assert reentry.status == 'active'
+        assert result.session == original
+
     def test_correction_invalid_id_raises(self, db):
         """An unknown event id raises DoesNotExist (explicit failure)."""
         with pytest.raises(PlateDetectionEvent.DoesNotExist):
