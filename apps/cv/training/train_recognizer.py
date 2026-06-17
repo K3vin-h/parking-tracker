@@ -58,6 +58,24 @@ from apps.cv.training.dataset import (
     PlateRecognizerDataset,
     ctc_collate_fn,
 )
+from apps.cv.training._train_utils import (
+    BG_PRIMARY,
+    BG_SECONDARY,
+    BLUE,
+    BORDER,
+    GREEN,
+    PURPLE,
+    RED,
+    TEXT_MUTED,
+    TEXT_PRIMARY,
+    YELLOW,
+    compute_batch_x,
+    import_pyplot,
+    mark_best_epoch,
+    save_training_figure,
+    smooth,
+    style_axes,
+)
 from apps.cv.utils.device import get_device
 
 logging.basicConfig(
@@ -69,6 +87,7 @@ logger = logging.getLogger(__name__)
 
 
 # ── Training helpers ──────────────────────────────────────────────────────────
+
 
 def _train_epoch(
     model: PlateRecognizerCRNN,
@@ -103,15 +122,15 @@ def _train_epoch(
 
     for batch in loader:
         # ctc_collate_fn returns a dict — not a (images, labels) tuple
-        images         = batch["images"].to(device)
+        images = batch["images"].to(device)
         # targets and target_lengths stay on CPU — CTCLoss always requires CPU tensors
-        targets        = batch["targets"]
+        targets = batch["targets"]
         target_lengths = batch["target_lengths"]
 
         optimizer.zero_grad()
 
-        log_probs = model(images)              # (T=16, N, C=37) on device
-        T, N, _   = log_probs.shape
+        log_probs = model(images)  # (T=16, N, C=37) on device
+        T, N, _ = log_probs.shape
 
         # input_lengths: every sample in this batch has the full sequence length T
         input_lengths = torch.full((N,), T, dtype=torch.long)
@@ -149,11 +168,13 @@ def _levenshtein(a: str, b: str) -> int:
     for i, ca in enumerate(a, start=1):
         curr = [i]
         for j, cb in enumerate(b, start=1):
-            curr.append(min(
-                prev[j] + 1,                      # deletion
-                curr[j - 1] + 1,                  # insertion
-                prev[j - 1] + (ca != cb),         # substitution / match
-            ))
+            curr.append(
+                min(
+                    prev[j] + 1,  # deletion
+                    curr[j - 1] + 1,  # insertion
+                    prev[j - 1] + (ca != cb),  # substitution / match
+                )
+            )
         prev = curr
     return prev[-1]
 
@@ -181,19 +202,19 @@ def _validate_epoch(
         - plate_accuracy: fraction of plates where every character is correct
     """
     model.eval()
-    total_loss      = 0.0
-    edit_errors     = 0
-    total_chars     = 0
-    exact_matches   = 0
-    total_plates    = 0
+    total_loss = 0.0
+    edit_errors = 0
+    total_chars = 0
+    exact_matches = 0
+    total_plates = 0
 
     for batch in loader:
-        images         = batch["images"].to(device)
-        targets        = batch["targets"]
+        images = batch["images"].to(device)
+        targets = batch["targets"]
         target_lengths = batch["target_lengths"]
 
-        log_probs     = model(images)
-        T, N, _       = log_probs.shape
+        log_probs = model(images)
+        T, N, _ = log_probs.shape
         input_lengths = torch.full((N,), T, dtype=torch.long)
 
         loss = criterion(log_probs.cpu(), targets, input_lengths, target_lengths)
@@ -206,8 +227,8 @@ def _validate_epoch(
         # WHY torch.split: ctc_collate_fn concatenates all label sequences into
         # a single 1-D tensor; target_lengths records how many indices belong to
         # each sample, so split() reverses this concatenation.
-        gt_seqs   = torch.split(targets, target_lengths.tolist())
-        gt_texts  = ["".join(IDX_TO_CHAR[i.item()] for i in seq) for seq in gt_seqs]
+        gt_seqs = torch.split(targets, target_lengths.tolist())
+        gt_texts = ["".join(IDX_TO_CHAR[i.item()] for i in seq) for seq in gt_seqs]
 
         for pred, gt in zip(pred_texts, gt_texts):
             total_plates += 1
@@ -226,32 +247,14 @@ def _validate_epoch(
 
     n = len(loader.dataset)
     # Insertions can push edit distance past len(gt); clamp so accuracy ≥ 0.
-    char_acc  = max(0.0, 1.0 - edit_errors / max(total_chars, 1))
+    char_acc = max(0.0, 1.0 - edit_errors / max(total_chars, 1))
     plate_acc = exact_matches / max(total_plates, 1)
     return total_loss / n, char_acc, plate_acc
 
 
 # ── Training-curve helpers ────────────────────────────────────────────────────
-
-def _smooth(values: list[float], weight: float = 0.9) -> list[float]:
-    """
-    Exponential moving average — same algorithm TensorBoard uses by default.
-
-    Args:
-        values: Raw signal (typically per-batch training losses).
-        weight: Smoothing factor in [0, 1).  Higher = smoother, more lag.
-
-    Returns:
-        List of smoothed values, same length as input.
-    """
-    if not values:
-        return []
-    smoothed = []
-    last = values[0]
-    for v in values:
-        last = weight * last + (1.0 - weight) * v
-        smoothed.append(last)
-    return smoothed
+# Shared theme/plotting primitives live in _train_utils; only the recognizer's
+# own 4-panel layout and per-panel plotting stay here.
 
 
 def _plot_training_history(
@@ -277,80 +280,68 @@ def _plot_training_history(
     Returns:
         Path to the saved PNG.
     """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    import matplotlib.gridspec as gridspec
+    plt, gridspec = import_pyplot()
 
-    # ── Project design tokens ──────────────────────────────────────────────
-    BG_PRIMARY   = "#0f1117"
-    BG_SECONDARY = "#1a1d27"
-    BORDER       = "#2e3039"
-    TEXT_PRIMARY = "#e4e4e7"
-    TEXT_MUTED   = "#a1a1aa"
-    BLUE         = "#3b82f6"
-    GREEN        = "#22c55e"
-    YELLOW       = "#eab308"
-    RED          = "#ef4444"
-    PURPLE       = "#a855f7"
-
-    epochs           = list(range(1, len(history["val_loss"]) + 1))
-    n_epochs         = len(epochs)
-    batch_losses     = history["train_loss_batch"]
+    epochs = list(range(1, len(history["val_loss"]) + 1))
+    n_epochs = len(epochs)
+    batch_losses = history["train_loss_batch"]
     batches_per_epoch = history["batches_per_epoch"]
 
-    # Map each batch to a fractional epoch coordinate
-    batch_x: list[float] = []
-    for ep, n_batches in enumerate(batches_per_epoch, start=1):
-        for i in range(n_batches):
-            batch_x.append(ep - 1.0 + (i + 0.5) / max(n_batches, 1))
-
-    smoothed = _smooth(batch_losses)
+    batch_x = compute_batch_x(batches_per_epoch)
+    smoothed = smooth(batch_losses)
 
     # ── Figure layout — 4 rows ─────────────────────────────────────────────
     fig = plt.figure(figsize=(12, 11), facecolor=BG_PRIMARY)
-    gs  = gridspec.GridSpec(
-        4, 1, figure=fig,
-        hspace=0.06, top=0.92, bottom=0.06, left=0.08, right=0.97,
+    gs = gridspec.GridSpec(
+        4,
+        1,
+        figure=fig,
+        hspace=0.06,
+        top=0.92,
+        bottom=0.06,
+        left=0.08,
+        right=0.97,
         height_ratios=[2.2, 1.2, 1.2, 0.8],
     )
-    ax_loss  = fig.add_subplot(gs[0])
-    ax_char  = fig.add_subplot(gs[1], sharex=ax_loss)
+    ax_loss = fig.add_subplot(gs[0])
+    ax_char = fig.add_subplot(gs[1], sharex=ax_loss)
     ax_plate = fig.add_subplot(gs[2], sharex=ax_loss)
-    ax_lr    = fig.add_subplot(gs[3], sharex=ax_loss)
+    ax_lr = fig.add_subplot(gs[3], sharex=ax_loss)
 
-    for ax in (ax_loss, ax_char, ax_plate, ax_lr):
-        ax.set_facecolor(BG_SECONDARY)
-        ax.tick_params(colors=TEXT_MUTED, labelsize=9)
-        for spine in ax.spines.values():
-            spine.set_color(BORDER)
-        ax.grid(True, color=BORDER, linewidth=0.5, alpha=0.8)
-        ax.yaxis.label.set_color(TEXT_PRIMARY)
+    style_axes((ax_loss, ax_char, ax_plate, ax_lr))
 
-    plt.setp(ax_loss.get_xticklabels(),  visible=False)
-    plt.setp(ax_char.get_xticklabels(),  visible=False)
+    plt.setp(ax_loss.get_xticklabels(), visible=False)
+    plt.setp(ax_char.get_xticklabels(), visible=False)
     plt.setp(ax_plate.get_xticklabels(), visible=False)
     ax_lr.tick_params(axis="x", colors=TEXT_MUTED, labelsize=9)
     ax_lr.set_xlabel("Epoch", color=TEXT_PRIMARY, fontsize=10)
 
     # Best-epoch vertical marker across all panels
-    for ax in (ax_loss, ax_char, ax_plate, ax_lr):
-        ax.axvline(best_epoch, color=TEXT_MUTED, linewidth=0.9, linestyle=":", alpha=0.55)
+    mark_best_epoch((ax_loss, ax_char, ax_plate, ax_lr), best_epoch)
 
     # ── Row 1: Loss ────────────────────────────────────────────────────────
     ax_loss.plot(batch_x, batch_losses, color=BLUE, linewidth=0.4, alpha=0.18)
-    ax_loss.plot(batch_x, smoothed,     color=BLUE, linewidth=1.8, label="Train loss (smoothed)")
     ax_loss.plot(
-        epochs, history["val_loss"],
-        color=GREEN, linewidth=1.6,
-        marker="o", markersize=5,
-        markerfacecolor=BG_PRIMARY, markeredgewidth=1.8,
+        batch_x, smoothed, color=BLUE, linewidth=1.8, label="Train loss (smoothed)"
+    )
+    ax_loss.plot(
+        epochs,
+        history["val_loss"],
+        color=GREEN,
+        linewidth=1.6,
+        marker="o",
+        markersize=5,
+        markerfacecolor=BG_PRIMARY,
+        markeredgewidth=1.8,
         label="Val loss",
     )
     ax_loss.set_ylabel("Loss", color=TEXT_PRIMARY, fontsize=10)
     ax_loss.legend(
-        facecolor=BG_SECONDARY, edgecolor=BORDER,
-        labelcolor=TEXT_PRIMARY, fontsize=9, loc="upper right",
+        facecolor=BG_SECONDARY,
+        edgecolor=BORDER,
+        labelcolor=TEXT_PRIMARY,
+        fontsize=9,
+        loc="upper right",
     )
     best_val = history["val_loss"][best_epoch - 1]
     x_offset = max(0.8, n_epochs * 0.04)
@@ -358,70 +349,95 @@ def _plot_training_history(
         f"best  epoch {best_epoch}\n{best_val:.4f}",
         xy=(best_epoch, best_val),
         xytext=(best_epoch + x_offset, best_val),
-        color=TEXT_MUTED, fontsize=8,
+        color=TEXT_MUTED,
+        fontsize=8,
         arrowprops=dict(arrowstyle="->", color=TEXT_MUTED, lw=0.9),
         va="center",
     )
 
     # ── Row 2: Character accuracy ──────────────────────────────────────────
-    ax_char.axhline(0.90, color=RED, linewidth=1.1, linestyle="--", alpha=0.75, label="Target  90 %")
+    ax_char.axhline(
+        0.90, color=RED, linewidth=1.1, linestyle="--", alpha=0.75, label="Target  90 %"
+    )
     ax_char.plot(
-        epochs, history["val_char_acc"],
-        color=YELLOW, linewidth=1.6,
-        marker="s", markersize=4,
-        markerfacecolor=BG_PRIMARY, markeredgewidth=1.8,
+        epochs,
+        history["val_char_acc"],
+        color=YELLOW,
+        linewidth=1.6,
+        marker="s",
+        markersize=4,
+        markerfacecolor=BG_PRIMARY,
+        markeredgewidth=1.8,
         label="Char accuracy",
     )
     ax_char.set_ylim(-0.05, 1.08)
     ax_char.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
     ax_char.set_ylabel("Char Acc", color=TEXT_PRIMARY, fontsize=10)
     ax_char.legend(
-        facecolor=BG_SECONDARY, edgecolor=BORDER,
-        labelcolor=TEXT_PRIMARY, fontsize=9, loc="lower right",
+        facecolor=BG_SECONDARY,
+        edgecolor=BORDER,
+        labelcolor=TEXT_PRIMARY,
+        fontsize=9,
+        loc="lower right",
     )
 
     # ── Row 3: Plate (exact-match) accuracy ───────────────────────────────
-    ax_plate.axhline(0.80, color=RED, linewidth=1.1, linestyle="--", alpha=0.75, label="Target  80 %")
+    ax_plate.axhline(
+        0.80, color=RED, linewidth=1.1, linestyle="--", alpha=0.75, label="Target  80 %"
+    )
     ax_plate.plot(
-        epochs, history["val_plate_acc"],
-        color=PURPLE, linewidth=1.6,
-        marker="^", markersize=4,
-        markerfacecolor=BG_PRIMARY, markeredgewidth=1.8,
+        epochs,
+        history["val_plate_acc"],
+        color=PURPLE,
+        linewidth=1.6,
+        marker="^",
+        markersize=4,
+        markerfacecolor=BG_PRIMARY,
+        markeredgewidth=1.8,
         label="Plate accuracy",
     )
     ax_plate.set_ylim(-0.05, 1.08)
     ax_plate.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
     ax_plate.set_ylabel("Plate Acc", color=TEXT_PRIMARY, fontsize=10)
     ax_plate.legend(
-        facecolor=BG_SECONDARY, edgecolor=BORDER,
-        labelcolor=TEXT_PRIMARY, fontsize=9, loc="lower right",
+        facecolor=BG_SECONDARY,
+        edgecolor=BORDER,
+        labelcolor=TEXT_PRIMARY,
+        fontsize=9,
+        loc="lower right",
     )
 
     # ── Row 4: Learning rate ───────────────────────────────────────────────
     ax_lr.step(
-        epochs, history["lr"],
-        color=TEXT_MUTED, linewidth=1.3, where="post",
+        epochs,
+        history["lr"],
+        color=TEXT_MUTED,
+        linewidth=1.3,
+        where="post",
         label="Learning rate",
     )
     ax_lr.set_ylabel("LR", color=TEXT_PRIMARY, fontsize=10)
     ax_lr.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0e}"))
     ax_lr.legend(
-        facecolor=BG_SECONDARY, edgecolor=BORDER,
-        labelcolor=TEXT_PRIMARY, fontsize=9,
+        facecolor=BG_SECONDARY,
+        edgecolor=BORDER,
+        labelcolor=TEXT_PRIMARY,
+        fontsize=9,
     )
 
     # ── Title and save ─────────────────────────────────────────────────────
     fig.suptitle(
         "PlateRecognizerCRNN — Training Progress",
-        color=TEXT_PRIMARY, fontsize=13, fontweight="bold", y=0.965,
+        color=TEXT_PRIMARY,
+        fontsize=13,
+        fontweight="bold",
+        y=0.965,
     )
-    plot_path = output_path.parent / (output_path.stem + "_training.png")
-    fig.savefig(plot_path, dpi=150, facecolor=BG_PRIMARY, bbox_inches="tight")
-    plt.close(fig)
-    return plot_path
+    return save_training_figure(fig, output_path)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
+
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -429,27 +445,39 @@ def _parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        "--data-dir", type=Path, required=True,
+        "--data-dir",
+        type=Path,
+        required=True,
         help="Root of the recognizer dataset (must contain images/ and labels.csv).",
     )
     parser.add_argument(
-        "--epochs", type=int, default=100,
+        "--epochs",
+        type=int,
+        default=100,
         help="Number of training epochs.",
     )
     parser.add_argument(
-        "--batch-size", type=int, default=32,
+        "--batch-size",
+        type=int,
+        default=32,
         help="DataLoader batch size.",
     )
     parser.add_argument(
-        "--lr", type=float, default=1e-3,
+        "--lr",
+        type=float,
+        default=1e-3,
         help="Initial Adam learning rate.",
     )
     parser.add_argument(
-        "--output", type=Path, default=Path("apps/cv/weights/recognizer.pth"),
+        "--output",
+        type=Path,
+        default=Path("apps/cv/weights/recognizer.pth"),
         help="Destination path for the best model weights.",
     )
     parser.add_argument(
-        "--seed", type=int, default=42,
+        "--seed",
+        type=int,
+        default=42,
         help="Random seed for the train/val split (reproducibility).",
     )
     return parser.parse_args()
@@ -505,7 +533,10 @@ def main() -> None:
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=5,
+        optimizer,
+        mode="min",
+        factor=0.5,
+        patience=5,
     )
 
     # ── Output path validation ─────────────────────────────────────────────
@@ -522,10 +553,9 @@ def main() -> None:
 
     # ── Training loop ──────────────────────────────────────────────────────
     best_val_loss = float("inf")
-    best_epoch    = 1
+    best_epoch = 1
 
     history: dict[str, list] = {
-        "train_loss_epoch": [],
         "train_loss_batch": [],
         "batches_per_epoch": [],
         "val_loss": [],
@@ -537,17 +567,25 @@ def main() -> None:
     logger.info("Starting training for %d epochs …", args.epochs)
     logger.info(
         "%-6s  %-12s  %-12s  %-10s  %-10s  %-10s",
-        "Epoch", "Train Loss", "Val Loss", "Char Acc", "Plate Acc", "LR",
+        "Epoch",
+        "Train Loss",
+        "Val Loss",
+        "Char Acc",
+        "Plate Acc",
+        "LR",
     )
 
     for epoch in range(1, args.epochs + 1):
-        train_loss, batch_losses          = _train_epoch(model, train_loader, criterion, optimizer, device)
-        val_loss, val_char_acc, val_plate_acc = _validate_epoch(model, val_loader, criterion, device)
+        train_loss, batch_losses = _train_epoch(
+            model, train_loader, criterion, optimizer, device
+        )
+        val_loss, val_char_acc, val_plate_acc = _validate_epoch(
+            model, val_loader, criterion, device
+        )
 
         scheduler.step(val_loss)
         current_lr = optimizer.param_groups[0]["lr"]
 
-        history["train_loss_epoch"].append(train_loss)
         history["train_loss_batch"].extend(batch_losses)
         history["batches_per_epoch"].append(len(batch_losses))
         history["val_loss"].append(val_loss)
@@ -557,17 +595,31 @@ def main() -> None:
 
         logger.info(
             "%-6d  %-12.6f  %-12.6f  %-10.4f  %-10.4f  %-10.6f",
-            epoch, train_loss, val_loss, val_char_acc, val_plate_acc, current_lr,
+            epoch,
+            train_loss,
+            val_loss,
+            val_char_acc,
+            val_plate_acc,
+            current_lr,
         )
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            best_epoch    = epoch
+            best_epoch = epoch
             torch.save(model.state_dict(), output_path)
-            logger.info("  ↳ New best (val_loss=%.6f) → saved to %s", best_val_loss, output_path)
+            logger.info(
+                "  ↳ New best (val_loss=%.6f) → saved to %s", best_val_loss, output_path
+            )
 
-    logger.info("Training complete. Best val loss: %.6f  |  Weights: %s", best_val_loss, output_path)
-    logger.info("Load with: model.load_state_dict(torch.load(%r, weights_only=True))", str(output_path))
+    logger.info(
+        "Training complete. Best val loss: %.6f  |  Weights: %s",
+        best_val_loss,
+        output_path,
+    )
+    logger.info(
+        "Load with: model.load_state_dict(torch.load(%r, weights_only=True))",
+        str(output_path),
+    )
 
     # ── Training curve ─────────────────────────────────────────────────────
     # WHY two separate guards: bundling plot-save and viewer-launch in one
@@ -585,6 +637,7 @@ def main() -> None:
     # `open` is macOS-only; on Linux/CI skip the viewer instead of failing.
     if plot_path is not None and sys.platform == "darwin":
         import subprocess
+
         try:
             subprocess.Popen(["open", str(plot_path)])
         except OSError as exc:

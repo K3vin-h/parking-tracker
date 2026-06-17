@@ -18,10 +18,11 @@ All URL patterns are added in Days 8–10 when views are implemented:
   path('api/revenue-data/',     api.revenue_data,     name='api_revenue_data'),
 """
 
-from django.urls import path
+# NOTE: `from django.urls import path` is intentionally omitted until the first
+# real route is added (Days 8–10) — see the docstring above for the planned set.
 
 # app_name enables namespaced URL reversals: {% url 'dashboard:upload' %}
-app_name = 'dashboard'
+app_name = "dashboard"
 
 # Populated in Days 8–10 when views are implemented.
 urlpatterns = []
