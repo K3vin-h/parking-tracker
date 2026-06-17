@@ -91,7 +91,7 @@ class LicensePlate(models.Model):
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
-        related_name='plates',
+        related_name="plates",
         help_text="The user account that owns this license plate.",
     )
 
@@ -119,13 +119,13 @@ class LicensePlate(models.Model):
     label = models.CharField(
         max_length=100,
         blank=True,
-        default='',
+        default="",
         help_text="Optional label to identify this vehicle, e.g. 'Daily Driver' or 'Work Truck'.",
     )
 
     class Meta:
-        verbose_name = 'license plate'
-        verbose_name_plural = 'license plates'
+        verbose_name = "license plate"
+        verbose_name_plural = "license plates"
         # Prevents one user from registering the same plate twice.
         # Does NOT prevent two DIFFERENT users from registering the same plate_text.
         # DAY 7 NOTE: handle_entry() in services.py must handle the ambiguous case
@@ -139,15 +139,15 @@ class LicensePlate(models.Model):
         # adding condition/deferrable options later without restructuring.
         constraints = [
             models.UniqueConstraint(
-                fields=['user', 'plate_text'],
-                name='licenseplate_user_plate_unique',
+                fields=["user", "plate_text"],
+                name="licenseplate_user_plate_unique",
             ),
         ]
 
     def __str__(self):
         # "ABC123 (Work Truck)" or just "ABC123" if no label.
-        label_part = f' ({self.label})' if self.label else ''
-        return f'{self.plate_text}{label_part}'
+        label_part = f" ({self.label})" if self.label else ""
+        return f"{self.plate_text}{label_part}"
 
 
 class ParkingLot(models.Model):
@@ -177,8 +177,8 @@ class ParkingLot(models.Model):
     )
 
     class Meta:
-        verbose_name = 'parking lot'
-        verbose_name_plural = 'parking lots'
+        verbose_name = "parking lot"
+        verbose_name_plural = "parking lots"
 
     def __str__(self):
         return self.name
@@ -216,7 +216,7 @@ class LotSettings(models.Model):
     lot = models.OneToOneField(
         ParkingLot,
         on_delete=models.CASCADE,
-        related_name='settings',
+        related_name="settings",
         help_text="The parking lot these settings apply to.",
     )
 
@@ -228,18 +228,18 @@ class LotSettings(models.Model):
     rate = models.DecimalField(
         max_digits=8,
         decimal_places=2,
-        default=Decimal('5.00'),
+        default=Decimal("5.00"),
         help_text="Rate per billing unit (in dollars). Always stored as Decimal, never float.",
     )
 
     BILLING_UNIT_CHOICES = [
-        ('hour', 'Per Hour'),       # ceil(hours) × rate
-        ('minute', 'Per Minute'),   # ceil(minutes) × rate
+        ("hour", "Per Hour"),  # ceil(hours) × rate
+        ("minute", "Per Minute"),  # ceil(minutes) × rate
     ]
     billing_unit = models.CharField(
         max_length=10,
         choices=BILLING_UNIT_CHOICES,
-        default='hour',
+        default="hour",
         help_text="Whether to charge per full hour or per full minute.",
     )
 
@@ -248,8 +248,11 @@ class LotSettings(models.Model):
     # Common use: 15 minutes for quick drop-offs, loading zones, etc.
     grace_period_minutes = models.IntegerField(
         default=15,
-        validators=[MinValueValidator(0)],
-        help_text="Sessions shorter than this many minutes are free (charged $0.00).",
+        validators=[MinValueValidator(0), MaxValueValidator(1440)],
+        help_text=(
+            "Sessions shorter than this many minutes are free (charged $0.00). "
+            "Capped at 1440 (24h) so a stray value cannot make all parking free."
+        ),
     )
 
     # ── Daily Cap ─────────────────────────────────────────────────────────────
@@ -299,11 +302,29 @@ class LotSettings(models.Model):
     )
 
     class Meta:
-        verbose_name = 'lot settings'
-        verbose_name_plural = 'lot settings'
+        verbose_name = "lot settings"
+        verbose_name_plural = "lot settings"
+        constraints = [
+            # billing_unit has model-level choices, but choices are NOT enforced
+            # by the database. A bad value (bad migration, direct SQL) would make
+            # calculate_charge() silently fall back to per-hour billing — a wrong
+            # charge. Pin the allowed values at the DB level.
+            models.CheckConstraint(
+                condition=models.Q(billing_unit__in=["hour", "minute"]),
+                name="lotsettings_billing_unit_valid",
+            ),
+            # Mirror the field validators (which only run in form/full_clean
+            # paths) at the DB level so an operator cannot make every stay free
+            # by setting an absurd grace window via the admin or raw SQL.
+            models.CheckConstraint(
+                condition=models.Q(grace_period_minutes__gte=0)
+                & models.Q(grace_period_minutes__lte=1440),
+                name="lotsettings_grace_period_range",
+            ),
+        ]
 
     def __str__(self):
-        return f'Settings for {self.lot.name}'
+        return f"Settings for {self.lot.name}"
 
 
 class ParkingSession(models.Model):
@@ -349,7 +370,7 @@ class ParkingSession(models.Model):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='sessions',
+        related_name="sessions",
         help_text="Registered plate record linked to this session. Null for guest plates.",
     )
 
@@ -361,7 +382,7 @@ class ParkingSession(models.Model):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='sessions',
+        related_name="sessions",
         help_text="User who owns the plate. Null for guest plates.",
     )
 
@@ -376,7 +397,7 @@ class ParkingSession(models.Model):
     lot = models.ForeignKey(
         ParkingLot,
         on_delete=models.PROTECT,
-        related_name='sessions',
+        related_name="sessions",
         help_text="The parking lot where this session occurred.",
     )
 
@@ -416,26 +437,30 @@ class ParkingSession(models.Model):
     charge_amount = models.DecimalField(
         max_digits=10,
         decimal_places=2,
-        default=Decimal('0.00'),
-        validators=[MinValueValidator(Decimal('0.00'))],
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00"))],
         help_text="Final charge for this session in dollars. Always use Decimal, never float.",
     )
 
     # ── Status ────────────────────────────────────────────────────────────────
 
-    STATUS_CHOICES = [
-        ('active', 'Active'),         # Car is currently in the lot
-        ('completed', 'Completed'),   # Car has exited normally
-        ('void', 'Void'),             # Session was cancelled (orphan handling)
-    ]
+    class Status(models.TextChoices):
+        # WHY TextChoices (not a bare list): the string values 'active'/'void'/
+        # 'completed' are referenced across services.py and tests. A typo'd
+        # literal ("voide") silently produces a wrong filter; referencing
+        # ParkingSession.Status.VOID makes such a typo an AttributeError instead.
+        ACTIVE = "active", "Active"  # Car is currently in the lot
+        COMPLETED = "completed", "Completed"  # Car has exited normally
+        VOID = "void", "Void"  # Session was cancelled (orphan handling)
+
     # WHY no db_index here: the composite indexes in Meta (plate_text+status,
     # lot+status) already cover every status-filtered query, and a standalone
     # index on a 3-value column has selectivity too poor for PostgreSQL to
     # ever prefer it — it would be pure write overhead.
     status = models.CharField(
         max_length=20,
-        choices=STATUS_CHOICES,
-        default='active',
+        choices=Status.choices,
+        default=Status.ACTIVE,
         help_text="Current lifecycle state of the session.",
     )
 
@@ -462,20 +487,20 @@ class ParkingSession(models.Model):
     )
 
     class Meta:
-        verbose_name = 'parking session'
-        verbose_name_plural = 'parking sessions'
+        verbose_name = "parking session"
+        verbose_name_plural = "parking sessions"
         indexes = [
             # Used by handle_entry / handle_exit to find active sessions for a plate.
             # Query pattern: ParkingSession.objects.filter(plate_text=X, status='active')
             models.Index(
-                fields=['plate_text', 'status'],
-                name='session_plate_status_idx',
+                fields=["plate_text", "status"],
+                name="session_plate_status_idx",
             ),
             # Used by the dashboard stats endpoint to count active sessions per lot.
             # Query pattern: ParkingSession.objects.filter(lot=lot, status='active').count()
             models.Index(
-                fields=['lot', 'status'],
-                name='session_lot_status_idx',
+                fields=["lot", "status"],
+                name="session_lot_status_idx",
             ),
             # ── Partial indexes for the hot path ──────────────────────────────
             # WHY partial: active sessions are a tiny fraction of the table once
@@ -484,48 +509,59 @@ class ParkingSession(models.Model):
             # actually touch, so they stay small enough to live in cache while
             # the full composite indexes keep serving historical queries.
             models.Index(
-                fields=['plate_text'],
-                condition=models.Q(status='active'),
-                name='session_active_plate_idx',
+                fields=["plate_text"],
+                condition=models.Q(status="active"),
+                name="session_active_plate_idx",
             ),
             models.Index(
-                fields=['lot'],
-                condition=models.Q(status='active'),
-                name='session_active_lot_idx',
+                fields=["lot"],
+                condition=models.Q(status="active"),
+                name="session_active_lot_idx",
             ),
         ]
         constraints = [
+            # At most ONE active session per (lot, plate). handle_entry voids any
+            # prior active session before inserting the new one inside a single
+            # transaction, so the normal flow never trips this. Its real job is to
+            # make two CONCURRENT entries for the same plate impossible: the second
+            # INSERT raises IntegrityError instead of silently creating a second
+            # active session (the gap the atomic UPDATE alone could not close).
+            models.UniqueConstraint(
+                fields=["lot", "plate_text"],
+                condition=models.Q(status="active"),
+                name="session_one_active_per_lot_plate",
+            ),
             # WHY DB-level CheckConstraints (validators are not enough):
             # Django validators only run in full_clean()/ModelForm paths —
             # bulk_create, update(), and raw SQL bypass them entirely.  These
             # invariants protect revenue math, so they belong in the database.
             models.CheckConstraint(
-                condition=models.Q(charge_amount__gte=Decimal('0.00')),
-                name='session_charge_non_negative',
+                condition=models.Q(charge_amount__gte=Decimal("0.00")),
+                name="session_charge_non_negative",
             ),
             # A car cannot exit before it entered; clock skew or a data-entry
             # bug would otherwise produce negative durations that corrupt the
             # average-duration dashboard stat.
             models.CheckConstraint(
                 condition=models.Q(exit_time__isnull=True)
-                | models.Q(exit_time__gt=models.F('entry_time')),
-                name='session_exit_after_entry',
+                | models.Q(exit_time__gt=models.F("entry_time")),
+                name="session_exit_after_entry",
             ),
             models.CheckConstraint(
                 condition=models.Q(duration_seconds__gte=0),
-                name='session_duration_non_negative',
+                name="session_duration_non_negative",
             ),
             # Voided sessions are excluded from revenue by definition — a void
             # session with a non-zero charge would silently inflate totals.
             models.CheckConstraint(
-                condition=~models.Q(status='void')
-                | models.Q(charge_amount=Decimal('0.00')),
-                name='session_void_no_charge',
+                condition=~models.Q(status="void")
+                | models.Q(charge_amount=Decimal("0.00")),
+                name="session_void_no_charge",
             ),
         ]
 
     def __str__(self):
-        return f'{self.plate_text} — {self.status} (entered {self.entry_time})'
+        return f"{self.plate_text} — {self.status} (entered {self.entry_time})"
 
 
 class PlateDetectionEvent(models.Model):
@@ -564,7 +600,7 @@ class PlateDetectionEvent(models.Model):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='detection_events',
+        related_name="detection_events",
         help_text="The parking session this detection is linked to.",
     )
 
@@ -577,7 +613,7 @@ class PlateDetectionEvent(models.Model):
         on_delete=models.PROTECT,
         null=True,
         blank=True,
-        related_name='detection_events',
+        related_name="detection_events",
         help_text="Parking lot where this detection occurred.",
     )
 
@@ -596,7 +632,7 @@ class PlateDetectionEvent(models.Model):
     #   - Random filename: use upload_to=<callable> that generates a UUID filename
     #     to prevent filename-guessing enumeration of other users' plate images.
     image = models.ImageField(
-        upload_to='plates/',
+        upload_to="plates/",
         help_text="Uploaded plate image. Stored in MEDIA_ROOT/plates/.",
     )
 
@@ -617,8 +653,8 @@ class PlateDetectionEvent(models.Model):
     )
 
     EVENT_TYPE_CHOICES = [
-        ('entry', 'Entry'),   # Car entering the lot
-        ('exit', 'Exit'),     # Car leaving the lot
+        ("entry", "Entry"),  # Car entering the lot
+        ("exit", "Exit"),  # Car leaving the lot
     ]
     event_type = models.CharField(
         max_length=10,
@@ -673,29 +709,29 @@ class PlateDetectionEvent(models.Model):
     )
 
     class Meta:
-        verbose_name = 'plate detection event'
-        verbose_name_plural = 'plate detection events'
+        verbose_name = "plate detection event"
+        verbose_name_plural = "plate detection events"
         indexes = [
             # Used by the cleanup_old_images management command (Day 11).
             # Query pattern: PlateDetectionEvent.objects.filter(timestamp__lt=cutoff)
             models.Index(
-                fields=['timestamp'],
-                name='detection_event_timestamp_idx',
+                fields=["timestamp"],
+                name="detection_event_timestamp_idx",
             ),
             # Used when an operator corrects an unmatched exit event and the
             # service must reconcile it with an active session in the same lot.
             models.Index(
-                fields=['lot', 'event_type'],
-                name='detection_lot_event_idx',
+                fields=["lot", "event_type"],
+                name="detection_lot_event_idx",
             ),
             # Used by the /errors/ review queue (Day 9).  Partial: only the
             # unreviewed low-confidence rows are indexed, so the queue page
             # stays fast even as total event volume grows.
             # Query pattern: .filter(is_low_confidence=True, manually_corrected=False)
             models.Index(
-                fields=['is_low_confidence'],
+                fields=["is_low_confidence"],
                 condition=models.Q(is_low_confidence=True, manually_corrected=False),
-                name='detection_unreviewed_idx',
+                name="detection_unreviewed_idx",
             ),
         ]
         constraints = [
@@ -705,9 +741,9 @@ class PlateDetectionEvent(models.Model):
             models.CheckConstraint(
                 condition=models.Q(confidence_score__gte=0.0)
                 & models.Q(confidence_score__lte=1.0),
-                name='event_confidence_score_range',
+                name="event_confidence_score_range",
             ),
         ]
 
     def __str__(self):
-        return f'{self.event_type} — {self.raw_plate_text} ({self.timestamp})'
+        return f"{self.event_type} — {self.raw_plate_text} ({self.timestamp})"

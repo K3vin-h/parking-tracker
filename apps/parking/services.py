@@ -32,12 +32,12 @@ CONCURRENCY:
 
 import logging
 import math
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_CEILING, ROUND_HALF_UP
 from hashlib import sha256
 
+from django.core.files.uploadedfile import UploadedFile
 from django.db import transaction
-from django.db.models import Q
 from django.utils import timezone
 
 from apps.parking.models import (
@@ -76,7 +76,7 @@ def _plate_log_token(plate_text: str) -> str:
     return sha256(plate_text.encode("utf-8")).hexdigest()[:12]
 
 
-def _duration_seconds_decimal(start, end) -> Decimal:
+def _duration_seconds_decimal(start: datetime, end: datetime) -> Decimal:
     """
     Return an exact Decimal duration in seconds, preserving microseconds.
 
@@ -89,7 +89,7 @@ def _duration_seconds_decimal(start, end) -> Decimal:
     return Decimal(whole_seconds) + (Decimal(delta.microseconds) / Decimal(1_000_000))
 
 
-def _ceil_duration_seconds(start, end) -> int:
+def _ceil_duration_seconds(start: datetime, end: datetime) -> int:
     """
     Convert an exact duration to stored integer seconds by rounding up.
 
@@ -163,7 +163,9 @@ def normalize_plate(raw_text: str) -> str:
     return normalized
 
 
-def calculate_charge(entry_time, exit_time, lot_settings: LotSettings) -> Decimal:
+def calculate_charge(
+    entry_time: datetime, exit_time: datetime, lot_settings: LotSettings
+) -> Decimal:
     """
     Calculate the parking charge for a session, in dollars, as a Decimal.
 
@@ -277,8 +279,8 @@ def _match_registered_plate(normalized_plate: str) -> LicensePlate | None:
 def handle_entry(
     plate_text: str,
     confidence: float,
-    bounding_box: list,
-    image,
+    bounding_box: list[float],
+    image: UploadedFile | None,
     lot: ParkingLot,
 ) -> ParkingSession:
     """
@@ -319,14 +321,15 @@ def handle_entry(
     # Orphan handling: a single atomic UPDATE voids any active session for this
     # plate in this lot. UPDATE ... WHERE status='active' locks and transitions
     # the matched rows in one statement (no read-then-write window), and the DB
-    # CheckConstraints still apply. (Note: a partial unique index on
-    # (lot, plate_text) WHERE status='active' would be needed to fully prevent
-    # two concurrent entries both inserting — out of scope for this layer.)
+    # CheckConstraints still apply. Two CONCURRENT entries are caught by the
+    # session_one_active_per_lot_plate partial-unique constraint: the second
+    # INSERT below raises IntegrityError instead of opening a duplicate active
+    # session (this UPDATE alone only voids what it can already see).
     voided = ParkingSession.objects.filter(
-        lot=lot, plate_text=normalized, status="active"
+        lot=lot, plate_text=normalized, status=ParkingSession.Status.ACTIVE
     ).update(
         # Void sessions MUST carry no charge (session_void_no_charge constraint).
-        status="void",
+        status=ParkingSession.Status.VOID,
         charge_amount=Decimal("0.00"),
         was_orphaned=True,
     )
@@ -348,7 +351,7 @@ def handle_entry(
         user=registered.user if registered else None,
         lot=lot,
         entry_time=timezone.now(),
-        status="active",
+        status=ParkingSession.Status.ACTIVE,
         has_duplicate_warning=has_duplicate,
     )
 
@@ -379,8 +382,8 @@ def handle_entry(
 def handle_exit(
     plate_text: str,
     confidence: float,
-    bounding_box: list,
-    image,
+    bounding_box: list[float],
+    image: UploadedFile | None,
     lot: ParkingLot,
 ) -> ParkingSession | None:
     """
@@ -410,7 +413,7 @@ def handle_exit(
     # can't bill it twice. order_by('entry_time') makes the choice deterministic.
     session = (
         ParkingSession.objects.select_for_update()
-        .filter(lot=lot, plate_text=normalized, status="active")
+        .filter(lot=lot, plate_text=normalized, status=ParkingSession.Status.ACTIVE)
         .order_by("entry_time")
         .first()
     )
@@ -430,8 +433,7 @@ def handle_exit(
             bounding_box=_sanitize_bounding_box(bounding_box),
         )
         logger.warning(
-            "Exit with no active session for plate_hash=%s lot=%s; "
-            "flagged for review",
+            "Exit with no active session for plate_hash=%s lot=%s; flagged for review",
             _plate_log_token(normalized),
             lot.pk,
         )
@@ -476,7 +478,7 @@ def handle_exit(
 
 def _complete_session_for_exit(
     session: ParkingSession,
-    exit_time,
+    exit_time: datetime,
     settings: LotSettings,
 ) -> Decimal:
     """
@@ -485,24 +487,25 @@ def _complete_session_for_exit(
     WHY: both normal exits and manually corrected unmatched-exit events must
     run exactly the same billing/status transition. Keeping the mutation here
     prevents review corrections from drifting away from handle_exit behavior.
+
+    PRECONDITION: only ever called with an ACTIVE session (handle_exit and
+    correct_plate both filter to status='active' before calling). An active
+    session is never orphaned, so was_orphaned is left untouched — we do NOT
+    revive voided orphans here (that path was a double-billing risk).
     """
     duration_seconds = max(1, _ceil_duration_seconds(session.entry_time, exit_time))
     charge = calculate_charge(session.entry_time, exit_time, settings)
 
-    session.status = "completed"
+    session.status = ParkingSession.Status.COMPLETED
     session.exit_time = exit_time
     session.duration_seconds = duration_seconds
     session.charge_amount = charge
-    # A corrected exit can turn a previously voided orphan back into a real,
-    # billed stay. Once completed, the row is no longer an orphaned void.
-    session.was_orphaned = False
     session.save(
         update_fields=[
             "status",
             "exit_time",
             "duration_seconds",
             "charge_amount",
-            "was_orphaned",
         ]
     )
     return charge
@@ -524,11 +527,11 @@ def _void_duplicate_active_sessions(
         ParkingSession.objects.filter(
             lot=lot,
             plate_text=normalized_plate,
-            status="active",
+            status=ParkingSession.Status.ACTIVE,
         )
         .exclude(pk=keep_session_id)
         .update(
-            status="void",
+            status=ParkingSession.Status.VOID,
             charge_amount=Decimal("0.00"),
             was_orphaned=True,
         )
@@ -583,7 +586,7 @@ def correct_plate(event_id: int, corrected_text: str) -> PlateDetectionEvent:
         # Lock the session row too so the relink can't race a concurrent exit.
         session = ParkingSession.objects.select_for_update().get(pk=event.session_id)
         duplicate_voided = 0
-        if session.status == "active":
+        if session.status == ParkingSession.Status.ACTIVE:
             duplicate_voided = _void_duplicate_active_sessions(
                 session.lot,
                 normalized,
@@ -603,9 +606,13 @@ def correct_plate(event_id: int, corrected_text: str) -> PlateDetectionEvent:
                 "user",
             ]
         )
+        # Only write `lot` when we actually backfill it; otherwise the save would
+        # rewrite an unchanged column (and clobber it if logic ever diverges).
+        event_update_fields = ["manually_corrected", "corrected_plate"]
         if event.lot_id is None:
             event.lot = session.lot
-        event.save(update_fields=["manually_corrected", "corrected_plate", "lot"])
+            event_update_fields.append("lot")
+        event.save(update_fields=event_update_fields)
         logger.info(
             "Corrected event %s -> plate_hash=%s; session %s relinked "
             "(guest=%s duplicate_voided=%d)",
@@ -616,15 +623,19 @@ def correct_plate(event_id: int, corrected_text: str) -> PlateDetectionEvent:
             duplicate_voided,
         )
     elif event.event_type == "exit" and event.lot_id is not None:
+        # Reconcile a corrected unmatched-exit event to a still-OPEN session only.
+        # We deliberately do NOT match voided/orphaned sessions: a session voided
+        # because the car re-entered was correctly abandoned, and reviving+billing
+        # it here would double-bill the same vehicle (the live session bills too).
         settings = _get_lot_settings(event.lot)
         session = (
             ParkingSession.objects.select_for_update()
             .filter(
                 lot=event.lot,
                 plate_text=normalized,
+                status=ParkingSession.Status.ACTIVE,
                 entry_time__lt=event.timestamp,
             )
-            .filter(Q(status="active") | Q(status="void", was_orphaned=True))
             .order_by("entry_time")
             .first()
         )
