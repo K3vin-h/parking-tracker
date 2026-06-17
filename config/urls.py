@@ -18,6 +18,7 @@ URL STRUCTURE:
 """
 
 import ipaddress
+import logging
 import secrets
 
 from django.contrib import admin
@@ -26,6 +27,8 @@ from django.http import HttpResponseForbidden, JsonResponse
 from django.urls import include, path
 from django.conf import settings
 from django.conf.urls.static import static
+
+logger = logging.getLogger(__name__)
 
 
 def _is_internal_probe(request) -> bool:
@@ -40,13 +43,13 @@ def _is_internal_probe(request) -> bool:
     We intentionally do NOT trust private REMOTE_ADDR values because reverse
     proxies usually appear as RFC1918 addresses for every public client.
     """
-    expected_token = getattr(settings, 'HEALTH_CHECK_TOKEN', '')
-    supplied_token = request.META.get('HTTP_X_HEALTH_CHECK_TOKEN', '')
+    expected_token = getattr(settings, "HEALTH_CHECK_TOKEN", "")
+    supplied_token = request.META.get("HTTP_X_HEALTH_CHECK_TOKEN", "")
     if expected_token:
         return secrets.compare_digest(supplied_token, expected_token)
 
     try:
-        addr = ipaddress.ip_address(request.META.get('REMOTE_ADDR', ''))
+        addr = ipaddress.ip_address(request.META.get("REMOTE_ADDR", ""))
     except ValueError:
         return False
     return addr.is_loopback
@@ -70,25 +73,26 @@ def health_check(request):
         # exists; persistent connections can otherwise look healthy after
         # Postgres has gone away.
         with connection.cursor() as cursor:
-            cursor.execute('SELECT 1')
+            cursor.execute("SELECT 1")
             cursor.fetchone()
-        return JsonResponse({'status': 'ok'})
+        return JsonResponse({"status": "ok"})
     except Exception:
-        return JsonResponse({'status': 'error'}, status=503)
+        # No silent failure: an operator seeing repeated 503s needs the cause in
+        # the server logs. The response body stays generic (no detail leak).
+        logger.exception("Health check database query failed")
+        return JsonResponse({"status": "error"}, status=503)
 
 
 urlpatterns = [
     # ── Health ────────────────────────────────────────────────────────────────
     # Polled by Dockerfile HEALTHCHECK, docker-compose healthcheck, and future
     # Kubernetes liveness/readiness probes.  Must be first to keep latency low.
-    path('health/', health_check),
-
+    path("health/", health_check),
     # ── Admin ──────────────────────────────────────────────────────────────────
     # Django's built-in admin site — browse and edit all registered models.
     # Only accessible to users with is_staff=True.
     # The URL '/admin/' is conventional; changing it adds minor security through obscurity.
-    path('admin/', admin.site.urls),
-
+    path("admin/", admin.site.urls),
     # ── Authentication ─────────────────────────────────────────────────────────
     # django.contrib.auth.urls provides a complete set of auth views:
     #   /login/                  → login page (renders registration/login.html)
@@ -102,13 +106,12 @@ urlpatterns = [
     #
     # We only actively use login and logout for Day 1, but including the full set
     # now means password reset is available without any additional code.
-    path('', include('django.contrib.auth.urls')),
-
+    path("", include("django.contrib.auth.urls")),
     # ── Dashboard App ──────────────────────────────────────────────────────────
     # All parking management pages and API endpoints.
     # apps/dashboard/urls.py is currently empty (Day 1 placeholder).
     # Views are added in Days 8–10.
-    path('', include('apps.dashboard.urls')),
+    path("", include("apps.dashboard.urls")),
 ]
 
 # ── Development Media Serving ──────────────────────────────────────────────────
