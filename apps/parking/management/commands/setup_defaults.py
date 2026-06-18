@@ -31,10 +31,17 @@ import os
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from apps.parking.models import LotSettings, ParkingLot
+
+# Minimum length for the bootstrap superuser password. Django's default
+# MinimumLengthValidator only requires 8; a privileged admin account warrants
+# more, and the shipped .env.example placeholder must never produce a live login.
+MIN_SUPERUSER_PASSWORD_LEN = 12
 
 
 class Command(BaseCommand):
@@ -45,8 +52,8 @@ class Command(BaseCommand):
     """
 
     help = (
-        'Create default superuser and initial ParkingLot + LotSettings. '
-        'Safe to run multiple times — skips creation if records already exist.'
+        "Create default superuser and initial ParkingLot + LotSettings. "
+        "Safe to run multiple times — skips creation if records already exist."
     )
 
     def handle(self, *args, **options):
@@ -70,7 +77,7 @@ class Command(BaseCommand):
             lot = self._create_parking_lot()
             self._create_lot_settings(lot)
 
-        self.stdout.write(self.style.SUCCESS('\nsetup_defaults complete. Ready to go!'))
+        self.stdout.write(self.style.SUCCESS("\nsetup_defaults complete. Ready to go!"))
 
     def _create_superuser(self):
         """
@@ -83,27 +90,43 @@ class Command(BaseCommand):
         """
         User = get_user_model()
 
-        email = os.environ.get('DEFAULT_SUPERUSER_EMAIL', '').strip()
-        password = os.environ.get('DEFAULT_SUPERUSER_PASSWORD', '').strip()
+        email = os.environ.get("DEFAULT_SUPERUSER_EMAIL", "").strip()
+        password = os.environ.get("DEFAULT_SUPERUSER_PASSWORD", "").strip()
 
         # Validate that required env vars are set — fail clearly rather than
         # creating an account with an empty password or empty email.
         if not email:
             raise CommandError(
-                'DEFAULT_SUPERUSER_EMAIL environment variable is not set. '
-                'Add it to your .env file and try again.'
+                "DEFAULT_SUPERUSER_EMAIL environment variable is not set. "
+                "Add it to your .env file and try again."
             )
         if not password:
             raise CommandError(
-                'DEFAULT_SUPERUSER_PASSWORD environment variable is not set. '
-                'Add it to your .env file and try again.'
+                "DEFAULT_SUPERUSER_PASSWORD environment variable is not set. "
+                "Add it to your .env file and try again."
+            )
+
+        # Reject weak/placeholder passwords before creating a privileged account.
+        # Explicit length floor first (stricter than Django's default), then the
+        # project's configured AUTH_PASSWORD_VALIDATORS (common-password list etc.).
+        if len(password) < MIN_SUPERUSER_PASSWORD_LEN:
+            raise CommandError(
+                "DEFAULT_SUPERUSER_PASSWORD is too short "
+                f"(minimum {MIN_SUPERUSER_PASSWORD_LEN} characters). "
+                "Choose a stronger password in your .env file."
+            )
+        try:
+            validate_password(password)
+        except ValidationError as exc:
+            raise CommandError(
+                "DEFAULT_SUPERUSER_PASSWORD is too weak: " + " ".join(exc.messages)
             )
 
         # Use the email as the username as well, for simplicity.
         # filter().exists() is preferred over get() because it returns False
         # instead of raising an exception when the user doesn't exist.
         if User.objects.filter(email=email).exists():
-            self.stdout.write('  Superuser already exists (skipped)')
+            self.stdout.write("  Superuser already exists (skipped)")
             return
 
         # create_superuser() hashes the password before storing it.
@@ -117,7 +140,7 @@ class Command(BaseCommand):
         # initialization, so stdout lands in CI/CD build logs.  The admin
         # email is a username and PII — printing it there invites targeted
         # phishing.
-        self.stdout.write(self.style.SUCCESS('  Superuser created successfully.'))
+        self.stdout.write(self.style.SUCCESS("  Superuser created successfully."))
 
     def _create_parking_lot(self):
         """
@@ -128,7 +151,7 @@ class Command(BaseCommand):
         """
         # get_or_create() returns (object, created_bool) — we unpack both.
         # If the lot already exists, it returns the existing one with created=False.
-        lot, created = ParkingLot.objects.get_or_create(name='Main Lot')
+        lot, created = ParkingLot.objects.get_or_create(name="Main Lot")
 
         if created:
             self.stdout.write(self.style.SUCCESS('  ParkingLot created: "Main Lot"'))
@@ -153,13 +176,13 @@ class Command(BaseCommand):
         settings_obj, created = LotSettings.objects.get_or_create(
             lot=lot,
             defaults={
-                'rate': Decimal('5.00'),
-                'billing_unit': 'hour',
-                'grace_period_minutes': 15,
-                'daily_cap_enabled': False,
-                'daily_cap_amount': None,
-                'image_retention_days': None,
-                'confidence_threshold': 0.6,
+                "rate": Decimal("5.00"),
+                "billing_unit": "hour",
+                "grace_period_minutes": 15,
+                "daily_cap_enabled": False,
+                "daily_cap_amount": None,
+                "image_retention_days": None,
+                "confidence_threshold": 0.6,
             },
         )
 
@@ -167,7 +190,7 @@ class Command(BaseCommand):
             self.stdout.write(
                 self.style.SUCCESS(
                     f'  LotSettings created for "{lot.name}": '
-                    f'$5.00/hr, 15-min grace, confidence≥0.6'
+                    f"$5.00/hr, 15-min grace, confidence≥0.6"
                 )
             )
         else:
