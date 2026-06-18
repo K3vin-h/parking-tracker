@@ -310,6 +310,22 @@ MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
 
+# ── CV Model Weights ────────────────────────────────────────────────────────
+
+# Paths to the trained detector/recognizer weights the upload API loads via
+# get_pipeline(). WHY env-overridable: the .pth files are gitignored and live
+# outside the image in dev; in other environments (CI, prod) they may sit on a
+# mounted volume or object store cache, so the path must be configurable
+# without code changes. Defaults point at the in-repo weights directory.
+CV_DETECTOR_WEIGHTS = os.environ.get(
+    "CV_DETECTOR_WEIGHTS", str(BASE_DIR / "apps" / "cv" / "weights" / "detector.pth")
+)
+CV_RECOGNIZER_WEIGHTS = os.environ.get(
+    "CV_RECOGNIZER_WEIGHTS",
+    str(BASE_DIR / "apps" / "cv" / "weights" / "recognizer.pth"),
+)
+
+
 # ── Primary Key Type ──────────────────────────────────────────────────────────
 
 # Default auto-generated primary key type for all models.
