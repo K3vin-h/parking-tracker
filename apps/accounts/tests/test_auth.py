@@ -22,6 +22,8 @@ WHY TEST BUILT-IN DJANGO FUNCTIONALITY?
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.contrib.staticfiles import finders
+from django.template.loader import render_to_string
 from django.urls import reverse
 
 # get_user_model() reads AUTH_USER_MODEL from settings.
@@ -162,6 +164,86 @@ class TestLogout:
 
         # Session should be cleared
         assert '_auth_user_id' not in client.session
+
+    def test_base_template_uses_post_logout_form(self, regular_user):
+        """
+        The shared navigation renders logout as a CSRF-protected POST form.
+
+        Django rejects GET requests to LogoutView, and GET logout links are also
+        vulnerable to crawlers or prefetchers ending a user's session.
+        """
+        html = render_to_string(
+            'base.html',
+            {
+                'csrf_token': 'masked-csrf-token',
+                'user': regular_user,
+            },
+        )
+
+        assert f'action="{reverse("logout")}"' in html
+        assert 'method="post"' in html
+        assert 'name="csrfmiddlewaretoken"' in html
+        assert f'href="{reverse("logout")}"' not in html
+
+
+class TestBaseFrontendAssets:
+    """Tests for security and loading behavior in the shared page shell."""
+
+    def test_base_template_configures_htmx_csrf_and_local_asset(self):
+        """
+        HTMX must send Django's CSRF header and load without a public CDN.
+
+        Keeping the configuration on body lets descendants inherit it while
+        retaining Django's masked-token protection.
+        """
+        html = render_to_string(
+            'base.html',
+            {
+                'csrf_token': 'masked-csrf-token',
+            },
+        )
+
+        assert 'hx-headers=' in html
+        assert 'X-CSRFToken' in html
+        assert 'masked-csrf-token' in html
+        assert '/static/js/vendor/htmx-2.0.10.min.js' in html
+        assert 'cdn.jsdelivr.net' not in html
+
+    def test_chart_is_local_but_not_loaded_globally(self):
+        """
+        Chart.js stays available for analytics pages without burdening all pages.
+
+        The shared shell should not transfer the chart bundle on login or pages
+        that contain no chart.
+        """
+        html = render_to_string('base.html')
+
+        assert (
+            '<script src="/static/js/vendor/chart-4.5.1.umd.min.js">'
+            not in html
+        )
+        assert finders.find('js/vendor/chart-4.5.1.umd.min.js') is not None
+
+    def test_fonts_are_local_and_external_font_hosts_are_absent(self):
+        """
+        Rendering the shared shell must not disclose staff client IPs to font CDNs.
+
+        Font files are resolved through Django staticfiles for deterministic,
+        offline-capable rendering.
+        """
+        html = render_to_string('base.html')
+
+        assert 'fonts.googleapis.com' not in html
+        assert 'fonts.gstatic.com' not in html
+        assert finders.find(
+            'fonts/jetbrains-mono/JetBrainsMono-Regular.ttf',
+        ) is not None
+        assert finders.find(
+            'fonts/jetbrains-mono/JetBrainsMono-Medium.ttf',
+        ) is not None
+        assert finders.find(
+            'fonts/jetbrains-mono/JetBrainsMono-Bold.ttf',
+        ) is not None
 
 
 @pytest.mark.django_db

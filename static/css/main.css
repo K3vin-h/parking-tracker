@@ -17,6 +17,36 @@
  *   the inline styles will be removed and this file will be the single source of truth.
  */
 
+/* ── Self-hosted Fonts ─────────────────────────────────────────────────────── */
+
+/*
+ * Keep operational pages independent of third-party font services. These three
+ * weights cover data values, labels, badges, and emphasized plate text.
+ */
+@font-face {
+    font-family: 'JetBrains Mono';
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+    src: url('../fonts/jetbrains-mono/JetBrainsMono-Regular.ttf') format('truetype');
+}
+
+@font-face {
+    font-family: 'JetBrains Mono';
+    font-style: normal;
+    font-weight: 500;
+    font-display: swap;
+    src: url('../fonts/jetbrains-mono/JetBrainsMono-Medium.ttf') format('truetype');
+}
+
+@font-face {
+    font-family: 'JetBrains Mono';
+    font-style: normal;
+    font-weight: 700;
+    font-display: swap;
+    src: url('../fonts/jetbrains-mono/JetBrainsMono-Bold.ttf') format('truetype');
+}
+
 /* ── Design Tokens ─────────────────────────────────────────────────────────── */
 
 :root {
