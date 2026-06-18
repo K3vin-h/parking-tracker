@@ -26,7 +26,6 @@ from django.db import connection
 from django.http import HttpResponseForbidden, JsonResponse
 from django.urls import include, path
 from django.conf import settings
-from django.conf.urls.static import static
 
 logger = logging.getLogger(__name__)
 
@@ -114,14 +113,6 @@ urlpatterns = [
     path("", include("apps.dashboard.urls")),
 ]
 
-# ── Development Media Serving ──────────────────────────────────────────────────
-# In development (DEBUG=True), serve uploaded media files through Django's dev server.
-#
-# WHY only in DEBUG?
-#   Django's static() helper adds URL patterns that map MEDIA_URL to MEDIA_ROOT.
-#   This is convenient for development but should NEVER be used in production because:
-#     1. Django is slow at serving files compared to nginx/Apache.
-#     2. Django doesn't validate that what it's serving from MEDIA_ROOT is safe.
-#   In production, configure nginx to serve the media directory directly.
-if settings.DEBUG:
-    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+# Uploaded plate images are intentionally not exposed through MEDIA_URL, even in
+# development. They contain personal data and are served only by the staff-only
+# event image endpoint after authorization.

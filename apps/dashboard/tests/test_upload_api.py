@@ -13,12 +13,15 @@ keeps the suite free of filesystem side effects.
 """
 
 import io
+import os
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.core.files.storage import default_storage
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import Client, override_settings
 from django.urls import reverse
 from PIL import Image
 
@@ -136,6 +139,17 @@ class TestUploadAuth:
         resp = client.post(UPLOAD_URL, {"event_type": "entry", "image": _image()})
         assert resp.status_code == 403
 
+    def test_staff_request_without_csrf_token_is_forbidden(
+        self, staff_user, lot_settings
+    ):
+        csrf_client = Client(enforce_csrf_checks=True)
+        csrf_client.force_login(staff_user)
+        resp = csrf_client.post(
+            UPLOAD_URL,
+            {"event_type": "entry", "image": _image()},
+        )
+        assert resp.status_code == 403
+
 
 # ── Input validation ────────────────────────────────────────────────────────
 
@@ -174,6 +188,20 @@ class TestUploadValidation:
             )
         assert resp.status_code == 413
 
+    @override_settings(PARKING_UPLOAD_MAX_BYTES=4)
+    def test_streaming_handler_rejects_before_storage_save(
+        self, client, staff_user, lot_settings
+    ):
+        client.force_login(staff_user)
+        storage = MagicMock()
+        with patch("apps.dashboard.api.default_storage", storage):
+            resp = client.post(
+                UPLOAD_URL,
+                {"event_type": "entry", "image": _image()},
+            )
+        assert resp.status_code == 413
+        storage.save.assert_not_called()
+
     def test_ambiguous_lot_is_400(self, client, staff_user, parking_lot):
         # Two lots exist and the request names none → ambiguous → 400. Rejected
         # before any file I/O, so no storage/pipeline patching is needed.
@@ -203,6 +231,42 @@ class TestUploadValidation:
         with patch("apps.dashboard.api.default_storage", storage):
             resp = client.post(UPLOAD_URL, {"event_type": "entry", "image": bogus})
         assert resp.status_code == 415
+        storage.save.assert_not_called()
+
+    def test_declared_type_must_match_detected_format(
+        self, client, staff_user, lot_settings
+    ):
+        client.force_login(staff_user)
+        storage = MagicMock()
+        mislabeled = _image(
+            content=_real_image_bytes("PNG"),
+            content_type="image/jpeg",
+        )
+        with patch("apps.dashboard.api.default_storage", storage):
+            resp = client.post(
+                UPLOAD_URL,
+                {"event_type": "entry", "image": mislabeled},
+            )
+        assert resp.status_code == 415
+        storage.save.assert_not_called()
+
+    def test_decompression_bomb_is_413_and_not_saved(
+        self, client, staff_user, lot_settings
+    ):
+        client.force_login(staff_user)
+        storage = MagicMock()
+        with (
+            patch("apps.dashboard.api.default_storage", storage),
+            patch(
+                "apps.dashboard.api.Image.open",
+                side_effect=Image.DecompressionBombError("too many pixels"),
+            ),
+        ):
+            resp = client.post(
+                UPLOAD_URL,
+                {"event_type": "entry", "image": _image()},
+            )
+        assert resp.status_code == 413
         storage.save.assert_not_called()
 
     def test_max_upload_bytes_is_ten_megabytes(self):
@@ -259,6 +323,51 @@ class TestUploadEntry:
         # Saved exactly once; not deleted on the happy path.
         storage.save.assert_called_once()
         storage.delete.assert_not_called()
+
+    def test_response_uses_lot_specific_confidence_threshold(
+        self, client, staff_user, lot_settings
+    ):
+        lot_settings.confidence_threshold = 0.99
+        lot_settings.save(update_fields=["confidence_threshold"])
+        client.force_login(staff_user)
+        storage, factory = _patched(
+            _result(plate_text="THRESH1", confidence=0.95, low=False)
+        )
+        with (
+            patch("apps.dashboard.api.default_storage", storage),
+            patch("apps.dashboard.api.get_pipeline", factory),
+        ):
+            resp = client.post(
+                UPLOAD_URL,
+                {"event_type": "entry", "image": _image()},
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["is_low_confidence"] is True
+        assert PlateDetectionEvent.objects.get().is_low_confidence is True
+
+    def test_response_failure_rolls_back_database_and_deletes_file(
+        self, client, staff_user, lot_settings
+    ):
+        client.force_login(staff_user)
+        storage, factory = _patched(_result(plate_text="ROLLBK1"))
+        with (
+            patch("apps.dashboard.api.default_storage", storage),
+            patch("apps.dashboard.api.get_pipeline", factory),
+            patch(
+                "apps.dashboard.api._entry_response",
+                side_effect=TypeError("serialization failed"),
+            ),
+        ):
+            resp = client.post(
+                UPLOAD_URL,
+                {"event_type": "entry", "image": _image()},
+            )
+
+        assert resp.status_code == 500
+        assert ParkingSession.objects.count() == 0
+        assert PlateDetectionEvent.objects.count() == 0
+        storage.delete.assert_called_once_with(STORED_NAME)
 
     def test_unreadable_plate_on_entry_is_422_and_deletes_file(
         self, client, staff_user, lot_settings
@@ -320,6 +429,26 @@ class TestUploadExit:
             session=None, event_type="exit"
         ).exists()
 
+    def test_unmatched_exit_response_is_always_low_confidence(
+        self, client, staff_user, lot_settings
+    ):
+        client.force_login(staff_user)
+        storage, factory = _patched(
+            _result(plate_text="GHOST2", confidence=0.99, low=False)
+        )
+        with (
+            patch("apps.dashboard.api.default_storage", storage),
+            patch("apps.dashboard.api.get_pipeline", factory),
+        ):
+            resp = client.post(
+                UPLOAD_URL,
+                {"event_type": "exit", "image": _image()},
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["is_low_confidence"] is True
+        assert PlateDetectionEvent.objects.get().is_low_confidence is True
+
 
 # ── CV availability ──────────────────────────────────────────────────────────
 
@@ -359,6 +488,24 @@ class TestUploadPipelineUnavailable:
         assert resp.status_code == 500
         storage.delete.assert_called_once_with(STORED_NAME)
 
+    def test_decode_failure_is_422_and_deletes_file(
+        self, client, staff_user, lot_settings
+    ):
+        client.force_login(staff_user)
+        storage, factory = _patched(
+            process_side_effect=FileNotFoundError("decode rejected")
+        )
+        with (
+            patch("apps.dashboard.api.default_storage", storage),
+            patch("apps.dashboard.api.get_pipeline", factory),
+        ):
+            resp = client.post(
+                UPLOAD_URL,
+                {"event_type": "entry", "image": _image()},
+            )
+        assert resp.status_code == 422
+        storage.delete.assert_called_once_with(STORED_NAME)
+
     def test_unexpected_error_is_500_and_deletes_file(
         self, client, staff_user, lot_settings
     ):
@@ -377,8 +524,7 @@ class TestUploadPipelineUnavailable:
     def test_lot_without_settings_is_503_and_deletes_file(
         self, client, staff_user, parking_lot
     ):
-        # parking_lot has NO LotSettings → handle_entry raises
-        # LotSettings.DoesNotExist → 503 (config not ready), file cleaned up.
+        # Reject configuration errors before saving a file or loading CV models.
         client.force_login(staff_user)
         storage, factory = _patched(_result(plate_text="NOCFG1"))
         with (
@@ -388,4 +534,115 @@ class TestUploadPipelineUnavailable:
             resp = client.post(UPLOAD_URL, {"event_type": "entry", "image": _image()})
         assert resp.status_code == 503
         assert ParkingSession.objects.count() == 0
+        storage.save.assert_not_called()
+        storage.delete.assert_not_called()
+        factory.assert_not_called()
+
+    def test_invalid_pipeline_result_is_500_without_database_write(
+        self, client, staff_user, lot_settings
+    ):
+        client.force_login(staff_user)
+        storage, factory = _patched(process_result={"plate_text": "BROKEN"})
+        with (
+            patch("apps.dashboard.api.default_storage", storage),
+            patch("apps.dashboard.api.get_pipeline", factory),
+        ):
+            resp = client.post(
+                UPLOAD_URL,
+                {"event_type": "entry", "image": _image()},
+            )
+        assert resp.status_code == 500
+        assert ParkingSession.objects.count() == 0
+        assert PlateDetectionEvent.objects.count() == 0
         storage.delete.assert_called_once_with(STORED_NAME)
+
+    def test_remote_storage_uses_bounded_local_processing_copy(
+        self, client, staff_user, lot_settings
+    ):
+        client.force_login(staff_user)
+        storage, factory = _patched(_result(plate_text="REMOTE1"))
+        storage.path.side_effect = NotImplementedError
+        storage.open.return_value = io.BytesIO(_real_image_bytes())
+        with (
+            patch("apps.dashboard.api.default_storage", storage),
+            patch("apps.dashboard.api.get_pipeline", factory),
+        ):
+            resp = client.post(
+                UPLOAD_URL,
+                {"event_type": "entry", "image": _image()},
+            )
+
+        assert resp.status_code == 200
+        processing_path = factory.return_value.process.call_args.args[0]
+        from django.conf import settings
+
+        assert processing_path.startswith(str(settings.CV_PROCESSING_TEMP_ROOT))
+        assert not os.path.exists(processing_path)
+
+
+@pytest.mark.django_db
+class TestPrivateEventImage:
+    def test_event_image_requires_authentication(self, client, parking_lot):
+        event = PlateDetectionEvent.objects.create(
+            lot=parking_lot,
+            image="plates/private.jpg",
+            raw_plate_text="ABC123",
+            confidence_score=0.9,
+            event_type="exit",
+            is_low_confidence=True,
+            bounding_box=[],
+        )
+        resp = client.get(
+            reverse("dashboard:api_event_image", args=[event.pk])
+        )
+        assert resp.status_code == 302
+
+    def test_event_image_forbids_non_staff(
+        self, client, regular_user, parking_lot
+    ):
+        event = PlateDetectionEvent.objects.create(
+            lot=parking_lot,
+            image="plates/private.jpg",
+            raw_plate_text="ABC123",
+            confidence_score=0.9,
+            event_type="exit",
+            is_low_confidence=True,
+            bounding_box=[],
+        )
+        client.force_login(regular_user)
+        resp = client.get(
+            reverse("dashboard:api_event_image", args=[event.pk])
+        )
+        assert resp.status_code == 403
+
+    def test_staff_can_stream_event_image(
+        self, client, staff_user, parking_lot, tmp_path
+    ):
+        with override_settings(MEDIA_ROOT=tmp_path):
+            stored_name = default_storage.save(
+                "plates/private.jpg",
+                SimpleUploadedFile("private.jpg", _real_image_bytes()),
+            )
+            event = PlateDetectionEvent.objects.create(
+                lot=parking_lot,
+                image=stored_name,
+                raw_plate_text="ABC123",
+                confidence_score=0.9,
+                event_type="exit",
+                is_low_confidence=True,
+                bounding_box=[],
+            )
+            client.force_login(staff_user)
+            resp = client.get(
+                reverse("dashboard:api_event_image", args=[event.pk])
+            )
+            body = b"".join(resp.streaming_content)
+
+        assert resp.status_code == 200
+        assert resp["Content-Type"] == "image/jpeg"
+        assert resp["Cache-Control"] == "private, no-store"
+        assert body.startswith(b"\xff\xd8")
+
+    def test_media_root_has_no_public_url(self, client):
+        resp = client.get("/media/plates/private.jpg")
+        assert resp.status_code == 404
