@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+{% load static %}
 <!--
   base.html — Foundational layout template for the parking tracker dashboard.
 
@@ -11,11 +12,12 @@
     the HTML skeleton and the named "blocks" that child templates can fill in.
     Think of it like a form with blank spaces — child templates fill in the blanks.
 
-  DAY 1 STATUS:
-    This is a functional skeleton with dark theme design tokens applied.
-    The visual design (layout, navigation, component styles) is finalized in Day 9
-    using output from Claude Design. The CSS custom properties defined here will
-    be carried forward into the final design.
+  STATUS (Day 9 — frontend handoff):
+    Dark-theme design tokens are applied, and the integration plumbing is wired:
+    self-hosted JetBrains Mono and htmx, plus a self-hosted Chart.js asset that
+    chart pages can load through extra_js. The visual design (layout, navigation,
+    component styles) is still pending Claude Design output — the markup below
+    stays a functional skeleton until that output is implemented.
 
   DESIGN TOKENS (from PLAN.md):
     These CSS custom properties are the color palette and typography for the entire
@@ -113,13 +115,17 @@
     </style>
 
     <!-- Project stylesheet — loaded after inline tokens so it can override. -->
-    {% load static %}
     <link rel="stylesheet" href="{% static 'css/main.css' %}">
 
     <!-- Per-page extra CSS (optional — child templates can inject here). -->
     {% block extra_css %}{% endblock %}
 </head>
-<body>
+<!--
+  HTMX attributes are inherited, so every same-origin mutating request receives
+  Django's masked CSRF token without each component having to repeat security
+  plumbing. Django validates this header through CsrfViewMiddleware.
+-->
+<body hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'>
 
     <!--
       Navigation placeholder.
@@ -143,7 +149,21 @@
         <span style="color: var(--text-secondary); font-size: 12px;">
             {{ user.email }}
             &nbsp;·&nbsp;
-            <a href="{% url 'logout' %}">Logout</a>
+            <!-- Django's LogoutView accepts POST only so navigation cannot log a
+                 user out through a cross-site GET request or link prefetch. -->
+            <form method="post"
+                  action="{% url 'logout' %}"
+                  style="display: inline;">
+                {% csrf_token %}
+                <button type="submit" style="
+                    padding: 0;
+                    border: 0;
+                    background: transparent;
+                    color: var(--accent-blue);
+                    font: inherit;
+                    cursor: pointer;
+                ">Logout</button>
+            </form>
         </span>
         {% endif %}
     </nav>
@@ -182,7 +202,16 @@
         {% endblock content %}
     </main>
 
-    <!-- Per-page JavaScript (optional). -->
+    <!--
+      HTMX is self-hosted so uploads, corrections, and polling do not depend on a
+      public CDN at runtime. Chart.js is also vendored locally, but intentionally
+      omitted here: only chart pages should load it through extra_js to avoid
+      transferring the 200+ KB bundle on login and non-analytics pages.
+    -->
+    <script src="{% static 'js/vendor/htmx-2.0.10.min.js' %}"></script>
+
+    <!-- Per-page JavaScript (optional). Revenue pages load the local
+         js/vendor/chart-4.5.1.umd.min.js asset in this block. -->
     {% block extra_js %}{% endblock %}
 
 </body>
