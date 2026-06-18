@@ -89,16 +89,17 @@ def _path_id(path: str) -> str:
 
 def _assert_safe_path(path: str) -> None:
     """
-    Verify the resolved path is inside MEDIA_ROOT.
+    Verify the resolved path is inside an approved private image directory.
 
     WHY realpath: os.path.realpath resolves symlinks and '..' components before
     the comparison, preventing traversal tricks like '../../etc/passwd' or
     symlink chains that point outside the allowed directory.
 
-    WHY MEDIA_ROOT: only files that Django has already written to the media
-    directory should ever reach this function. Enforcing this here is defense-
-    in-depth — even if the calling view passes a path without sanitizing it,
-    this guard prevents the pipeline from opening arbitrary host files.
+    WHY two roots: normal local-storage uploads live under MEDIA_ROOT. A remote
+    storage backend has no local path, so the upload API creates a bounded,
+    short-lived copy under CV_PROCESSING_TEMP_ROOT. No other host path is valid.
+    Enforcing both roots here prevents arbitrary file reads even if a caller
+    passes an unsanitized path.
 
     WHY the empty / CWD guard: if MEDIA_ROOT is misconfigured as "" or ".",
     os.path.realpath resolves it to the process's current working directory.
@@ -113,17 +114,31 @@ def _assert_safe_path(path: str) -> None:
             "settings.MEDIA_ROOT must be set to an absolute path before "
             "loading uploaded images."
         )
-    media_root = os.path.realpath(media_root_setting)
-    if media_root == os.path.realpath(os.getcwd()):
-        raise ImproperlyConfigured(
-            "settings.MEDIA_ROOT must point outside the project working "
-            "directory so source files stay unreachable from the upload "
-            "pipeline."
-        )
+    allowed_root_settings = [
+        ("MEDIA_ROOT", media_root_setting),
+        (
+            "CV_PROCESSING_TEMP_ROOT",
+            getattr(settings, "CV_PROCESSING_TEMP_ROOT", None),
+        ),
+    ]
+    allowed_roots = []
+    working_directory = os.path.realpath(os.getcwd())
+    for setting_name, root_setting in allowed_root_settings:
+        if not root_setting:
+            continue
+        root = os.path.realpath(root_setting)
+        if root == working_directory:
+            raise ImproperlyConfigured(
+                f"settings.{setting_name} must point outside the project working "
+                "directory so source files stay unreachable from the upload "
+                "pipeline."
+            )
+        allowed_roots.append(root)
+
     resolved = os.path.realpath(path)
-    if not resolved.startswith(media_root + os.sep):
+    if not any(resolved.startswith(root + os.sep) for root in allowed_roots):
         raise UnsafeImagePathError(
-            "Image path is outside the permitted media directory."
+            "Image path is outside the permitted upload directories."
         )
 
 

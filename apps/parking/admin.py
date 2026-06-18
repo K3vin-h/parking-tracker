@@ -16,6 +16,8 @@ to keep the code easy to scan.
 """
 
 from django.contrib import admin
+from django.urls import reverse
+from django.utils.html import format_html
 
 from apps.parking.models import (
     LicensePlate,
@@ -126,6 +128,19 @@ class PlateDetectionEventAdmin(admin.ModelAdmin):
     list_filter = ['lot', 'event_type', 'is_low_confidence', 'manually_corrected']
     search_fields = ['raw_plate_text', 'corrected_plate']
     ordering = ['-timestamp']
-    # timestamp is auto-set at creation; bounding_box is set by the CV pipeline.
-    # Both should be read-only to prevent accidental corruption.
-    readonly_fields = ['timestamp', 'bounding_box']
+    # The original ImageField is excluded so admin uploads cannot bypass the API's
+    # size/format/dimension validation. Operators receive a read-only authenticated
+    # link instead of Django's default public MEDIA_URL link.
+    exclude = ['image']
+    readonly_fields = ['timestamp', 'bounding_box', 'private_image_link']
+
+    @admin.display(description='Plate image')
+    def private_image_link(self, obj):
+        """Link through the staff-only image endpoint instead of public media."""
+        if not obj.pk or not obj.image:
+            return 'No image'
+        url = reverse('dashboard:api_event_image', args=[obj.pk])
+        return format_html(
+            '<a href="{}" target="_blank" rel="noopener">View private image</a>',
+            url,
+        )

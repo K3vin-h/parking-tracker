@@ -29,4 +29,9 @@ app_name = "dashboard"
 # module docstring are added in their own follow-up PRs.
 urlpatterns = [
     path("api/upload/", api.upload, name="api_upload"),
+    path(
+        "api/events/<int:event_id>/image/",
+        api.event_image,
+        name="api_event_image",
+    ),
 ]
