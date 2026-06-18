@@ -623,14 +623,11 @@ class PlateDetectionEvent(models.Model):
     # upload_to='plates/' saves files to MEDIA_ROOT/plates/<filename>.
     # The actual file bytes are stored on disk, not in the database.
     #
-    # SECURITY — enforce these controls in the /api/upload/ view (Day 8), NOT here:
-    #   - File size cap (e.g. 10 MB): reject before Pillow opens the file to prevent
-    #     memory exhaustion from a large TIFF or multi-layer PSD.
-    #   - MIME type allowlist (JPEG, PNG only): Pillow accepts many formats (SVG via
-    #     cairosvg, WebP, etc.) that may render in a browser and carry XSS payloads
-    #     when served directly from MEDIA_URL.
-    #   - Random filename: use upload_to=<callable> that generates a UUID filename
-    #     to prevent filename-guessing enumeration of other users' plate images.
+    # SECURITY — enforced by the upload and event-image endpoints, not this field:
+    #   - Streaming 10 MB aggregate request cap before temporary-file persistence.
+    #   - JPEG/PNG MIME, magic-byte, structure, and decoded-dimension validation.
+    #   - Random UUID storage names.
+    #   - No public MEDIA_URL route; reads require an authenticated staff request.
     image = models.ImageField(
         upload_to="plates/",
         help_text="Uploaded plate image. Stored in MEDIA_ROOT/plates/.",

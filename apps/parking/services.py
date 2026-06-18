@@ -280,7 +280,7 @@ def handle_entry(
     plate_text: str,
     confidence: float,
     bounding_box: list[float],
-    image: UploadedFile | None,
+    image: UploadedFile | str | None,
     lot: ParkingLot,
 ) -> ParkingSession:
     """
@@ -383,7 +383,7 @@ def handle_exit(
     plate_text: str,
     confidence: float,
     bounding_box: list[float],
-    image: UploadedFile | None,
+    image: UploadedFile | str | None,
     lot: ParkingLot,
 ) -> ParkingSession | None:
     """
