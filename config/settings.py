@@ -138,6 +138,9 @@ MIDDLEWARE = [
     "django.contrib.sessions.middleware.SessionMiddleware",
     # Normalizes URL paths (adds trailing slashes when APPEND_SLASH=True).
     "django.middleware.common.CommonMiddleware",
+    # Enforces the upload byte budget around CSRF middleware, which may parse
+    # multipart bodies before the endpoint itself is entered.
+    "apps.dashboard.upload_limits.UploadLimitMiddleware",
     # Validates CSRF tokens on POST/PUT/PATCH/DELETE requests.
     # CSRF (Cross-Site Request Forgery): a malicious page tricks a logged-in user's
     # browser into making a request to our server. The CSRF token is a secret that
@@ -308,6 +311,46 @@ MEDIA_URL = "/media/"
 # In Docker, this directory is mounted as a named volume (docker-compose.yml)
 # so uploaded images persist across container restarts.
 MEDIA_ROOT = BASE_DIR / "media"
+
+# Local scratch space for CV when the durable storage backend has no filesystem
+# path (for example S3). Files are bounded, mode 0600, and removed immediately
+# after inference. Keeping this outside MEDIA_ROOT avoids assuming remote-storage
+# deployments also mount a writable local media directory.
+CV_PROCESSING_TEMP_ROOT = os.environ.get(
+    "CV_PROCESSING_TEMP_ROOT",
+    "/tmp/parking-tracker-cv",
+)
+
+# Hard upload boundary shared by the streaming handler and the endpoint.
+# UPLOAD_FORM_OVERHEAD_BYTES permits multipart boundaries and short form fields
+# without weakening the exact 10 MB aggregate file-byte limit.
+PARKING_UPLOAD_MAX_BYTES = 10 * 1024 * 1024
+UPLOAD_FORM_OVERHEAD_BYTES = 64 * 1024
+
+# The first handler counts bytes before Django's normal handlers allocate memory
+# or temporary disk. Keeping both built-ins preserves Django's efficient
+# in-memory path for small files and temporary-file path for larger valid files.
+FILE_UPLOAD_HANDLERS = [
+    "apps.dashboard.upload_limits.BoundedUploadHandler",
+    "django.core.files.uploadhandler.MemoryFileUploadHandler",
+    "django.core.files.uploadhandler.TemporaryFileUploadHandler",
+]
+
+
+# ── CV Model Weights ────────────────────────────────────────────────────────
+
+# Paths to the trained detector/recognizer weights the upload API loads via
+# get_pipeline(). WHY env-overridable: the .pth files are gitignored and live
+# outside the image in dev; in other environments (CI, prod) they may sit on a
+# mounted volume or object store cache, so the path must be configurable
+# without code changes. Defaults point at the in-repo weights directory.
+CV_DETECTOR_WEIGHTS = os.environ.get(
+    "CV_DETECTOR_WEIGHTS", str(BASE_DIR / "apps" / "cv" / "weights" / "detector.pth")
+)
+CV_RECOGNIZER_WEIGHTS = os.environ.get(
+    "CV_RECOGNIZER_WEIGHTS",
+    str(BASE_DIR / "apps" / "cv" / "weights" / "recognizer.pth"),
+)
 
 
 # ── Primary Key Type ──────────────────────────────────────────────────────────

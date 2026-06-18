@@ -108,6 +108,16 @@ def test_assert_safe_path_allows_valid_path(tmp_path, monkeypatch):
 
 
 @pytest.mark.unit
+def test_assert_safe_path_allows_configured_cv_temp_root(tmp_path, monkeypatch):
+    """Remote-storage scratch files are permitted only under their configured root."""
+    media = tmp_path / "media"
+    cv_temp = tmp_path / "cv-temp"
+    monkeypatch.setattr(settings, "MEDIA_ROOT", str(media))
+    monkeypatch.setattr(settings, "CV_PROCESSING_TEMP_ROOT", str(cv_temp))
+    _assert_safe_path(str(cv_temp / "temporary.jpg"))  # must not raise
+
+
+@pytest.mark.unit
 def test_assert_safe_path_rejects_empty_media_root(monkeypatch):
     """An empty MEDIA_ROOT must raise ImproperlyConfigured, not silently allow CWD."""
     monkeypatch.setattr(settings, "MEDIA_ROOT", "")
