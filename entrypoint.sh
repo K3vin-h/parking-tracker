@@ -10,6 +10,22 @@
 
 set -e
 
+# ── Production safety guard: detect a leaked dev bind mount ────────────────────
+# docker-compose.prod.yml uses the Compose `!override` tag to drop the dev
+# `.:/app` bind mount. On Docker Compose < 2.24 that tag is silently ignored and
+# the mount is kept — which would re-expose the host source tree and the
+# plaintext .env (SECRET_KEY, DB_PASSWORD) inside the production container.
+# .env is excluded from the image by .dockerignore, so /app/.env can only exist
+# if that bind mount was applied. In a non-debug (production) run that means the
+# override did not take effect: abort loudly instead of serving with leaked
+# secrets on an unexpectedly public port.
+if [ "${DEBUG:-false}" != "true" ] && [ -f /app/.env ]; then
+    echo "ERROR: /app/.env present in a non-debug run — the dev bind mount leaked in." >&2
+    echo "       docker-compose.prod.yml needs Docker Compose >= 2.24 for its" >&2
+    echo "       !override tags to take effect. Check: docker compose version" >&2
+    exit 1
+fi
+
 MAX_RETRIES=10
 RETRY=0
 DB_HOST="${DB_HOST:-localhost}"

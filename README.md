@@ -13,6 +13,7 @@ A parking lot management system that uses computer vision to read license plates
 - [Creating the Dataset for Training](#creating-the-dataset-for-training)
 - [Web Application](#web-application)
 - [Docker](#docker)
+- [Security](#security)
 
 ---
 
@@ -651,3 +652,27 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build -d
 > drop the development bind mount. On older Compose, that tag is ignored and the
 > mount is silently kept — re-exposing host source and `.env` inside the
 > container. Verify with `docker compose version` before deploying.
+
+---
+
+## Security
+
+The following protections have been verified by an OWASP Top 10 audit of the
+codebase (branch `feat/ops-hardening`, PR #12).
+
+| Area | Protection |
+| :--- | :--- |
+| **Access control** | Every operator page and dashboard API requires an authenticated staff account (`is_staff = True`). Login and Django auth routes remain public. |
+| **Image uploads** | Declared MIME type, Pillow structure, and format checks run before any CV decode. Uploads are capped at 10 MB (compressed) and 12 MP (pre-decode). Files are saved under randomized names in private storage. |
+| **Plate images** | Never served via public `MEDIA_URL`. Only accessible through the authenticated `GET /api/events/<id>/image/` endpoint, which validates the stored path (must start with `plates/`, no `..`, extension allowlist) and sets `Cache-Control: private, no-store` on every response. |
+| **State-changing endpoints** | CSRF protection on all forms and PATCH endpoints. `correct_event` additionally uses `select_for_update()` inside `transaction.atomic()` to prevent concurrent double-correction. |
+| **Injection** | Parameterized Django ORM throughout — no raw SQL. Revenue date inputs parsed with `date.fromisoformat()` (raises `ValueError` on bad input → 400). Lot IDs cast to `int()` before ORM lookup. |
+| **Secrets** | All secrets via environment variables or a host `.env` file. `.dockerignore` excludes `.env` from the image build so secrets are never baked in. |
+| **Production deployment** | Gunicorn runs behind a reverse proxy. Port 8000 is bound to host loopback only (`127.0.0.1`). The dev source bind mount is dropped in the production Compose override. A startup guard in `entrypoint.sh` aborts the container if `/app/.env` is present in a non-debug run, detecting a silently failed bind-mount drop. |
+
+### Known follow-ups
+
+A dedicated security audit will add a production Content-Security-Policy header,
+disable HTMX `allowEval`/`allowScriptTags` to align with that policy, and confirm
+that `MEDIA_URL` is fully blocked at the infrastructure level so raw plate images
+are unreachable outside the authenticated image endpoint.
