@@ -40,7 +40,7 @@
             </div>
             <div class="form-group">
                 <label class="form-label" for="id_grace_period_minutes">Grace period</label>
-                <div class="input-affix input-affix--suffix"><input class="form-control mono{% if form.grace_period_minutes.errors %} is-invalid{% endif %}" id="id_grace_period_minutes" name="grace_period_minutes" type="number" min="0" max="1440" value="{{ form.grace_period_minutes.value|default:lot_settings.grace_period_minutes|default:15 }}" required><span>min</span></div>
+                <div class="input-affix input-affix--suffix"><input class="form-control mono{% if form.grace_period_minutes.errors %} is-invalid{% endif %}" id="id_grace_period_minutes" name="grace_period_minutes" type="number" min="0" max="1440" value="{{ form.grace_period_minutes.value|default_if_none:lot_settings.grace_period_minutes|default_if_none:15 }}" required><span>min</span></div>
                 <p class="form-help">Free window before billing starts.</p>
                 {% for error in form.grace_period_minutes.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
             </div>
@@ -73,10 +73,10 @@
                            min="0"
                            max="100"
                            step="1"
-                           value="{{ form.confidence_threshold.value|default:confidence_threshold_percent|default:60 }}"
+                           value="{{ form.confidence_threshold.value|default_if_none:confidence_threshold_percent|default_if_none:60 }}"
                            data-confidence-range
                            required>
-                    <output class="range-value mono" for="id_confidence_threshold" data-confidence-output>{{ form.confidence_threshold.value|default:confidence_threshold_percent|default:60 }}%</output>
+                    <output class="range-value mono" for="id_confidence_threshold" data-confidence-output>{{ form.confidence_threshold.value|default_if_none:confidence_threshold_percent|default_if_none:60 }}%</output>
                 </div>
                 <p class="form-help">Lower detections enter the error queue.</p>
                 {% for error in form.confidence_threshold.errors %}<p class="field-error">{{ error }}</p>{% endfor %}

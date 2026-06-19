@@ -116,7 +116,13 @@ class TestDashboardContext:
 
     @pytest.mark.parametrize(
         ("score", "band"),
-        [(0.8, "good"), (1.0, "good"), (0.6, "warning"), (0.79, "warning"), (0.59, "error")],
+        [
+            (0.8, "good"),
+            (1.0, "good"),
+            (0.6, "warning"),
+            (0.79, "warning"),
+            (0.59, "error"),
+        ],
     )
     def test_confidence_bands_match_plan_thresholds(self, score, band):
         """Keep dashboard, upload, and queue colors on the locked thresholds."""
@@ -218,6 +224,33 @@ class TestErrorQueueContext:
 @pytest.mark.django_db
 class TestSettingsView:
     """Verify valid operator settings persist through the page POST flow."""
+
+    def test_zero_values_render_without_falling_back_to_defaults(
+        self, client, users, lots
+    ):
+        """Preserve valid zero settings so a later save cannot change them silently."""
+        staff, _ = users
+        first, _ = lots
+        first.settings.confidence_threshold = 0
+        first.settings.save(update_fields=["confidence_threshold"])
+        client.force_login(staff)
+
+        response = client.get(
+            reverse("dashboard:settings"),
+            {"lot": first.pk},
+        )
+
+        html = response.content.decode()
+        grace_input = html.split('id="id_grace_period_minutes"', 1)[1].split(">", 1)[0]
+        confidence_input = html.split('id="id_confidence_threshold"', 1)[1].split(
+            ">", 1
+        )[0]
+        assert 'value="0"' in grace_input
+        assert 'value="0.0"' in confidence_input
+        assert (
+            '<output class="range-value mono" for="id_confidence_threshold" '
+            "data-confidence-output>0.0%</output>"
+        ) in html
 
     def test_valid_post_updates_selected_lot(self, client, users, lots):
         """Save only the lot named in the query string and redirect after success."""

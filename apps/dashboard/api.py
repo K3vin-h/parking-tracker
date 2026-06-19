@@ -628,11 +628,17 @@ def dashboard_stats(request: HttpRequest):
 @require_GET
 def sessions(request: HttpRequest):
     """Render a filtered, 25-row session table for HTMX replacement."""
-    return render(
+    response = render(
         request,
         "partials/session_table.html",
         build_session_context(request),
     )
+    # WHY override HTMX history: the API returns only a table fragment, so a
+    # refreshable or shareable browser URL must remain on the full log page.
+    query_string = request.GET.urlencode()
+    log_url = reverse("dashboard:log")
+    response["HX-Push-Url"] = f"{log_url}?{query_string}" if query_string else log_url
+    return response
 
 
 @csrf_protect
