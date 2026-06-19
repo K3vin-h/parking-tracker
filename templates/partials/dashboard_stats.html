@@ -31,8 +31,8 @@
             {% for event in recent_events %}
             <article class="activity-row">
                 <span class="direction direction--{{ event.event_type }}">{{ event.event_type|upper }}</span>
-                <strong class="mono activity-row__plate">{{ event.plate_text|default:event.raw_plate_text|default:"Unreadable" }}</strong>
-                <span class="activity-row__lot">{{ event.lot_name|default:event.lot.name|default:"—" }}</span>
+                <strong class="mono activity-row__plate">{{ event.raw_plate_text|default:"Unreadable" }}</strong>
+                <span class="activity-row__lot">{{ event.lot.name|default:"—" }}</span>
                 <span class="confidence confidence--{{ event.confidence_band }}">
                     {{ event.confidence_percent|default:event.confidence_score|floatformat:0 }}{% if event.confidence_percent %}%{% endif %}
                 </span>
@@ -56,7 +56,7 @@
                 {% for session in active_sessions %}
                 <tr>
                     <td class="mono table-primary">{{ session.plate_text }}</td>
-                    <td>{{ session.lot_name|default:session.lot.name }}</td>
+                    <td>{{ session.lot.name }}</td>
                     <td class="mono">{{ session.entry_display|default:session.entry_time|time:"H:i" }}</td>
                     <td class="mono text-active">{{ session.running_duration|default:"—" }}</td>
                     <td class="mono table-primary align-right">${{ session.running_cost|default:"0.00" }}</td>

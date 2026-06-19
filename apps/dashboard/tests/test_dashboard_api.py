@@ -126,6 +126,9 @@ class TestCorrectionApi:
         assert response.status_code == 200
         assert event.corrected_plate == "ABC123"
         assert event.manually_corrected is True
+        assert event.session_id is not None
+        assert event.session.plate_text == "ABC123"
+        assert event.session.status == ParkingSession.Status.ACTIVE
         assert "queueCountChanged" in response["HX-Trigger"]
         assert render.call_args.args[2]["queue_count"] == 0
 

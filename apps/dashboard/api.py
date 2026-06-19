@@ -55,6 +55,7 @@ from apps.parking.models import (
 )
 from apps.parking.services import correct_plate, handle_entry, handle_exit
 
+from .utils import confidence_band
 from .views import build_dashboard_context, build_session_context
 
 logger = logging.getLogger("apps.dashboard")
@@ -133,7 +134,13 @@ def _upload_response(
 
 def _error(request: HttpRequest, message: str, status: int):
     """Return a consistent negotiated error envelope without leaking internals."""
-    return _upload_response(request, {"error": message}, status)
+    html_status = 200 if _is_htmx(request) else None
+    return _upload_response(
+        request,
+        {"error": message},
+        status,
+        html_status=html_status,
+    )
 
 
 def _inspect_uploaded_image(upload_file, declared_extension: str) -> str:
@@ -497,17 +504,11 @@ def upload(request: HttpRequest) -> JsonResponse:
 def _cv_fields(result: PipelineResult, is_low_confidence: bool) -> dict:
     """Shared CV portion of the JSON envelope."""
     confidence = round(float(result["confidence"]), 4)
-    if confidence >= 0.8:
-        confidence_band = "good"
-    elif confidence >= 0.6:
-        confidence_band = "warning"
-    else:
-        confidence_band = "error"
     return {
         "plate_text": result["plate_text"],
         "confidence": confidence,
         "confidence_percent": round(confidence * 100),
-        "confidence_band": confidence_band,
+        "confidence_band": confidence_band(confidence),
         "is_low_confidence": is_low_confidence,
         "bounding_box": result["bounding_box"],
     }
@@ -664,14 +665,17 @@ def correct_event(request: HttpRequest, event_id: int):
                 status=409,
             )
         try:
-            event = correct_plate(event_id, corrected_text)
+            event = correct_plate(
+                event_id,
+                corrected_text,
+                locked_event=event,
+            )
         except ValueError as exc:
             return JsonResponse({"error": str(exc)}, status=400)
-
-    queue_count = PlateDetectionEvent.objects.filter(
-        Q(is_low_confidence=True) | Q(session__isnull=True),
-        manually_corrected=False,
-    ).count()
+        queue_count = PlateDetectionEvent.objects.filter(
+            Q(is_low_confidence=True) | Q(session__isnull=True),
+            manually_corrected=False,
+        ).count()
     response = render(
         request,
         "partials/queue_corrected.html",
