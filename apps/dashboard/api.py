@@ -26,23 +26,36 @@ import tempfile
 import uuid
 import warnings
 from contextlib import contextmanager
+from datetime import UTC, date, datetime, time, timedelta
+from decimal import Decimal
+import json
 from pathlib import Path, PurePosixPath
 
 from django.conf import settings
-from django.contrib.auth.decorators import login_required
+from django.contrib.auth.decorators import user_passes_test
 from django.core.exceptions import SuspiciousFileOperation
 from django.core.files.storage import default_storage
 from django.db import transaction
-from django.http import FileResponse, Http404, HttpRequest, JsonResponse
-from django.shortcuts import get_object_or_404
+from django.db.models import Avg, Count, Q, Sum
+from django.db.models.functions import ExtractHour, TruncDate
+from django.http import FileResponse, Http404, HttpRequest, JsonResponse, QueryDict
+from django.shortcuts import get_object_or_404, render
+from django.urls import reverse
 from django.views.decorators.csrf import csrf_protect
-from django.views.decorators.http import require_GET, require_POST
+from django.views.decorators.http import require_GET, require_POST, require_http_methods
 from PIL import Image, UnidentifiedImageError
 
 from apps.cv.pipeline import PipelineResult, get_pipeline
 from apps.cv.preprocessing import MAX_IMAGE_PIXELS, UnsafeImagePathError
-from apps.parking.models import LotSettings, ParkingLot, PlateDetectionEvent
-from apps.parking.services import handle_entry, handle_exit
+from apps.parking.models import (
+    LotSettings,
+    ParkingLot,
+    ParkingSession,
+    PlateDetectionEvent,
+)
+from apps.parking.services import correct_plate, handle_entry, handle_exit
+
+from .views import build_dashboard_context, build_session_context
 
 logger = logging.getLogger("apps.dashboard")
 
@@ -66,6 +79,16 @@ ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG"}
 VALID_EVENT_TYPES = {"entry", "exit"}
 
 
+def _is_staff(user) -> bool:
+    """Centralize the operator role check used by every dashboard API route."""
+    return user.is_authenticated and user.is_staff
+
+
+# WHY user_passes_test instead of a manual 403: both anonymous and authenticated
+# non-staff users follow the configured login flow, matching the page-route policy.
+staff_required = user_passes_test(_is_staff)
+
+
 class UploadImageError(ValueError):
     """Represent a client-supplied image validation failure and its HTTP status."""
 
@@ -79,9 +102,38 @@ class InvalidPipelineResult(RuntimeError):
     """Raised when the internal CV pipeline violates its documented result contract."""
 
 
-def _error(message: str, status: int) -> JsonResponse:
-    """Return a consistent error envelope. Never leak internal paths/details."""
-    return JsonResponse({"error": message}, status=status)
+def _is_htmx(request: HttpRequest) -> bool:
+    """Trust only HTMX's explicit request header when selecting HTML responses."""
+    return request.headers.get("HX-Request", "").lower() == "true"
+
+
+def _upload_response(
+    request: HttpRequest,
+    payload: dict,
+    status: int = 200,
+    *,
+    html_status: int | None = None,
+):
+    """
+    Preserve JSON clients while giving HTMX a renderable result fragment.
+
+    WHY ``html_status`` exists: HTMX does not swap 4xx responses by default, so
+    expected unreadable-image results can render as HTML 200 while API clients
+    retain the established JSON 422 contract.
+    """
+    if _is_htmx(request):
+        return render(
+            request,
+            "partials/upload_result.html",
+            {"result": payload, **payload},
+            status=html_status if html_status is not None else status,
+        )
+    return JsonResponse(payload, status=status)
+
+
+def _error(request: HttpRequest, message: str, status: int):
+    """Return a consistent negotiated error envelope without leaking internals."""
+    return _upload_response(request, {"error": message}, status)
 
 
 def _inspect_uploaded_image(upload_file, declared_extension: str) -> str:
@@ -150,9 +202,7 @@ def _resolve_lot(request: HttpRequest) -> ParkingLot | None:
     lot_name = (request.POST.get("lot") or "").strip()
     if lot_name:
         return (
-            ParkingLot.objects.select_related("settings")
-            .filter(name=lot_name)
-            .first()
+            ParkingLot.objects.select_related("settings").filter(name=lot_name).first()
         )
     # No name supplied: only safe to auto-pick if there is exactly one lot.
     lots = ParkingLot.objects.select_related("settings").all()[:2]
@@ -268,7 +318,7 @@ def _delete_upload(storage, stored_name: str | None) -> None:
 
 
 @csrf_protect
-@login_required
+@staff_required
 @require_POST
 def upload(request: HttpRequest) -> JsonResponse:
     """
@@ -280,47 +330,41 @@ def upload(request: HttpRequest) -> JsonResponse:
                     gate produced the image — see plan decision)
       lot         — lot name (optional when exactly one lot exists)
 
-    Auth: staff only. @login_required handles authentication; the is_staff check
-    below handles authorization (the project's single-role model: is_staff = full
-    access, matching the correct-event endpoint's requirement).
+    Auth: staff only. Non-staff and anonymous callers follow the configured login
+    redirect, matching every other operator page and API.
 
     Responses:
       200 — entry opened / exit billed / exit unmatched (queued for review)
       400 — missing/invalid event_type, unknown/ambiguous lot, or missing image
-      403 — authenticated but not staff
       413 — image exceeds size cap
       415 — unsupported content type
       422 — entry image whose plate could not be read (no session opened)
       503 — CV model weights missing or corrupt (server not ready)
     """
-    # ── Authorization ──────────────────────────────────────────────────────
-    if not request.user.is_staff:
-        return _error("Staff access required.", 403)
-
     # ── Validate event_type ────────────────────────────────────────────────
     event_type = (request.POST.get("event_type") or "").strip().lower()
     if event_type not in VALID_EVENT_TYPES:
-        return _error("event_type must be 'entry' or 'exit'.", 400)
+        return _error(request, "event_type must be 'entry' or 'exit'.", 400)
 
     # ── Validate lot ───────────────────────────────────────────────────────
     lot = _resolve_lot(request)
     if lot is None:
-        return _error("Unknown or unspecified lot.", 400)
+        return _error(request, "Unknown or unspecified lot.", 400)
     try:
         lot_settings = lot.settings
     except LotSettings.DoesNotExist:
         logger.error("Lot %s has no billing settings configured", lot.pk)
-        return _error("Lot billing settings are not configured.", 503)
+        return _error(request, "Lot billing settings are not configured.", 503)
 
     # ── Validate the uploaded file ─────────────────────────────────────────
     upload_file = request.FILES.get("image")
     if upload_file is None:
-        return _error("No image file provided.", 400)
+        return _error(request, "No image file provided.", 400)
     if upload_file.size > MAX_UPLOAD_BYTES:
-        return _error("Image exceeds the 10 MB size limit.", 413)
+        return _error(request, "Image exceeds the 10 MB size limit.", 413)
     declared_extension = ALLOWED_CONTENT_TYPES.get(upload_file.content_type)
     if declared_extension is None:
-        return _error("Unsupported image type; use JPEG or PNG.", 415)
+        return _error(request, "Unsupported image type; use JPEG or PNG.", 415)
 
     # Verify the actual bytes are a JPEG/PNG BEFORE writing anything to disk.
     # WHY: content_type is the attacker-controlled request header. Without this
@@ -330,7 +374,7 @@ def upload(request: HttpRequest) -> JsonResponse:
     try:
         extension = _inspect_uploaded_image(upload_file, declared_extension)
     except UploadImageError as exc:
-        return _error(exc.message, exc.status)
+        return _error(request, exc.message, exc.status)
 
     # ── Save once in private storage ─────────────────────────────────────────
     # The parking services persist the same storage name on the detection event.
@@ -348,7 +392,7 @@ def upload(request: HttpRequest) -> JsonResponse:
         # is bypassable. default_storage.size() measures what was actually
         # written — the only authoritative size.
         if default_storage.size(stored_name) > MAX_UPLOAD_BYTES:
-            return _error("Image exceeds the 10 MB size limit.", 413)
+            return _error(request, "Image exceeds the 10 MB size limit.", 413)
 
         try:
             pipeline = get_pipeline(
@@ -358,7 +402,7 @@ def upload(request: HttpRequest) -> JsonResponse:
             # Weights missing/corrupt is an operational/config problem, not the
             # caller's fault. get_pipeline already logged the path-stripped cause.
             logger.exception("CV pipeline unavailable for upload")
-            return _error("Plate recognition is temporarily unavailable.", 503)
+            return _error(request, "Plate recognition is temporarily unavailable.", 503)
 
         try:
             with _processing_path(default_storage, stored_name) as image_path:
@@ -366,15 +410,15 @@ def upload(request: HttpRequest) -> JsonResponse:
         except UnsafeImagePathError:
             # We control the path, so this should be unreachable; treat as a bug.
             logger.exception("Saved upload failed the MEDIA_ROOT safety check")
-            return _error("Internal error processing the image.", 500)
+            return _error(request, "Internal error processing the image.", 500)
         except UploadImageError as exc:
-            return _error(exc.message, exc.status)
+            return _error(request, exc.message, exc.status)
         except FileNotFoundError:
             logger.info("Upload passed header checks but could not be decoded")
-            return _error("Image could not be decoded safely.", 422)
+            return _error(request, "Image could not be decoded safely.", 422)
         except ValueError:
             logger.info("Upload rejected by CV image validation")
-            return _error("Image could not be decoded safely.", 422)
+            return _error(request, "Image could not be decoded safely.", 422)
 
         # Build all shared response values before the service transaction. The
         # persisted review flag uses the lot-specific threshold, not the pipeline's
@@ -395,9 +439,20 @@ def upload(request: HttpRequest) -> JsonResponse:
                         lot=lot,
                     )
                 except ValueError:
-                    logger.info("Entry upload rejected: plate unreadable")
-                    return _error("Plate could not be read; no session opened.", 422)
-                response = _entry_response(result, session, is_low_confidence)
+                    event = _queue_unreadable_entry(result, stored_name, lot)
+                    payload = _unreadable_entry_payload(result, event)
+                    keep_file = True
+                    logger.info(
+                        "Unreadable entry queued as sessionless event %s", event.pk
+                    )
+                    return _upload_response(
+                        request,
+                        payload,
+                        status=422,
+                        html_status=200,
+                    )
+                event = session.detection_events.order_by("-pk").first()
+                payload = _entry_response(result, session, event, is_low_confidence)
             else:
                 session = handle_exit(
                     plate_text=result["plate_text"],
@@ -406,20 +461,34 @@ def upload(request: HttpRequest) -> JsonResponse:
                     image=stored_name,
                     lot=lot,
                 )
-                response = _exit_response(
+                if session is None:
+                    event = (
+                        PlateDetectionEvent.objects.filter(
+                            lot=lot,
+                            session=None,
+                            image=stored_name,
+                            event_type="exit",
+                        )
+                        .order_by("-pk")
+                        .first()
+                    )
+                else:
+                    event = session.detection_events.order_by("-pk").first()
+                payload = _exit_payload(
                     result,
                     session,
+                    event,
                     is_low_confidence=is_low_confidence if session else True,
                 )
 
         keep_file = True
-        return response
+        return _upload_response(request, payload)
 
     except Exception:
         # Any unexpected failure: don't leave an orphaned file on disk, and never
         # surface internals to the client. The traceback is logged server-side.
         logger.exception("Unexpected error handling upload")
-        return _error("Internal error processing the upload.", 500)
+        return _error(request, "Internal error processing the upload.", 500)
     finally:
         if not keep_file:
             _delete_upload(default_storage, stored_name)
@@ -427,18 +496,33 @@ def upload(request: HttpRequest) -> JsonResponse:
 
 def _cv_fields(result: PipelineResult, is_low_confidence: bool) -> dict:
     """Shared CV portion of the JSON envelope."""
+    confidence = round(float(result["confidence"]), 4)
     return {
         "plate_text": result["plate_text"],
-        "confidence": round(float(result["confidence"]), 4),
+        "confidence": confidence,
+        "confidence_percent": round(confidence * 100),
         "is_low_confidence": is_low_confidence,
         "bounding_box": result["bounding_box"],
     }
 
 
+def _event_fields(event: PlateDetectionEvent | None) -> dict:
+    """Expose only the private authenticated image route, never a storage URL."""
+    if event is None:
+        return {"event_id": None, "image_url": None}
+    return {
+        "event_id": event.pk,
+        "image_url": reverse("dashboard:api_event_image", args=[event.pk]),
+    }
+
+
 def _entry_response(
-    result: PipelineResult, session, is_low_confidence: bool
-) -> JsonResponse:
-    """Shape the 200 response for a successful entry."""
+    result: PipelineResult,
+    session: ParkingSession,
+    event: PlateDetectionEvent | None,
+    is_low_confidence: bool,
+) -> dict:
+    """Shape a successful entry payload shared by JSON and HTMX."""
     payload = _cv_fields(result, is_low_confidence)
     payload.update(
         {
@@ -448,13 +532,17 @@ def _entry_response(
             "has_duplicate_warning": session.has_duplicate_warning,
         }
     )
-    return JsonResponse(payload, status=200)
+    payload.update(_event_fields(event))
+    return payload
 
 
-def _exit_response(
-    result: PipelineResult, session, is_low_confidence: bool
-) -> JsonResponse:
-    """Shape the 200 response for an exit (matched or queued for review)."""
+def _exit_payload(
+    result: PipelineResult,
+    session: ParkingSession | None,
+    event: PlateDetectionEvent | None,
+    is_low_confidence: bool,
+) -> dict:
+    """Shape an exit payload shared by JSON and HTMX."""
     payload = _cv_fields(result, is_low_confidence)
     payload["event_type"] = "exit"
     if session is None:
@@ -471,10 +559,267 @@ def _exit_response(
                 "duration_seconds": session.duration_seconds,
             }
         )
-    return JsonResponse(payload, status=200)
+    payload.update(_event_fields(event))
+    return payload
 
 
-@login_required
+def _queue_unreadable_entry(
+    result: PipelineResult,
+    stored_name: str,
+    lot: ParkingLot,
+) -> PlateDetectionEvent:
+    """
+    Persist an unreadable entry for review without opening an invalid session.
+
+    WHY the event is sessionless and forced low-confidence: an empty plate cannot
+    safely participate in active-session matching, but deleting the image would
+    prevent an operator from recovering the real plate.
+    """
+    return PlateDetectionEvent.objects.create(
+        session=None,
+        lot=lot,
+        image=stored_name,
+        raw_plate_text=result["plate_text"],
+        confidence_score=result["confidence"],
+        event_type="entry",
+        is_low_confidence=True,
+        bounding_box=result["bounding_box"],
+    )
+
+
+def _unreadable_entry_payload(
+    result: PipelineResult,
+    event: PlateDetectionEvent,
+) -> dict:
+    """Retain the established 422 error while adding review metadata."""
+    payload = _cv_fields(result, True)
+    payload.update(
+        {
+            "error": "Plate could not be read; no session opened.",
+            "event_type": "entry",
+            "queued_for_review": True,
+            "session_id": None,
+        }
+    )
+    payload.update(_event_fields(event))
+    return payload
+
+
+@staff_required
+@require_GET
+def dashboard_stats(request: HttpRequest):
+    """Render the single live region used by the 10-second dashboard poll."""
+    return render(
+        request,
+        "partials/dashboard_stats.html",
+        build_dashboard_context(request),
+    )
+
+
+@staff_required
+@require_GET
+def sessions(request: HttpRequest):
+    """Render a filtered, 25-row session table for HTMX replacement."""
+    return render(
+        request,
+        "partials/session_table.html",
+        build_session_context(request),
+    )
+
+
+@csrf_protect
+@staff_required
+@require_http_methods(["PATCH"])
+def correct_event(request: HttpRequest, event_id: int):
+    """
+    Apply a manual correction through the transactional parking service.
+
+    WHY parse QueryDict explicitly: Django populates request.POST only for POST,
+    while HTMX sends the correction as URL-encoded PATCH per the API contract.
+    """
+    if request.content_type != "application/x-www-form-urlencoded":
+        return JsonResponse({"error": "Use form-encoded PATCH data."}, status=415)
+    data = QueryDict(request.body)
+    corrected_text = data.get("corrected_plate", "")
+    with transaction.atomic():
+        event = (
+            PlateDetectionEvent.objects.select_for_update()
+            .filter(pk=event_id)
+            .first()
+        )
+        if event is None:
+            return JsonResponse({"error": "Detection event not found."}, status=404)
+        if event.manually_corrected or not (
+            event.is_low_confidence or event.session_id is None
+        ):
+            return JsonResponse(
+                {"error": "Detection event is no longer pending review."},
+                status=409,
+            )
+        try:
+            event = correct_plate(event_id, corrected_text)
+        except ValueError as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
+
+    queue_count = PlateDetectionEvent.objects.filter(
+        Q(is_low_confidence=True) | Q(session__isnull=True),
+        manually_corrected=False,
+    ).count()
+    response = render(
+        request,
+        "partials/queue_corrected.html",
+        {"event": event, "corrected": True, "queue_count": queue_count},
+    )
+    response["HX-Trigger"] = json.dumps({"queueCountChanged": {"count": queue_count}})
+    return response
+
+
+def _parse_revenue_range(request: HttpRequest) -> tuple[str, date, date]:
+    """
+    Resolve presets/custom dates as inclusive UTC calendar dates.
+
+    WHY raise ValueError: malformed analytics input is a client error and must
+    not silently fall back to a different financial reporting period.
+    """
+    preset = (request.GET.get("range") or "30").strip()
+    today = datetime.now(UTC).date()
+    if preset in {"7", "30", "90"}:
+        days = int(preset)
+        return preset, today - timedelta(days=days - 1), today
+    if preset != "custom":
+        raise ValueError("range must be 7, 30, 90, or custom.")
+    try:
+        start = date.fromisoformat(request.GET["start"])
+        end = date.fromisoformat(request.GET["end"])
+    except (KeyError, ValueError):
+        raise ValueError("Custom ranges require valid start and end dates.") from None
+    if end < start:
+        raise ValueError("End date must be on or after start date.")
+    if (end - start).days > 365:
+        raise ValueError("Custom ranges cannot exceed 366 days.")
+    return preset, start, end
+
+
+def _revenue_lot(request: HttpRequest) -> ParkingLot | None:
+    """Resolve the optional analytics lot filter without widening bad input."""
+    raw_lot = (request.GET.get("lot") or "").strip()
+    if not raw_lot or raw_lot == "all":
+        return None
+    try:
+        return ParkingLot.objects.get(pk=int(raw_lot))
+    except (ValueError, ParkingLot.DoesNotExist):
+        raise Http404("Unknown parking lot") from None
+
+
+def _money(value) -> str:
+    """Serialize money as an exact two-decimal string for Chart.js consumers."""
+    return str((value or Decimal("0.00")).quantize(Decimal("0.01")))
+
+
+@staff_required
+@require_GET
+def revenue_data(request: HttpRequest) -> JsonResponse:
+    """
+    Return UTC revenue summaries plus dense daily, lot, and hourly chart series.
+
+    Zero-filled dates/hours keep chart axes stable even when no sessions closed.
+    """
+    try:
+        preset, start_date, end_date = _parse_revenue_range(request)
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    selected_lot = _revenue_lot(request)
+    start = datetime.combine(start_date, time.min, tzinfo=UTC)
+    end_exclusive = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=UTC)
+    queryset = ParkingSession.objects.filter(
+        status=ParkingSession.Status.COMPLETED,
+        exit_time__gte=start,
+        exit_time__lt=end_exclusive,
+    )
+    if selected_lot is not None:
+        queryset = queryset.filter(lot=selected_lot)
+
+    summary = queryset.aggregate(
+        total_revenue=Sum("charge_amount"),
+        session_count=Count("pk"),
+        average_charge=Avg("charge_amount"),
+        average_duration_seconds=Avg("duration_seconds"),
+    )
+    daily_rows = {
+        row["day"]: row
+        for row in queryset.annotate(day=TruncDate("exit_time", tzinfo=UTC))
+        .values("day")
+        .annotate(revenue=Sum("charge_amount"), session_count=Count("pk"))
+        .order_by("day")
+    }
+    daily = []
+    cursor = start_date
+    while cursor <= end_date:
+        row = daily_rows.get(cursor, {})
+        daily.append(
+            {
+                "date": cursor.isoformat(),
+                "revenue": _money(row.get("revenue")),
+                "session_count": row.get("session_count", 0),
+            }
+        )
+        cursor += timedelta(days=1)
+
+    by_lot = [
+        {
+            "lot_id": row["lot_id"],
+            "lot_name": row["lot__name"],
+            "revenue": _money(row["revenue"]),
+            "session_count": row["session_count"],
+        }
+        for row in queryset.values("lot_id", "lot__name")
+        .annotate(revenue=Sum("charge_amount"), session_count=Count("pk"))
+        .order_by("lot__name")
+    ]
+    hourly_rows = {
+        row["hour"]: row
+        for row in queryset.annotate(hour=ExtractHour("exit_time", tzinfo=UTC))
+        .values("hour")
+        .annotate(revenue=Sum("charge_amount"), session_count=Count("pk"))
+        .order_by("hour")
+    }
+    hourly = [
+        {
+            "hour": hour,
+            "revenue": _money(hourly_rows.get(hour, {}).get("revenue")),
+            "session_count": hourly_rows.get(hour, {}).get("session_count", 0),
+        }
+        for hour in range(24)
+    ]
+    return JsonResponse(
+        {
+            "range": {
+                "preset": preset,
+                "start": start_date.isoformat(),
+                "end": end_date.isoformat(),
+                "timezone": "UTC",
+            },
+            "lot": (
+                {"id": selected_lot.pk, "name": selected_lot.name}
+                if selected_lot
+                else None
+            ),
+            "summary": {
+                "total_revenue": _money(summary["total_revenue"]),
+                "session_count": summary["session_count"],
+                "average_charge": _money(summary["average_charge"]),
+                "average_duration_seconds": int(
+                    summary["average_duration_seconds"] or 0
+                ),
+            },
+            "daily": daily,
+            "by_lot": by_lot,
+            "hourly": hourly,
+        }
+    )
+
+
+@staff_required
 @require_GET
 def event_image(request: HttpRequest, event_id: int) -> FileResponse:
     """
@@ -484,9 +829,6 @@ def event_image(request: HttpRequest, event_id: int) -> FileResponse:
     Django storage also works for local and remote backends, while ``private,
     no-store`` prevents browsers and shared proxies from retaining plate data.
     """
-    if not request.user.is_staff:
-        return _error("Staff access required.", 403)
-
     event = get_object_or_404(PlateDetectionEvent, pk=event_id)
     stored_name = event.image.name
     if not stored_name:

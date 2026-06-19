@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+
+{% block title %}Session log — Parking Tracker{% endblock %}
+{% block page_title %}Session log{% endblock %}
+
+{% block content %}
+{% url "dashboard:api_sessions" as sessions_api_url %}
+<form class="filter-bar"
+      method="get"
+      hx-get="{{ sessions_api_url|default:'/api/sessions/' }}"
+      hx-target="#session-table"
+      hx-push-url="true"
+      hx-swap="innerHTML">
+    <div class="form-group filter-search">
+        <label class="form-label" for="plate-filter">Plate search</label>
+        <div class="input-with-icon">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8"></circle><path d="m21 21-4.35-4.35"></path></svg>
+            <input class="form-control mono" id="plate-filter" type="search" name="plate" value="{{ filters.plate|default:'' }}" placeholder="e.g. 7XKD221">
+        </div>
+    </div>
+    <div class="form-group">
+        <label class="form-label" for="status-filter">Status</label>
+        <select class="form-control" id="status-filter" name="status">
+            <option value="">All</option>
+            <option value="active" {% if filters.status == "active" %}selected{% endif %}>Active</option>
+            <option value="completed" {% if filters.status == "completed" %}selected{% endif %}>Completed</option>
+            <option value="void" {% if filters.status == "void" %}selected{% endif %}>Void</option>
+        </select>
+    </div>
+    <div class="form-group">
+        <label class="form-label" for="lot-filter">Lot</label>
+        <select class="form-control" id="lot-filter" name="lot">
+            <option value="">All lots</option>
+            {% for lot in lots %}<option value="{{ lot.pk }}" {% if filters.lot == lot.pk|stringformat:"s" %}selected{% endif %}>{{ lot.name }}</option>{% endfor %}
+        </select>
+    </div>
+    <div class="form-group">
+        <label class="form-label" for="registration-filter">Driver</label>
+        <select class="form-control" id="registration-filter" name="registration">
+            <option value="">All</option>
+            <option value="registered" {% if filters.registration == "registered" %}selected{% endif %}>Registered</option>
+            <option value="guest" {% if filters.registration == "guest" %}selected{% endif %}>Guest</option>
+        </select>
+    </div>
+    <div class="form-group">
+        <label class="form-label" for="start-filter">From</label>
+        <input class="form-control mono" id="start-filter" type="date" name="date_from" value="{{ filters.date_from|default:'' }}">
+    </div>
+    <div class="form-group">
+        <label class="form-label" for="end-filter">To</label>
+        <input class="form-control mono" id="end-filter" type="date" name="date_to" value="{{ filters.date_to|default:'' }}">
+    </div>
+    <button class="btn btn--primary filter-submit" type="submit">Apply</button>
+</form>
+
+<section class="card table-card" id="session-table" aria-live="polite">
+    {% include "partials/session_table.html" %}
+</section>
+{% endblock %}
