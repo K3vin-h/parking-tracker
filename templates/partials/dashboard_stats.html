@@ -1,0 +1,71 @@
+<div class="stats-grid stats-grid--four">
+    <article class="stat-card">
+        <div class="stat-card__header"><span>Active Sessions</span><span class="stat-card__icon stat-card__icon--blue">P</span></div>
+        <strong class="stat-card__value">{{ active_session_count|default:0 }}</strong>
+        <span class="stat-card__meta">{{ registered_active_count|default:0 }} registered · {{ guest_active_count|default:0 }} guest</span>
+    </article>
+    <article class="stat-card">
+        <div class="stat-card__header"><span>Revenue Today</span><span class="stat-card__icon stat-card__icon--green">$</span></div>
+        <strong class="stat-card__value">${{ revenue_today|default:"0.00" }}</strong>
+        <span class="stat-card__meta">{{ revenue_delta|default:"Current UTC day" }}</span>
+    </article>
+    <article class="stat-card">
+        <div class="stat-card__header"><span>Events Today</span><span class="stat-card__icon stat-card__icon--yellow">↕</span></div>
+        <strong class="stat-card__value">{{ events_today|default:0 }}</strong>
+        <span class="stat-card__meta">{{ entries_today|default:0 }} entries · {{ exits_today|default:0 }} exits</span>
+    </article>
+    <article class="stat-card">
+        <div class="stat-card__header"><span>Avg. Stay</span><span class="stat-card__icon stat-card__icon--violet">◷</span></div>
+        <strong class="stat-card__value">{{ average_stay|default:"0m" }}</strong>
+        <span class="stat-card__meta">Completed sessions today</span>
+    </article>
+</div>
+
+<div class="dashboard-grid">
+    <section class="card">
+        <header class="card__header">
+            <h2>Live activity</h2>
+            <span class="live-label"><span class="live-dot" aria-hidden="true"></span>Live</span>
+        </header>
+        <div class="activity-list">
+            {% for event in recent_events %}
+            <article class="activity-row">
+                <span class="direction direction--{{ event.event_type }}">{{ event.event_type|upper }}</span>
+                <strong class="mono activity-row__plate">{{ event.raw_plate_text|default:"Unreadable" }}</strong>
+                <span class="activity-row__lot">{{ event.lot.name|default:"—" }}</span>
+                <span class="confidence confidence--{{ event.confidence_band }}">
+                    {{ event.confidence_percent|default:event.confidence_score|floatformat:0 }}{% if event.confidence_percent %}%{% endif %}
+                </span>
+                <time class="mono activity-row__time">{{ event.display_time|default:event.timestamp|time:"H:i:s" }}</time>
+            </article>
+            {% empty %}
+            <div class="compact-empty">No detection events yet.</div>
+            {% endfor %}
+        </div>
+    </section>
+
+    <section class="card">
+        <header class="card__header">
+            <h2>Active sessions</h2>
+            <span class="card__meta">◷ ticking</span>
+        </header>
+        <div class="table-scroll">
+            <table class="data-table data-table--compact">
+                <thead><tr><th>Plate</th><th>Lot</th><th>Entry</th><th>Duration</th><th class="align-right">Cost</th></tr></thead>
+                <tbody>
+                {% for session in active_sessions %}
+                <tr>
+                    <td class="mono table-primary">{{ session.plate_text }}</td>
+                    <td>{{ session.lot.name }}</td>
+                    <td class="mono">{{ session.entry_display|default:session.entry_time|time:"H:i" }}</td>
+                    <td class="mono text-active">{{ session.running_duration|default:"—" }}</td>
+                    <td class="mono table-primary align-right">${{ session.running_cost|default:"0.00" }}</td>
+                </tr>
+                {% empty %}
+                <tr><td colspan="5" class="table-empty">No active parking sessions.</td></tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+</div>

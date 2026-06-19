@@ -1,0 +1,7 @@
+{% if error %}
+    {% include "partials/upload_result_unreadable.html" %}
+{% elif is_low_confidence or result.is_low_confidence %}
+    {% include "partials/upload_result_low_confidence.html" %}
+{% else %}
+    {% include "partials/upload_result_success.html" %}
+{% endif %}

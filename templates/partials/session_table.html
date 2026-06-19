@@ -1,0 +1,48 @@
+{% url "dashboard:api_sessions" as sessions_api_url %}
+<div class="table-scroll">
+    <table class="data-table data-table--sessions">
+        <thead>
+            <tr><th>Plate</th><th>Lot</th><th>Entry</th><th>Exit</th><th>Duration</th><th class="align-right">Charge</th><th>Status</th><th>Flags</th></tr>
+        </thead>
+        <tbody>
+        {% for session in sessions %}
+            <tr class="{% if session.status == 'void' %}is-void{% endif %}">
+                <td class="mono table-primary">{{ session.plate_text }}</td>
+                <td>{{ session.lot.name }}</td>
+                <td class="mono">{{ session.entry_display|default:session.entry_time|date:"Y-m-d H:i" }}</td>
+                <td class="mono">{{ session.exit_display|default:session.exit_time|date:"Y-m-d H:i"|default:"—" }}</td>
+                <td class="mono">{{ session.duration_display|default:"—" }}</td>
+                <td class="mono table-primary align-right">${{ session.display_charge|default:session.charge_amount|default:"0.00" }}</td>
+                <td><span class="badge badge--{{ session.status }}">{{ session.status|capfirst }}</span></td>
+                <td>
+                    <span class="flag-list">
+                        {% if session.has_duplicate_warning %}<span class="badge badge--warning">Duplicate</span>{% endif %}
+                        {% if session.was_orphaned %}<span class="badge badge--neutral">Orphaned</span>{% endif %}
+                        {% if not session.user_id %}<span class="badge badge--neutral">Guest</span>{% endif %}
+                        {% if not session.has_duplicate_warning and not session.was_orphaned and session.user_id %}<span class="muted">—</span>{% endif %}
+                    </span>
+                </td>
+            </tr>
+        {% empty %}
+            <tr><td colspan="8" class="table-empty">No sessions match these filters.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<footer class="table-footer">
+    <span class="mono muted">
+        {% if page_obj %}Showing {{ page_obj.start_index }}–{{ page_obj.end_index }} of {{ page_obj.paginator.count }} sessions{% else %}{{ sessions|length }} sessions{% endif %}
+    </span>
+    {% if page_obj.paginator.num_pages > 1 %}
+    <nav class="pagination" aria-label="Session log pagination">
+        {% if page_obj.has_previous %}
+        <a class="pagination__link" href="?{{ pagination_query }}&page={{ page_obj.previous_page_number }}" hx-get="{{ sessions_api_url|default:'/api/sessions/' }}?{{ pagination_query }}&page={{ page_obj.previous_page_number }}" hx-target="#session-table" hx-push-url="true">‹ Prev</a>
+        {% endif %}
+        <span class="pagination__current mono">Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}</span>
+        {% if page_obj.has_next %}
+        <a class="pagination__link" href="?{{ pagination_query }}&page={{ page_obj.next_page_number }}" hx-get="{{ sessions_api_url|default:'/api/sessions/' }}?{{ pagination_query }}&page={{ page_obj.next_page_number }}" hx-target="#session-table" hx-push-url="true">Next ›</a>
+        {% endif %}
+    </nav>
+    {% endif %}
+</footer>

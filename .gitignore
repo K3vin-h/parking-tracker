@@ -57,8 +57,7 @@ Thumbs.db
 # ── Analysis artifacts ────────────────────────────────────────────────────────
 graphify-out/
 
-# ── Local documentation drafts ────────────────────────────────────────────────
-# Long-form learning notes and PR walkthroughs stay local only.
+# ── Local documentation (not pushed) ───────────────────────────────────────────
 docs/
 
 # ── AI agent instructions (local only) ───────────────────────────────────────

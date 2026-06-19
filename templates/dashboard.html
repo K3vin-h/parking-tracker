@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard — Parking Tracker{% endblock %}
+{% block page_title %}Dashboard{% endblock %}
+
+{% block content %}
+{% url "dashboard:api_dashboard_stats" as dashboard_stats_url %}
+<section id="dashboard-stats"
+         hx-get="{{ dashboard_stats_url|default:'/api/dashboard-stats/' }}"
+         hx-trigger="every 10s"
+         hx-swap="innerHTML">
+    {% include "partials/dashboard_stats.html" %}
+</section>
+{% endblock %}
