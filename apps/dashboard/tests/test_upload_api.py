@@ -172,6 +172,19 @@ class TestUploadValidation:
         resp = client.post(UPLOAD_URL, {"event_type": "entry"})
         assert resp.status_code == 400
 
+    def test_htmx_validation_error_returns_swappable_result(
+        self, client, staff_user, lot_settings
+    ):
+        """Return HTML 200 so HTMX can display upload validation failures."""
+        client.force_login(staff_user)
+        response = client.post(
+            UPLOAD_URL,
+            {"event_type": "entry"},
+            HTTP_HX_REQUEST="true",
+        )
+        assert response.status_code == 200
+        assert b"No image file provided." in response.content
+
     def test_unsupported_content_type_is_415(self, client, staff_user, lot_settings):
         client.force_login(staff_user)
         resp = client.post(

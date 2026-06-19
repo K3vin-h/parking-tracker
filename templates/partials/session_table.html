@@ -8,7 +8,7 @@
         {% for session in sessions %}
             <tr class="{% if session.status == 'void' %}is-void{% endif %}">
                 <td class="mono table-primary">{{ session.plate_text }}</td>
-                <td>{{ session.lot_name|default:session.lot.name }}</td>
+                <td>{{ session.lot.name }}</td>
                 <td class="mono">{{ session.entry_display|default:session.entry_time|date:"Y-m-d H:i" }}</td>
                 <td class="mono">{{ session.exit_display|default:session.exit_time|date:"Y-m-d H:i"|default:"—" }}</td>
                 <td class="mono">{{ session.duration_display|default:"—" }}</td>

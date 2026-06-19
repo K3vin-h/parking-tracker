@@ -8,9 +8,9 @@ from django.contrib.auth import get_user_model
 from django.test import RequestFactory
 from django.urls import reverse
 
+from apps.dashboard.utils import confidence_band
 from apps.dashboard.views import (
     SESSION_PAGE_SIZE,
-    _confidence_band,
     build_dashboard_context,
     build_error_queue_context,
     build_session_context,
@@ -120,7 +120,7 @@ class TestDashboardContext:
     )
     def test_confidence_bands_match_plan_thresholds(self, score, band):
         """Keep dashboard, upload, and queue colors on the locked thresholds."""
-        assert _confidence_band(score) == band
+        assert confidence_band(score) == band
 
 
 @pytest.mark.django_db
@@ -212,7 +212,7 @@ class TestErrorQueueContext:
             RequestFactory().get("/errors/", {"lot": first.pk})
         )
         assert list(context["events"]) == [pending]
-        assert context["queue_count"] == 1
+        assert context["filtered_queue_count"] == 1
 
 
 @pytest.mark.django_db
@@ -269,3 +269,47 @@ class TestSettingsView:
         )
         assert response.status_code == 302
         assert response.url == f"{reverse('dashboard:settings')}?lot={second.pk}"
+
+    def test_invalid_post_rerenders_form_errors(self, client, users, lots):
+        """Reject invalid settings without redirecting away from the form."""
+        staff, _ = users
+        first, _ = lots
+        client.force_login(staff)
+        response = client.post(
+            f"{reverse('dashboard:settings')}?lot={first.pk}",
+            {
+                "lot": first.pk,
+                "rate": "0",
+                "billing_unit": "hour",
+                "grace_period_minutes": "5",
+                "confidence_threshold": "75",
+                "image_retention_days": "30",
+            },
+        )
+        assert response.status_code == 200
+        assert b"0.01" in response.content
+        first.settings.refresh_from_db()
+        assert first.settings.rate == Decimal("5.00")
+
+    def test_upload_page_renders_for_staff(self, client, users, lots):
+        """Expose upload controls with lot choices on initial GET."""
+        staff, _ = users
+        client.force_login(staff)
+        response = client.get(reverse("dashboard:upload"))
+        assert response.status_code == 200
+        assert b"Upload" in response.content
+
+    def test_revenue_page_renders_with_range_preset(self, client, users, lots):
+        """Render the analytics shell with the selected preset in context."""
+        staff, _ = users
+        client.force_login(staff)
+        response = client.get(reverse("dashboard:revenue"), {"range": "7"})
+        assert response.status_code == 200
+        assert b"Revenue" in response.content
+
+    def test_invalid_lot_filter_returns_404(self, client, users):
+        """Reject malformed lot filters instead of silently widening scope."""
+        staff, _ = users
+        client.force_login(staff)
+        response = client.get(reverse("dashboard:log"), {"lot": "abc"})
+        assert response.status_code == 404

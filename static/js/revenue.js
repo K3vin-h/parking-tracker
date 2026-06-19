@@ -133,7 +133,10 @@
         filter.querySelectorAll('button[name="range"]').forEach((button) => {
             button.classList.toggle("is-selected", button === submitter);
         });
-        load().catch(() => { error.hidden = false; });
+        load().catch((err) => {
+            console.error("[revenue]", err);
+            error.hidden = false;
+        });
     });
 
     document.querySelectorAll("[data-breakdown]").forEach((button) => {
@@ -148,5 +151,8 @@
         });
     });
 
-    load().catch(() => { error.hidden = false; });
+    load().catch((err) => {
+        console.error("[revenue]", err);
+        error.hidden = false;
+    });
 })();

@@ -23,6 +23,7 @@ from apps.parking.models import (
 from apps.parking.services import calculate_charge, normalize_plate
 
 from .forms import LotSettingsForm
+from .utils import confidence_band
 
 SESSION_PAGE_SIZE = 25
 
@@ -84,15 +85,6 @@ def _format_duration(total_seconds: int) -> str:
     return f"{hours}h {minutes}m" if hours else f"{minutes}m"
 
 
-def _confidence_band(score: float) -> str:
-    """Map confidence to the fixed green/yellow/red bands required by the UI."""
-    if score >= 0.8:
-        return "good"
-    if score >= 0.6:
-        return "warning"
-    return "error"
-
-
 def build_dashboard_context(request: HttpRequest) -> dict:
     """
     Build the complete live-dashboard payload from one consistent UTC instant.
@@ -132,7 +124,7 @@ def build_dashboard_context(request: HttpRequest) -> dict:
     recent_events = list(events.order_by("-timestamp", "-pk")[:10])
     for event in recent_events:
         event.confidence_percent = round(event.confidence_score * 100)
-        event.confidence_band = _confidence_band(event.confidence_score)
+        event.confidence_band = confidence_band(event.confidence_score)
 
     completed_today = sessions.filter(
         status=ParkingSession.Status.COMPLETED,
@@ -151,11 +143,8 @@ def build_dashboard_context(request: HttpRequest) -> dict:
         timestamp__gte=today_start,
         timestamp__lt=tomorrow_start,
     ).count()
-    queue_filter = Q(is_low_confidence=True) | Q(session__isnull=True)
-    queue = events.filter(queue_filter, manually_corrected=False)
 
     return {
-        "active_count": len(active_sessions),
         "active_session_count": len(active_sessions),
         "revenue_today": revenue_today or Decimal("0.00"),
         "events_today": entries_today + exits_today,
@@ -171,7 +160,6 @@ def build_dashboard_context(request: HttpRequest) -> dict:
         "guest_active_count": sum(
             session.user_id is None for session in active_sessions
         ),
-        "queue_count": queue.count(),
         "lots": ParkingLot.objects.order_by("name"),
         "selected_lot": selected_lot,
         "now_utc": now_utc,
@@ -282,12 +270,12 @@ def build_error_queue_context(request: HttpRequest) -> dict:
     page_obj = paginator.get_page(request.GET.get("page"))
     for event in page_obj:
         event.confidence_percent = round(event.confidence_score * 100)
-        event.confidence_band = _confidence_band(event.confidence_score)
+        event.confidence_band = confidence_band(event.confidence_score)
     return {
         "events": page_obj,
         "page_obj": page_obj,
         "paginator": paginator,
-        "queue_count": paginator.count,
+        "filtered_queue_count": paginator.count,
         "lots": ParkingLot.objects.order_by("name"),
         "selected_lot": selected_lot,
     }

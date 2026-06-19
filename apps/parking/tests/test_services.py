@@ -546,6 +546,31 @@ class TestCorrectPlate:
         result.refresh_from_db()
         assert result.session is None
 
+    def test_sessionless_entry_correction_opens_active_session(
+        self, parking_lot, lot_settings
+    ):
+        """Correcting a queued unreadable entry opens the missing parking session."""
+        event = PlateDetectionEvent.objects.create(
+            session=None,
+            lot=parking_lot,
+            image=PLATE_IMAGE,
+            raw_plate_text="",
+            confidence_score=0.0,
+            event_type="entry",
+            is_low_confidence=True,
+        )
+        detected_at = event.timestamp
+
+        result = correct_plate(event.pk, "FIXED2")
+
+        result.refresh_from_db()
+        assert result.session_id is not None
+        session = result.session
+        assert session.status == ParkingSession.Status.ACTIVE
+        assert session.plate_text == "FIXED2"
+        assert session.entry_time == detected_at
+        assert session.lot == parking_lot
+
     def test_correction_of_orphan_exit_closes_active_session(
         self, parking_lot, lot_settings
     ):
