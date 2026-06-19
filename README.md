@@ -12,7 +12,6 @@ A parking lot management system that uses computer vision to read license plates
 - [Session & Billing](#session--billing)
 - [Creating the Dataset for Training](#creating-the-dataset-for-training)
 - [Web Application](#web-application)
-- [Checking Day 9 and Day 10](#checking-day-9-and-day-10)
 - [Docker](#docker)
 
 ---
