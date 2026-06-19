@@ -26,6 +26,13 @@
             URL.revokeObjectURL(previewUrl);
         }
         previewUrl = URL.createObjectURL(file);
+        // WHY revoke on load: the browser keeps the decoded bitmap, so the blob
+        // URL is safe to release immediately. This prevents a slow memory leak
+        // when an operator uploads repeatedly without re-selecting a file.
+        previewImage.onload = () => {
+            URL.revokeObjectURL(previewUrl);
+            previewUrl = null;
+        };
         previewImage.src = previewUrl;
         preview.hidden = false;
         title.textContent = file.name;

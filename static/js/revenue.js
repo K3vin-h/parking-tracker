@@ -135,7 +135,9 @@
         });
         load().catch((err) => {
             console.error("[revenue]", err);
-            error.hidden = false;
+            if (error) {
+                error.hidden = false;
+            }
         });
     });
 

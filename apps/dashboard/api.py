@@ -651,9 +651,7 @@ def correct_event(request: HttpRequest, event_id: int):
     corrected_text = data.get("corrected_plate", "")
     with transaction.atomic():
         event = (
-            PlateDetectionEvent.objects.select_for_update()
-            .filter(pk=event_id)
-            .first()
+            PlateDetectionEvent.objects.select_for_update().filter(pk=event_id).first()
         )
         if event is None:
             return JsonResponse({"error": "Detection event not found."}, status=404)
@@ -739,7 +737,12 @@ def revenue_data(request: HttpRequest) -> JsonResponse:
         preset, start_date, end_date = _parse_revenue_range(request)
     except ValueError as exc:
         return JsonResponse({"error": str(exc)}, status=400)
-    selected_lot = _revenue_lot(request)
+    try:
+        selected_lot = _revenue_lot(request)
+    except Http404:
+        # Keep the JSON contract intact: the Chart.js client cannot parse
+        # Django's default HTML 404 page.
+        return JsonResponse({"error": "Unknown parking lot."}, status=404)
     start = datetime.combine(start_date, time.min, tzinfo=UTC)
     end_exclusive = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=UTC)
     queryset = ParkingSession.objects.filter(
