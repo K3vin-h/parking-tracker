@@ -69,7 +69,9 @@ class TestPartialApis:
         """Render the dashboard partial with all live statistic keys."""
         staff, _, first, _ = api_data
         client.force_login(staff)
-        with patch("apps.dashboard.api.render", return_value=HttpResponse()) as render:
+        with patch(
+            "apps.dashboard.partials_api.render", return_value=HttpResponse()
+        ) as render:
             response = client.get(
                 reverse("dashboard:api_dashboard_stats"), {"lot": first.pk}
             )
@@ -93,7 +95,9 @@ class TestPartialApis:
         )
         ParkingSession.objects.create(plate_text="SECOND", lot=second, entry_time=now)
         client.force_login(staff)
-        with patch("apps.dashboard.api.render", return_value=HttpResponse()) as render:
+        with patch(
+            "apps.dashboard.partials_api.render", return_value=HttpResponse()
+        ) as render:
             response = client.get(reverse("dashboard:api_sessions"), {"lot": first.pk})
         assert response.status_code == 200
         context = render.call_args.args[2]
@@ -133,7 +137,9 @@ class TestCorrectionApi:
             is_low_confidence=True,
         )
         client.force_login(staff)
-        with patch("apps.dashboard.api.render", return_value=HttpResponse()) as render:
+        with patch(
+            "apps.dashboard.partials_api.render", return_value=HttpResponse()
+        ) as render:
             response = client.patch(
                 reverse("dashboard:api_correct_event", args=[event.pk]),
                 data="corrected_plate=abc+123",
