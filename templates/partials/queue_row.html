@@ -1,0 +1,42 @@
+{% url "dashboard:api_correct_event" event.pk as correct_event_url %}
+{% url "dashboard:api_event_image" event.pk as event_image_url %}
+<article class="queue-row" id="queue-row-{{ event.pk }}" data-queue-row>
+    <div class="queue-thumbnail">
+        <img src="{{ event.image_url|default:event_image_url }}" alt="Detection image for {{ event.raw_plate_text|default:'unreadable plate' }}">
+        {% if event.bounding_box %}
+        <span class="bbox bbox--warning"
+              data-bbox
+              data-x="{{ event.bounding_box.0|default:0 }}"
+              data-y="{{ event.bounding_box.1|default:0 }}"
+              data-width="{{ event.bounding_box.2|default:0 }}"
+              data-height="{{ event.bounding_box.3|default:0 }}"></span>
+        {% endif %}
+    </div>
+    <div class="queue-row__info">
+        <div class="queue-row__meta">
+            <span class="direction direction--{{ event.event_type }}">{{ event.event_type|upper }}</span>
+            <span>{{ event.lot_name|default:event.lot.name|default:"Unknown lot" }}</span>
+            <time class="mono">{{ event.timestamp_display|default:event.timestamp|date:"Y-m-d H:i:s" }}</time>
+            <span class="confidence confidence--warning">{{ event.confidence_percent|default:"0" }}%</span>
+        </div>
+        <p>Raw OCR: <strong class="mono">{{ event.raw_plate_text|default:"Unreadable" }}</strong></p>
+    </div>
+    <form class="queue-correction"
+          method="post"
+          action="{{ correct_event_url|default:'#' }}"
+          hx-patch="{{ correct_event_url }}"
+          hx-target="#queue-row-{{ event.pk }}"
+          hx-swap="outerHTML">
+        {% csrf_token %}
+        <label class="sr-only" for="corrected-plate-{{ event.pk }}">Corrected plate</label>
+        <input class="form-control mono"
+               id="corrected-plate-{{ event.pk }}"
+               name="corrected_plate"
+               type="text"
+               value="{{ event.raw_plate_text }}"
+               maxlength="20"
+               autocomplete="off"
+               required>
+        <button class="btn btn--primary" type="submit">Save correction</button>
+    </form>
+</article>

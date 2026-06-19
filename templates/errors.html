@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+
+{% block title %}Error queue — Parking Tracker{% endblock %}
+{% block page_title %}Error queue{% endblock %}
+
+{% block content %}
+<div class="page-intro">
+    <p>Detections below the confidence threshold or with no session match. Correct the plate and resubmit.</p>
+</div>
+
+<section class="queue-list" id="error-queue" aria-live="polite">
+    {% for event in events %}
+        {% include "partials/queue_row.html" with event=event %}
+    {% empty %}
+        {% include "partials/queue_empty.html" %}
+    {% endfor %}
+</section>
+{% if page_obj.paginator.num_pages > 1 %}
+<nav class="queue-pagination pagination" aria-label="Error queue pagination">
+    {% if page_obj.has_previous %}
+    <a class="pagination__link" href="?page={{ page_obj.previous_page_number }}">‹ Prev</a>
+    {% endif %}
+    <span class="pagination__current mono">Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}</span>
+    {% if page_obj.has_next %}
+    <a class="pagination__link" href="?page={{ page_obj.next_page_number }}">Next ›</a>
+    {% endif %}
+</nav>
+{% endif %}
+{% endblock %}

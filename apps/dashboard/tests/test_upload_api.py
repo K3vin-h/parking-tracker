@@ -134,10 +134,11 @@ class TestUploadAuth:
         assert resp.status_code == 302
         assert "/login/" in resp.url
 
-    def test_non_staff_user_forbidden(self, client, regular_user):
+    def test_non_staff_user_is_redirected_to_login(self, client, regular_user):
         client.force_login(regular_user)
         resp = client.post(UPLOAD_URL, {"event_type": "entry", "image": _image()})
-        assert resp.status_code == 403
+        assert resp.status_code == 302
+        assert "/login/" in resp.url
 
     def test_staff_request_without_csrf_token_is_forbidden(
         self, staff_user, lot_settings
@@ -324,6 +325,23 @@ class TestUploadEntry:
         storage.save.assert_called_once()
         storage.delete.assert_not_called()
 
+    def test_htmx_entry_returns_result_partial(self, client, staff_user, lot_settings):
+        """Negotiate HTML for browser swaps while leaving JSON as the default."""
+        client.force_login(staff_user)
+        storage, factory = _patched(_result(plate_text="HTML01"))
+        with (
+            patch("apps.dashboard.api.default_storage", storage),
+            patch("apps.dashboard.api.get_pipeline", factory),
+        ):
+            response = client.post(
+                UPLOAD_URL,
+                {"event_type": "entry", "image": _image()},
+                HTTP_HX_REQUEST="true",
+            )
+        assert response.status_code == 200
+        assert response["Content-Type"].startswith("text/html")
+        assert b"HTML01" in response.content
+
     def test_response_uses_lot_specific_confidence_threshold(
         self, client, staff_user, lot_settings
     ):
@@ -369,11 +387,12 @@ class TestUploadEntry:
         assert PlateDetectionEvent.objects.count() == 0
         storage.delete.assert_called_once_with(STORED_NAME)
 
-    def test_unreadable_plate_on_entry_is_422_and_deletes_file(
+    def test_unreadable_plate_on_entry_is_queued_without_session(
         self, client, staff_user, lot_settings
     ):
         client.force_login(staff_user)
-        # Empty plate → handle_entry raises ValueError → 422, file cleaned up.
+        # Empty plate → no invalid session, but the private image is retained so
+        # an operator can recover the plate from the review queue.
         storage, factory = _patched(_result(plate_text=""))
         with (
             patch("apps.dashboard.api.default_storage", storage),
@@ -382,7 +401,37 @@ class TestUploadEntry:
             resp = client.post(UPLOAD_URL, {"event_type": "entry", "image": _image()})
         assert resp.status_code == 422
         assert ParkingSession.objects.count() == 0
-        storage.delete.assert_called_once_with(STORED_NAME)
+        body = resp.json()
+        assert body["queued_for_review"] is True
+        event = PlateDetectionEvent.objects.get(pk=body["event_id"])
+        assert event.session_id is None
+        assert event.is_low_confidence is True
+        assert event.image.name == STORED_NAME
+        storage.delete.assert_not_called()
+
+    def test_htmx_unreadable_entry_returns_swappable_review_result(
+        self, client, staff_user, lot_settings
+    ):
+        """Return HTML 200 so HTMX displays the queued unreadable state."""
+        client.force_login(staff_user)
+        storage, factory = _patched(_result(plate_text=""))
+        with (
+            patch("apps.dashboard.api.default_storage", storage),
+            patch("apps.dashboard.api.get_pipeline", factory),
+        ):
+            response = client.post(
+                UPLOAD_URL,
+                {"event_type": "entry", "image": _image()},
+                HTTP_HX_REQUEST="true",
+            )
+        assert response.status_code == 200
+        assert b"Queued for review" in response.content
+        assert (
+            PlateDetectionEvent.objects.filter(
+                session=None, is_low_confidence=True
+            ).count()
+            == 1
+        )
 
 
 # ── Exit flow ────────────────────────────────────────────────────────────────
@@ -592,14 +641,10 @@ class TestPrivateEventImage:
             is_low_confidence=True,
             bounding_box=[],
         )
-        resp = client.get(
-            reverse("dashboard:api_event_image", args=[event.pk])
-        )
+        resp = client.get(reverse("dashboard:api_event_image", args=[event.pk]))
         assert resp.status_code == 302
 
-    def test_event_image_forbids_non_staff(
-        self, client, regular_user, parking_lot
-    ):
+    def test_event_image_redirects_non_staff(self, client, regular_user, parking_lot):
         event = PlateDetectionEvent.objects.create(
             lot=parking_lot,
             image="plates/private.jpg",
@@ -610,10 +655,9 @@ class TestPrivateEventImage:
             bounding_box=[],
         )
         client.force_login(regular_user)
-        resp = client.get(
-            reverse("dashboard:api_event_image", args=[event.pk])
-        )
-        assert resp.status_code == 403
+        resp = client.get(reverse("dashboard:api_event_image", args=[event.pk]))
+        assert resp.status_code == 302
+        assert "/login/" in resp.url
 
     def test_staff_can_stream_event_image(
         self, client, staff_user, parking_lot, tmp_path
@@ -633,9 +677,7 @@ class TestPrivateEventImage:
                 bounding_box=[],
             )
             client.force_login(staff_user)
-            resp = client.get(
-                reverse("dashboard:api_event_image", args=[event.pk])
-            )
+            resp = client.get(reverse("dashboard:api_event_image", args=[event.pk]))
             body = b"".join(resp.streaming_content)
 
         assert resp.status_code == 200
