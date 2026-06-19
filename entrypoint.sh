@@ -56,6 +56,21 @@ echo "PostgreSQL is ready."
 echo "Running migrations..."
 python manage.py migrate --no-input
 
+# Collect static files into the shared 'staticfiles' volume so a reverse proxy
+# can serve /static/ in production. (gunicorn itself does not serve static, and
+# Django only serves it under runserver/DEBUG.) Skipped in development, where
+# 'runserver' serves static directly from STATICFILES_DIRS.
+#
+# WHY at startup and not in the Dockerfile build: 'staticfiles' is a
+# runtime-mounted named volume that would shadow anything baked into the image
+# at build time, so the collect must happen here, after the volume is mounted.
+# set -e is active, so a real collectstatic failure aborts startup loudly
+# rather than serving a site with missing CSS/JS.
+if [ "${DEBUG:-false}" != "true" ]; then
+    echo "Collecting static files..."
+    python manage.py collectstatic --no-input
+fi
+
 # Replace this shell process with the server process so that Docker's SIGTERM
 # goes directly to Django / gunicorn instead of being intercepted by the shell.
 exec "$@"

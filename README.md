@@ -583,6 +583,34 @@ Confidence indicators use consistent fixed display bands:
 - Red: `< 60%`
 
 
+## Scheduled maintenance (image retention)
+
+`cleanup_old_images` deletes uploaded plate images older than each lot's
+`image_retention_days` setting (privacy and disk retention) — it clears the
+`image` field on the `PlateDetectionEvent` row but **keeps** the session and
+event records intact for billing and audit purposes.
+
+A lot whose `image_retention_days` is `NULL` (unset) is treated as "keep
+forever" and is skipped entirely by the command.
+
+**Preview without deleting** (always safe to run):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml exec -T web \
+    python manage.py cleanup_old_images --dry-run
+```
+
+**Host crontab — run daily at 02:00:**
+
+```
+0 2 * * * cd /path/to/parking-tracker && docker compose -f docker-compose.yml -f docker-compose.prod.yml exec -T web python manage.py cleanup_old_images
+```
+
+Orchestrators can use a native scheduler instead — for example, a Kubernetes
+`CronJob` running `python manage.py cleanup_old_images` directly in the web pod.
+
+---
+
 ## Docker
 
 The application runs as two containers orchestrated by Docker Compose:
@@ -608,3 +636,19 @@ docker-compose exec web python manage.py createsuperuser
 # Run the test suite
 docker-compose exec web pytest --cov=apps/accounts --cov=apps/parking --cov-fail-under=80
 ```
+
+### Production
+
+The base `docker-compose.yml` targets local development (runserver, live code
+mount). For production, layer `docker-compose.prod.yml` on top — it swaps in
+Gunicorn, installs runtime-only dependencies, drops the dev source bind mount,
+and publishes port 8000 on host loopback only (front it with a reverse proxy):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build -d
+```
+
+> **Requires Docker Compose ≥ 2.24.** The override uses the `!override` tag to
+> drop the development bind mount. On older Compose, that tag is ignored and the
+> mount is silently kept — re-exposing host source and `.env` inside the
+> container. Verify with `docker compose version` before deploying.
