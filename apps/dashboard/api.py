@@ -497,10 +497,17 @@ def upload(request: HttpRequest) -> JsonResponse:
 def _cv_fields(result: PipelineResult, is_low_confidence: bool) -> dict:
     """Shared CV portion of the JSON envelope."""
     confidence = round(float(result["confidence"]), 4)
+    if confidence >= 0.8:
+        confidence_band = "good"
+    elif confidence >= 0.6:
+        confidence_band = "warning"
+    else:
+        confidence_band = "error"
     return {
         "plate_text": result["plate_text"],
         "confidence": confidence,
         "confidence_percent": round(confidence * 100),
+        "confidence_band": confidence_band,
         "is_low_confidence": is_low_confidence,
         "bounding_box": result["bounding_box"],
     }

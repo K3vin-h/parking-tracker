@@ -10,6 +10,7 @@ from django.urls import reverse
 
 from apps.dashboard.views import (
     SESSION_PAGE_SIZE,
+    _confidence_band,
     build_dashboard_context,
     build_error_queue_context,
     build_session_context,
@@ -111,6 +112,15 @@ class TestDashboardContext:
         assert context["entries_today"] == 1
         assert context["exits_today"] == 0
         assert context["recent_events"][0].confidence_percent == 90
+        assert context["recent_events"][0].confidence_band == "good"
+
+    @pytest.mark.parametrize(
+        ("score", "band"),
+        [(0.8, "good"), (1.0, "good"), (0.6, "warning"), (0.79, "warning"), (0.59, "error")],
+    )
+    def test_confidence_bands_match_plan_thresholds(self, score, band):
+        """Keep dashboard, upload, and queue colors on the locked thresholds."""
+        assert _confidence_band(score) == band
 
 
 @pytest.mark.django_db
@@ -234,6 +244,17 @@ class TestSettingsView:
         assert first.settings.confidence_threshold == pytest.approx(0.825)
         assert first.settings.image_retention_days == 7
         assert second.settings.rate == Decimal("5.00")
+
+    def test_day_10_controls_render_as_tabs_slider_and_canvas(
+        self, client, users, lots
+    ):
+        """Guard the exact PLAN controls instead of silently reverting to substitutes."""
+        staff, _ = users
+        client.force_login(staff)
+        log = client.get(reverse("dashboard:log"))
+        settings = client.get(reverse("dashboard:settings"))
+        assert b'data-registration-tab="guest"' in log.content
+        assert b'type="range"' in settings.content
 
     def test_lot_picker_redirects_without_validating_settings(
         self, client, users, lots

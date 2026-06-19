@@ -33,7 +33,7 @@
                 <span class="direction direction--{{ event.event_type }}">{{ event.event_type|upper }}</span>
                 <strong class="mono activity-row__plate">{{ event.plate_text|default:event.raw_plate_text|default:"Unreadable" }}</strong>
                 <span class="activity-row__lot">{{ event.lot_name|default:event.lot.name|default:"—" }}</span>
-                <span class="confidence {% if event.is_low_confidence %}confidence--warning{% else %}confidence--good{% endif %}">
+                <span class="confidence confidence--{{ event.confidence_band }}">
                     {{ event.confidence_percent|default:event.confidence_score|floatformat:0 }}{% if event.confidence_percent %}%{% endif %}
                 </span>
                 <time class="mono activity-row__time">{{ event.display_time|default:event.timestamp|time:"H:i:s" }}</time>

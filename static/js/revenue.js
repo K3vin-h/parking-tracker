@@ -24,6 +24,13 @@
         new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(
             Number(value)
         );
+    const duration = (seconds) => {
+        // WHY format here: the API stays numeric and reusable while the card stays compact.
+        const minutes = Math.floor(Number(seconds || 0) / 60);
+        const hours = Math.floor(minutes / 60);
+        const remainder = minutes % 60;
+        return hours ? `${hours}h ${remainder}m` : `${remainder}m`;
+    };
 
     function commonOptions() {
         // WHY disable animation: filtering feels immediate and screenshots stay deterministic.
@@ -73,8 +80,8 @@
             money(data.summary.total_revenue);
         document.querySelector("[data-session-total]").textContent =
             data.summary.session_count.toLocaleString();
-        document.querySelector("[data-average-charge]").textContent =
-            money(data.summary.average_charge);
+        document.querySelector("[data-average-duration]").textContent =
+            duration(data.summary.average_duration_seconds);
 
         revenueChart?.destroy();
         revenueChart = new Chart(context, {
