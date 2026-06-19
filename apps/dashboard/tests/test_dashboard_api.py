@@ -99,6 +99,23 @@ class TestPartialApis:
         context = render.call_args.args[2]
         assert list(context["sessions"]) == [wanted]
 
+    def test_sessions_partial_pushes_shareable_log_url(self, client, api_data):
+        """Keep HTMX history on the full page while fetching the table API."""
+        staff, _, first, _ = api_data
+        client.force_login(staff)
+
+        response = client.get(
+            reverse("dashboard:api_sessions"),
+            {"lot": first.pk, "status": "active", "plate": "ABC 123"},
+            HTTP_HX_REQUEST="true",
+        )
+
+        expected_query = f"lot={first.pk}&status=active&plate=ABC+123"
+        assert response.status_code == 200
+        assert response["HX-Push-Url"] == (
+            f"{reverse('dashboard:log')}?{expected_query}"
+        )
+
 
 @pytest.mark.django_db
 class TestCorrectionApi:
