@@ -1,0 +1,24 @@
+<header class="card__header"><h2>Detection result</h2><span class="badge badge--warning">Needs review</span></header>
+<div class="detection-image">
+    {% if result.image_url %}<img src="{{ result.image_url }}" alt="Processed gate image">{% endif %}
+    <canvas class="bbox-canvas"
+            data-bbox-canvas
+            data-band="{{ result.confidence_band }}"
+            data-label="{{ result.confidence_percent }}%"
+            data-x="{{ result.bounding_box.0|default:0 }}"
+            data-y="{{ result.bounding_box.1|default:0 }}"
+            data-width="{{ result.bounding_box.2|default:0 }}"
+            data-height="{{ result.bounding_box.3|default:0 }}"></canvas>
+</div>
+<div class="detection-details">
+    <p class="eyebrow">Best plate reading</p>
+    <strong class="detected-plate mono">{{ result.plate_text|default:plate_text|default:"Unreadable" }}</strong>
+    <span class="confidence confidence--{{ result.confidence_band }}">{{ result.confidence_percent|default:confidence_percent }}%</span>
+    <div class="action-panel action-panel--warning">
+        <h3>Queued for review</h3>
+        <p>The best reading was recorded, but an operator must verify this event in the error queue.</p>
+        {% if result.session_id or session_id %}
+        <dl class="result-meta"><div><dt>Session ID</dt><dd class="mono">#SES-{{ result.session_id|default:session_id }}</dd></div></dl>
+        {% endif %}
+    </div>
+</div>

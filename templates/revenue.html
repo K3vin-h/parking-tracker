@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}Revenue analytics — Parking Tracker{% endblock %}
+{% block page_title %}Revenue analytics{% endblock %}
+
+{% block content %}
+{% url "dashboard:api_revenue_data" as revenue_api_url %}
+<form class="range-filter" method="get" data-revenue-filter>
+    <span class="form-label">Range</span>
+    <div class="segmented-control segmented-control--buttons">
+        <button type="submit" name="range" value="7" class="{% if range_preset == '7' %}is-selected{% endif %}">7d</button>
+        <button type="submit" name="range" value="30" class="{% if range_preset == '30' or not range_preset %}is-selected{% endif %}">30d</button>
+        <button type="submit" name="range" value="90" class="{% if range_preset == '90' %}is-selected{% endif %}">90d</button>
+    </div>
+    <label class="sr-only" for="revenue-start">Start date</label>
+    <input class="form-control mono" id="revenue-start" type="date" name="start_date" value="{{ start_date|default:'' }}">
+    <span class="muted">to</span>
+    <label class="sr-only" for="revenue-end">End date</label>
+    <input class="form-control mono" id="revenue-end" type="date" name="end_date" value="{{ end_date|default:'' }}">
+    <button class="btn btn--secondary" type="submit">Apply</button>
+</form>
+
+<div class="stats-grid stats-grid--three">
+    <article class="stat-card"><div class="stat-card__header"><span>Total Revenue</span></div><strong class="stat-card__value" data-revenue-total>${{ total_revenue|default:"0.00" }}</strong><span class="stat-card__meta" data-revenue-delta>{{ revenue_delta|default:"Selected period" }}</span></article>
+    <article class="stat-card"><div class="stat-card__header"><span>Sessions</span></div><strong class="stat-card__value" data-session-total>{{ session_count|default:0 }}</strong><span class="stat-card__meta">Completed and billed</span></article>
+    <article class="stat-card"><div class="stat-card__header"><span>Average Session</span></div><strong class="stat-card__value" data-average-duration>0m</strong><span class="stat-card__meta">Average completed duration</span></article>
+</div>
+
+<div class="revenue-grid" data-revenue-root data-endpoint="{{ revenue_api_url|default:'/api/revenue-data/' }}">
+    <section class="card chart-card">
+        <header class="card__header"><h2>Revenue over time</h2><span class="chart-legend"><i></i>Daily revenue</span></header>
+        <div class="chart-wrap"><canvas id="revenue-chart" aria-label="Daily revenue chart"></canvas></div>
+    </section>
+    <section class="card chart-card">
+        <header class="card__header">
+            <h2 data-breakdown-title>By lot</h2>
+            <div class="mini-toggle" role="group" aria-label="Revenue breakdown">
+                <button class="is-active" type="button" data-breakdown="lot">Lot</button>
+                <button type="button" data-breakdown="hour">Hour</button>
+            </div>
+        </header>
+        <div class="chart-wrap"><canvas id="breakdown-chart" aria-label="Revenue breakdown chart"></canvas></div>
+    </section>
+</div>
+<p class="chart-error" data-chart-error hidden>Revenue data could not be loaded.</p>
+{% endblock %}
+
+{% block extra_js %}
+<script src="{% static 'js/vendor/chart-4.5.1.umd.min.js' %}"></script>
+<script src="{% static 'js/revenue.js' %}" defer></script>
+{% endblock %}

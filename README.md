@@ -12,6 +12,7 @@ A parking lot management system that uses computer vision to read license plates
 - [Session & Billing](#session--billing)
 - [Creating the Dataset for Training](#creating-the-dataset-for-training)
 - [Web Application](#web-application)
+- [Checking Day 9 and Day 10](#checking-day-9-and-day-10)
 - [Docker](#docker)
 
 ---
@@ -436,7 +437,9 @@ Closes the matching active session when a car leaves and bills it. Also `transac
 
 Applies an operator's manual correction to a detection event that landed in the review queue. Also `transaction.atomic()`. It marks the event `manually_corrected`, updates the linked session's `plate_text`, and **re-evaluates the registration link** — the corrected plate might now match a registered user, or no longer match (reverting the session to a guest). Both the event and session rows are locked with `select_for_update()` so the relink can't race a concurrent exit.
 
-> **Authorization:** this service performs **no** access control. The caller (the planned `PATCH /api/events/<id>/correct/` view) **must** restrict it to staff / lot operators — otherwise any caller could rewrite any event and relink any session to any registered user.
+> **Authorization:** this service performs **no** access control. The implemented
+> `PATCH /api/events/<id>/correct/` view therefore restricts access to authenticated
+> staff before calling it; direct service callers must enforce equivalent access.
 
 </details>
 
@@ -546,11 +549,39 @@ While the model is **learning**, we slightly change each training image (brighte
 
 ## Web Application
 
-Django 5.1 backend with HTMX for reactive partials and Chart.js for revenue visualization. No Node.js, no React — server-rendered templates with targeted DOM swaps.
+Django 5.1 backend with server-rendered templates, HTMX for targeted live updates,
+and Chart.js for revenue visualization. HTMX and Chart.js are self-hosted under
+`static/js/vendor/`; the application does not require Node.js or React.
 
-All pages require authentication. No public routes.
+The Day 9 and Day 10 implementation follows the imported Claude Design project
+and provides the complete staff operator interface:
 
----
+| Page | URL | Main features |
+|------|-----|---------------|
+| Login | `/login/` | Dark themed authentication form with validation feedback |
+| Dashboard | `/` | Live summary cards, active sessions, running charges, recent events, and 10-second polling |
+| Upload | `/upload/` | Entry/exit selection, lot selection, drag/drop JPEG or PNG upload, HTMX results, and plate bounding-box canvas |
+| Session Log | `/log/` | Plate/status/lot/entry-date filters, All/Registered/Guest tabs, running values, and pagination |
+| Error Queue | `/errors/` | Paginated low-confidence or unmatched events, private thumbnails, and inline plate correction |
+| Revenue | `/revenue/` | 7/30/90-day and custom ranges, summary cards, daily revenue chart, and lot/hour breakdown |
+| Settings | `/settings/` | Per-lot rate, billing unit, grace period, daily cap, retention, and confidence threshold |
+
+Every operator page and supporting dashboard endpoint requires an authenticated
+staff account. The login page remains public so operators can authenticate.
+Detection images are served through a protected endpoint with `private, no-store`
+caching rather than a public media URL. The reverse proxy or object-storage bucket
+must also keep the backing media private. The upload API limits verified JPEG/PNG
+files to 10 MB and applies a pre-decode 12-megapixel dimension limit.
+
+Authorization uses one global `is_staff` operator role. It does not provide
+per-lot tenant isolation: a staff user can access every configured lot.
+
+Confidence indicators use consistent fixed display bands:
+
+- Green: `>= 80%`
+- Yellow: `60–79%`
+- Red: `< 60%`
+
 
 ## Docker
 

@@ -1,0 +1,13 @@
+<header class="card__header"><h2>Detection result</h2><span class="badge badge--error">Unreadable</span></header>
+<div class="detection-image detection-image--empty">
+    <span class="bbox bbox--error bbox--placeholder"><span>NO PLATE</span></span>
+</div>
+<div class="detection-details">
+    <div class="unreadable-mark" aria-hidden="true">×</div>
+    <strong class="detected-plate detected-plate--muted mono">— — — — —</strong>
+    <p class="unreadable-copy">{{ error|default:"Plate could not be read." }}</p>
+    <div class="action-panel action-panel--error">
+        <h3>{% if queued_for_review %}Queued for review{% else %}No session created{% endif %}</h3>
+        <p>{% if queued_for_review %}The image was retained for manual review.{% else %}Try another image with the plate centered, sharp, and well lit.{% endif %}</p>
+    </div>
+</div>

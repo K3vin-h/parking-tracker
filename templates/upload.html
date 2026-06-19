@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}Upload detection — Parking Tracker{% endblock %}
+{% block page_title %}Upload detection{% endblock %}
+
+{% block content %}
+{% url "dashboard:api_upload" as upload_api_url %}
+<div class="upload-grid">
+    <section>
+        <form id="upload-form"
+              class="upload-form"
+              method="post"
+              enctype="multipart/form-data"
+              hx-post="{{ upload_api_url|default:'/api/upload/' }}"
+              hx-target="#upload-result"
+              hx-swap="innerHTML"
+              hx-indicator="#upload-progress">
+            {% csrf_token %}
+
+            <fieldset class="segmented-fieldset">
+                <legend>Event type</legend>
+                <div class="segmented-control">
+                    <label><input type="radio" name="event_type" value="entry" checked><span>Entry</span></label>
+                    <label><input type="radio" name="event_type" value="exit"><span>Exit</span></label>
+                </div>
+            </fieldset>
+
+            {% if lots %}
+            <div class="form-group upload-lot">
+                <label class="form-label" for="upload-lot">Parking lot</label>
+                <select class="form-control" id="upload-lot" name="lot" required>
+                    {% for lot in lots %}<option value="{{ lot.name }}">{{ lot.name }}</option>{% endfor %}
+                </select>
+            </div>
+            {% endif %}
+
+            <label class="dropzone" for="plate-image" data-dropzone>
+                <input id="plate-image" name="image" type="file" accept="image/jpeg,image/png" data-file-input required>
+                <span class="dropzone__icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><path d="m17 8-5-5-5 5M12 3v12"></path></svg>
+                </span>
+                <strong data-drop-title>Drop plate photo here</strong>
+                <span>or <em>click to browse</em></span>
+                <small class="mono" data-file-meta>JPEG / PNG · ≤ 10 MB</small>
+            </label>
+
+            <div class="upload-preview" data-upload-preview hidden>
+                <img alt="Selected plate image preview" data-preview-image>
+            </div>
+
+            <button class="btn btn--primary btn--full upload-submit" type="submit">
+                <span>Process detection</span>
+                <span class="htmx-indicator" id="upload-progress">Processing…</span>
+            </button>
+        </form>
+    </section>
+
+    <section class="card upload-result" id="upload-result" aria-live="polite">
+        {% include "partials/upload_result_empty.html" %}
+    </section>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="{% static 'js/upload.js' %}" defer></script>
+{% endblock %}

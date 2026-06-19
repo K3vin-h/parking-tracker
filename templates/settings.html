@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+
+{% block title %}Settings — Parking Tracker{% endblock %}
+{% block page_title %}Settings{% endblock %}
+
+{% block content %}
+<form class="settings-form" method="post">
+    {% csrf_token %}
+    {% if lots|length > 1 %}
+    <div class="settings-lot-picker">
+        <label class="form-label" for="settings-lot">Parking lot</label>
+        <select class="form-control" id="settings-lot" name="lot">
+            {% for lot in lots %}<option value="{{ lot.pk }}" {% if selected_lot.pk == lot.pk %}selected{% endif %}>{{ lot.name }}</option>{% endfor %}
+        </select>
+        <button class="btn btn--secondary" type="submit" name="action" value="select_lot">Load</button>
+    </div>
+    {% endif %}
+
+    {% if form.non_field_errors %}
+    <div class="flash flash--error" role="alert">{{ form.non_field_errors }}</div>
+    {% endif %}
+
+    <section class="card settings-section">
+        <header class="card__header card__header--stacked"><h2>Billing</h2><p>How parking time is converted into a charge.</p></header>
+        <div class="settings-grid">
+            <div class="form-group">
+                <label class="form-label" for="id_rate">Rate</label>
+                <div class="input-affix"><span>$</span><input class="form-control mono{% if form.rate.errors %} is-invalid{% endif %}" id="id_rate" name="rate" type="number" min="0.01" step="0.01" value="{{ form.rate.value|default:lot_settings.rate|default:'3.00' }}" required></div>
+                <p class="form-help">Charged per billing unit.</p>
+                {% for error in form.rate.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="id_billing_unit">Billing unit</label>
+                <select class="form-control{% if form.billing_unit.errors %} is-invalid{% endif %}" id="id_billing_unit" name="billing_unit">
+                    <option value="hour" {% if form.billing_unit.value|default:lot_settings.billing_unit == "hour" %}selected{% endif %}>Per hour</option>
+                    <option value="minute" {% if form.billing_unit.value|default:lot_settings.billing_unit == "minute" %}selected{% endif %}>Per minute</option>
+                </select>
+                <p class="form-help">Granularity of the meter.</p>
+                {% for error in form.billing_unit.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="id_grace_period_minutes">Grace period</label>
+                <div class="input-affix input-affix--suffix"><input class="form-control mono{% if form.grace_period_minutes.errors %} is-invalid{% endif %}" id="id_grace_period_minutes" name="grace_period_minutes" type="number" min="0" max="1440" value="{{ form.grace_period_minutes.value|default_if_none:lot_settings.grace_period_minutes|default_if_none:15 }}" required><span>min</span></div>
+                <p class="form-help">Free window before billing starts.</p>
+                {% for error in form.grace_period_minutes.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="id_daily_cap_amount">Daily cap</label>
+                <div class="cap-control">
+                    <label class="switch">
+                        <input id="id_daily_cap_enabled" name="daily_cap_enabled" type="checkbox" {% if form.daily_cap_enabled.value %}checked{% endif %}>
+                        <span aria-hidden="true"></span>
+                        <span class="sr-only">Enable daily cap</span>
+                    </label>
+                    <div class="input-affix"><span>$</span><input class="form-control mono{% if form.daily_cap_amount.errors %} is-invalid{% endif %}" id="id_daily_cap_amount" name="daily_cap_amount" type="number" min="0.01" step="0.01" value="{{ form.daily_cap_amount.value|default:lot_settings.daily_cap_amount|default:'' }}"></div>
+                </div>
+                <p class="form-help">Maximum charge in a 24-hour window.</p>
+                {% for error in form.daily_cap_amount.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
+            </div>
+        </div>
+    </section>
+
+    <section class="card settings-section">
+        <header class="card__header card__header--stacked"><h2>Detection &amp; retention</h2></header>
+        <div class="settings-grid">
+            <div class="form-group">
+                <label class="form-label" for="id_confidence_threshold">Confidence threshold</label>
+                <div class="range-control">
+                    <input class="confidence-range{% if form.confidence_threshold.errors %} is-invalid{% endif %}"
+                           id="id_confidence_threshold"
+                           name="confidence_threshold"
+                           type="range"
+                           min="0"
+                           max="100"
+                           step="1"
+                           value="{{ form.confidence_threshold.value|default_if_none:confidence_threshold_percent|default_if_none:60 }}"
+                           data-confidence-range
+                           required>
+                    <output class="range-value mono" for="id_confidence_threshold" data-confidence-output>{{ form.confidence_threshold.value|default_if_none:confidence_threshold_percent|default_if_none:60 }}%</output>
+                </div>
+                <p class="form-help">Lower detections enter the error queue.</p>
+                {% for error in form.confidence_threshold.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="id_image_retention_days">Image retention</label>
+                <select class="form-control{% if form.image_retention_days.errors %} is-invalid{% endif %}" id="id_image_retention_days" name="image_retention_days">
+                    <option value="7" {% if form.image_retention_days.value|default:lot_settings.image_retention_days == 7 %}selected{% endif %}>7 days</option>
+                    <option value="30" {% if form.image_retention_days.value|default:lot_settings.image_retention_days == 30 %}selected{% endif %}>30 days</option>
+                    <option value="90" {% if form.image_retention_days.value|default:lot_settings.image_retention_days == 90 %}selected{% endif %}>90 days</option>
+                    <option value="" {% if not form.image_retention_days.value and not lot_settings.image_retention_days %}selected{% endif %}>Keep forever</option>
+                </select>
+                <p class="form-help">Private detection images older than this are deleted.</p>
+                {% for error in form.image_retention_days.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
+            </div>
+        </div>
+    </section>
+
+    <div class="form-actions">
+        <button class="btn btn--secondary" type="reset">Cancel</button>
+        <button class="btn btn--primary" type="submit" name="action" value="save">Save settings</button>
+    </div>
+</form>
+{% endblock %}

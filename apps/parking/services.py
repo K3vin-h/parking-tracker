@@ -548,7 +548,12 @@ def _void_duplicate_active_sessions(
 
 
 @transaction.atomic
-def correct_plate(event_id: int, corrected_text: str) -> PlateDetectionEvent:
+def correct_plate(
+    event_id: int,
+    corrected_text: str,
+    *,
+    locked_event: PlateDetectionEvent | None = None,
+) -> PlateDetectionEvent:
     """
     Apply an operator's manual plate correction to a detection event.
 
@@ -557,6 +562,9 @@ def correct_plate(event_id: int, corrected_text: str) -> PlateDetectionEvent:
     update the linked session's plate, and RE-EVALUATE the registration link —
     the corrected plate might now match a registered user (or no longer match,
     reverting the session to guest).
+
+    Sessionless unreadable entry events also open the parking session that the
+    original upload could not create once an operator supplies valid plate text.
 
     AUTHORIZATION: this service performs no access control. The caller (the
     planned PATCH /api/events/<id>/correct/ view) MUST restrict this to staff /
@@ -568,11 +576,16 @@ def correct_plate(event_id: int, corrected_text: str) -> PlateDetectionEvent:
       ValueError: if corrected_text is empty or over-length after normalization.
     """
     _require_plate_within_limits(corrected_text)
-    try:
-        event = PlateDetectionEvent.objects.select_for_update().get(pk=event_id)
-    except PlateDetectionEvent.DoesNotExist:
-        logger.error("correct_plate: no detection event with id %s", event_id)
-        raise
+    if locked_event is not None:
+        if locked_event.pk != event_id:
+            raise ValueError("locked event id does not match correction target")
+        event = locked_event
+    else:
+        try:
+            event = PlateDetectionEvent.objects.select_for_update().get(pk=event_id)
+        except PlateDetectionEvent.DoesNotExist:
+            logger.error("correct_plate: no detection event with id %s", event_id)
+            raise
 
     normalized = normalize_plate(corrected_text)
     if not normalized:
@@ -671,6 +684,47 @@ def correct_plate(event_id: int, corrected_text: str) -> PlateDetectionEvent:
                 _plate_log_token(normalized),
                 event.lot_id,
             )
+    elif (
+        event.event_type == "entry"
+        and event.lot_id is not None
+        and event.session_id is None
+    ):
+        # Reconcile a queued unreadable entry by opening the session the upload
+        # could not create. Preserve the original detection timestamp so billing
+        # and occupancy reflect when the vehicle actually arrived.
+        lot = event.lot
+        voided = ParkingSession.objects.filter(
+            lot=lot,
+            plate_text=normalized,
+            status=ParkingSession.Status.ACTIVE,
+        ).update(
+            status=ParkingSession.Status.VOID,
+            charge_amount=Decimal("0.00"),
+            was_orphaned=True,
+        )
+        registered = _match_registered_plate(normalized)
+        session = ParkingSession.objects.create(
+            plate_text=normalized,
+            license_plate=registered,
+            user=registered.user if registered else None,
+            lot=lot,
+            entry_time=event.timestamp,
+            status=ParkingSession.Status.ACTIVE,
+            has_duplicate_warning=voided > 0,
+        )
+        event.session = session
+        event.save(
+            update_fields=["manually_corrected", "corrected_plate", "session"]
+        )
+        logger.info(
+            "Corrected sessionless entry event %s opened session %s for "
+            "plate_hash=%s in lot %s (duplicate_voided=%d)",
+            event_id,
+            session.pk,
+            _plate_log_token(normalized),
+            lot.pk,
+            voided,
+        )
     else:
         # Orphan event without lot context cannot be reconciled to a session.
         event.save(update_fields=["manually_corrected", "corrected_plate"])
