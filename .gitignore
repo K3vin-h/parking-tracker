@@ -58,8 +58,10 @@ Thumbs.db
 graphify-out/
 
 # ── Local documentation drafts ────────────────────────────────────────────────
-# Long-form learning notes and PR walkthroughs stay local only.
-docs/
+# Long-form learning notes and PR walkthroughs stay local unless explicitly
+# promoted to canonical project documentation.
+docs/*
+!docs/day-9-10-frontend-dashboard-explained.md
 
 # ── AI agent instructions (local only) ───────────────────────────────────────
 AGENTS.md
