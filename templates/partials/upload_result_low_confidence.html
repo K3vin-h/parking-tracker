@@ -1,7 +1,6 @@
-{% url "dashboard:api_event_image" result.event_id as event_image_url %}
 <header class="card__header"><h2>Detection result</h2><span class="badge badge--warning">Needs review</span></header>
 <div class="detection-image">
-    <img src="{{ result.image_url|default:event_image_url }}" alt="Processed gate image">
+    {% if result.image_url %}<img src="{{ result.image_url }}" alt="Processed gate image">{% endif %}
     <canvas class="bbox-canvas"
             data-bbox-canvas
             data-band="{{ result.confidence_band }}"

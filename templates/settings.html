@@ -48,7 +48,7 @@
                 <label class="form-label" for="id_daily_cap_amount">Daily cap</label>
                 <div class="cap-control">
                     <label class="switch">
-                        <input id="id_daily_cap_enabled" name="daily_cap_enabled" type="checkbox" {% if form.daily_cap_enabled.value|default:lot_settings.daily_cap_enabled %}checked{% endif %}>
+                        <input id="id_daily_cap_enabled" name="daily_cap_enabled" type="checkbox" {% if form.daily_cap_enabled.value %}checked{% endif %}>
                         <span aria-hidden="true"></span>
                         <span class="sr-only">Enable daily cap</span>
                     </label>

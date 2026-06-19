@@ -1,5 +1,6 @@
 """Staff-only HTML page views and shared dashboard query builders."""
 
+import logging
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 
@@ -24,6 +25,8 @@ from apps.parking.services import calculate_charge, normalize_plate
 
 from .forms import LotSettingsForm
 from .utils import confidence_band
+
+logger = logging.getLogger(__name__)
 
 SESSION_PAGE_SIZE = 25
 
@@ -118,6 +121,12 @@ def build_dashboard_context(request: HttpRequest) -> dict:
                 session.lot.settings,
             )
         except LotSettings.DoesNotExist:
+            logger.warning(
+                "LotSettings missing for lot %s; running charge shown as 0 "
+                "for session %s",
+                session.lot_id,
+                session.pk,
+            )
             session.estimated_running_charge = Decimal("0.00")
         session.running_cost = session.estimated_running_charge
 
@@ -213,7 +222,9 @@ def build_session_context(request: HttpRequest) -> dict:
     now_utc = timezone.now().astimezone(UTC)
     for session in page_obj:
         if session.status == ParkingSession.Status.ACTIVE:
-            running_seconds = max(0, int((now_utc - session.entry_time).total_seconds()))
+            running_seconds = max(
+                0, int((now_utc - session.entry_time).total_seconds())
+            )
             session.duration_display = _format_duration(running_seconds)
             try:
                 session.display_charge = calculate_charge(
@@ -222,6 +233,11 @@ def build_session_context(request: HttpRequest) -> dict:
                     session.lot.settings,
                 )
             except LotSettings.DoesNotExist:
+                logger.warning(
+                    "LotSettings missing for lot %s; charge shown as 0 for session %s",
+                    session.lot_id,
+                    session.pk,
+                )
                 session.display_charge = Decimal("0.00")
         else:
             session.duration_display = _format_duration(session.duration_seconds)
@@ -254,6 +270,7 @@ def _parse_iso_date(value: str | None) -> date | None:
     try:
         return date.fromisoformat(value)
     except ValueError:
+        logger.warning("Ignored invalid date filter value %r", value)
         return None
 
 
@@ -406,7 +423,9 @@ class SettingsView(StaffRequiredMixin, TemplateView):
         if request.POST.get("action") == "select_lot":
             # WHY redirect before binding: the lot picker is navigation, not a
             # partial settings submission that should trigger required-field errors.
-            return redirect(f"{reverse('dashboard:settings')}?lot={lot_settings.lot_id}")
+            return redirect(
+                f"{reverse('dashboard:settings')}?lot={lot_settings.lot_id}"
+            )
         form = LotSettingsForm(request.POST, instance=lot_settings)
         if not form.is_valid():
             return self.render_to_response(
