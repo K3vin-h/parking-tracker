@@ -84,6 +84,15 @@ def _format_duration(total_seconds: int) -> str:
     return f"{hours}h {minutes}m" if hours else f"{minutes}m"
 
 
+def _confidence_band(score: float) -> str:
+    """Map confidence to the fixed green/yellow/red bands required by the UI."""
+    if score >= 0.8:
+        return "good"
+    if score >= 0.6:
+        return "warning"
+    return "error"
+
+
 def build_dashboard_context(request: HttpRequest) -> dict:
     """
     Build the complete live-dashboard payload from one consistent UTC instant.
@@ -123,6 +132,7 @@ def build_dashboard_context(request: HttpRequest) -> dict:
     recent_events = list(events.order_by("-timestamp", "-pk")[:10])
     for event in recent_events:
         event.confidence_percent = round(event.confidence_score * 100)
+        event.confidence_band = _confidence_band(event.confidence_score)
 
     completed_today = sessions.filter(
         status=ParkingSession.Status.COMPLETED,
@@ -272,6 +282,7 @@ def build_error_queue_context(request: HttpRequest) -> dict:
     page_obj = paginator.get_page(request.GET.get("page"))
     for event in page_obj:
         event.confidence_percent = round(event.confidence_score * 100)
+        event.confidence_band = _confidence_band(event.confidence_score)
     return {
         "events": page_obj,
         "page_obj": page_obj,

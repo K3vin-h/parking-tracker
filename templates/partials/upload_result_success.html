@@ -2,19 +2,19 @@
 <header class="card__header"><h2>Detection result</h2><span class="badge badge--active">Success</span></header>
 <div class="detection-image">
     <img src="{{ result.image_url|default:event_image_url }}" alt="Processed gate image">
-    <span class="bbox"
-          data-bbox
-          data-x="{{ result.bounding_box.0|default:0 }}"
-          data-y="{{ result.bounding_box.1|default:0 }}"
-          data-width="{{ result.bounding_box.2|default:0 }}"
-          data-height="{{ result.bounding_box.3|default:0 }}">
-        <span>PLATE</span>
-    </span>
+    <canvas class="bbox-canvas"
+            data-bbox-canvas
+            data-band="{{ result.confidence_band }}"
+            data-label="{{ result.confidence_percent }}%"
+            data-x="{{ result.bounding_box.0|default:0 }}"
+            data-y="{{ result.bounding_box.1|default:0 }}"
+            data-width="{{ result.bounding_box.2|default:0 }}"
+            data-height="{{ result.bounding_box.3|default:0 }}"></canvas>
 </div>
 <div class="detection-details">
     <p class="eyebrow">Detected plate</p>
     <strong class="detected-plate mono">{{ result.plate_text|default:plate_text }}</strong>
-    <span class="confidence confidence--good">{{ result.confidence_percent|default:confidence_percent }}%</span>
+    <span class="confidence confidence--{{ result.confidence_band }}">{{ result.confidence_percent|default:confidence_percent }}%</span>
     <div class="action-panel action-panel--success">
         <h3>{% if result.event_type == "exit" %}Session closed{% else %}Session opened{% endif %}</h3>
         <p>{% if result.event_type == "exit" %}The matching parking session was completed and billed.{% else %}A new active parking session was created.{% endif %}</p>

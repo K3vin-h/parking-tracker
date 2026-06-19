@@ -17,13 +17,14 @@ WHAT THE DASHBOARD PROVIDES (Days 8–10):
   /api/sessions/  → GET list of sessions (used by HTMX log page)
   /api/dashboard-stats/ → GET active count + revenue (polled every 10s)
   /api/events/<id>/correct/ → PATCH manual plate correction
+  /api/revenue-data/ → Chart.js revenue, duration, lot, and hourly data
 
 WHY no models in the dashboard app?
   The dashboard is a pure presentation layer. All data lives in apps/parking
   and apps/cv. The dashboard reads from parking models and calls the cv pipeline.
   This keeps the data layer and presentation layer cleanly separated.
 
-Day 1: App registered with an empty URL file — placeholder only.
+The Day 9–10 operator interface is implemented in this app.
 """
 
 from django.apps import AppConfig

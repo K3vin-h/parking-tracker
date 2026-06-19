@@ -65,7 +65,19 @@
         <div class="settings-grid">
             <div class="form-group">
                 <label class="form-label" for="id_confidence_threshold">Confidence threshold</label>
-                <div class="input-affix input-affix--suffix"><input class="form-control mono{% if form.confidence_threshold.errors %} is-invalid{% endif %}" id="id_confidence_threshold" name="confidence_threshold" type="number" min="0" max="100" step="1" value="{{ form.confidence_threshold.value|default:confidence_threshold_percent|default:60 }}" required><span>%</span></div>
+                <div class="range-control">
+                    <input class="confidence-range{% if form.confidence_threshold.errors %} is-invalid{% endif %}"
+                           id="id_confidence_threshold"
+                           name="confidence_threshold"
+                           type="range"
+                           min="0"
+                           max="100"
+                           step="1"
+                           value="{{ form.confidence_threshold.value|default:confidence_threshold_percent|default:60 }}"
+                           data-confidence-range
+                           required>
+                    <output class="range-value mono" for="id_confidence_threshold" data-confidence-output>{{ form.confidence_threshold.value|default:confidence_threshold_percent|default:60 }}%</output>
+                </div>
                 <p class="form-help">Lower detections enter the error queue.</p>
                 {% for error in form.confidence_threshold.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
             </div>

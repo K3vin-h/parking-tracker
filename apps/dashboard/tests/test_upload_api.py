@@ -315,6 +315,7 @@ class TestUploadEntry:
         assert body["event_type"] == "entry"
         assert body["plate_text"] == "ABC123"
         assert body["status"] == ParkingSession.Status.ACTIVE
+        assert body["confidence_band"] == "good"
 
         session = ParkingSession.objects.get(pk=body["session_id"])
         assert session.plate_text == "ABC123"
@@ -341,6 +342,7 @@ class TestUploadEntry:
         assert response.status_code == 200
         assert response["Content-Type"].startswith("text/html")
         assert b"HTML01" in response.content
+        assert b"data-bbox-canvas" in response.content
 
     def test_response_uses_lot_specific_confidence_threshold(
         self, client, staff_user, lot_settings

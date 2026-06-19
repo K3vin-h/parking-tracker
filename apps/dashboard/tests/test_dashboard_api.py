@@ -229,6 +229,7 @@ class TestRevenueApi:
         assert response.status_code == 200
         assert body["summary"]["total_revenue"] == "12.50"
         assert body["summary"]["session_count"] == 1
+        assert body["summary"]["average_duration_seconds"] == 3600
         assert len(body["daily"]) == 7
         assert len(body["hourly"]) == 24
         assert body["by_lot"] == [

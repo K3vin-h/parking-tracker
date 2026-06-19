@@ -34,13 +34,14 @@
             {% for lot in lots %}<option value="{{ lot.pk }}" {% if filters.lot == lot.pk|stringformat:"s" %}selected{% endif %}>{{ lot.name }}</option>{% endfor %}
         </select>
     </div>
-    <div class="form-group">
-        <label class="form-label" for="registration-filter">Driver</label>
-        <select class="form-control" id="registration-filter" name="registration">
-            <option value="">All</option>
-            <option value="registered" {% if filters.registration == "registered" %}selected{% endif %}>Registered</option>
-            <option value="guest" {% if filters.registration == "guest" %}selected{% endif %}>Guest</option>
-        </select>
+    <div class="form-group registration-tabs">
+        <span class="form-label">Driver</span>
+        <input type="hidden" name="registration" value="{{ filters.registration|default:'' }}" data-registration-value>
+        <div class="segmented-control segmented-control--buttons" role="tablist" aria-label="Session ownership">
+            <button type="button" role="tab" data-registration-tab="" aria-selected="{% if not filters.registration %}true{% else %}false{% endif %}" class="{% if not filters.registration %}is-selected{% endif %}">All</button>
+            <button type="button" role="tab" data-registration-tab="registered" aria-selected="{% if filters.registration == 'registered' %}true{% else %}false{% endif %}" class="{% if filters.registration == 'registered' %}is-selected{% endif %}">Registered</button>
+            <button type="button" role="tab" data-registration-tab="guest" aria-selected="{% if filters.registration == 'guest' %}true{% else %}false{% endif %}" class="{% if filters.registration == 'guest' %}is-selected{% endif %}">Guest</button>
+        </div>
     </div>
     <div class="form-group">
         <label class="form-label" for="start-filter">From</label>

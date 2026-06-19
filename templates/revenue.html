@@ -24,7 +24,7 @@
 <div class="stats-grid stats-grid--three">
     <article class="stat-card"><div class="stat-card__header"><span>Total Revenue</span></div><strong class="stat-card__value" data-revenue-total>${{ total_revenue|default:"0.00" }}</strong><span class="stat-card__meta" data-revenue-delta>{{ revenue_delta|default:"Selected period" }}</span></article>
     <article class="stat-card"><div class="stat-card__header"><span>Sessions</span></div><strong class="stat-card__value" data-session-total>{{ session_count|default:0 }}</strong><span class="stat-card__meta">Completed and billed</span></article>
-    <article class="stat-card"><div class="stat-card__header"><span>Average Charge</span></div><strong class="stat-card__value" data-average-charge>${{ average_charge|default:"0.00" }}</strong><span class="stat-card__meta">Per completed session</span></article>
+    <article class="stat-card"><div class="stat-card__header"><span>Average Session</span></div><strong class="stat-card__value" data-average-duration>0m</strong><span class="stat-card__meta">Average completed duration</span></article>
 </div>
 
 <div class="revenue-grid" data-revenue-root data-endpoint="{{ revenue_api_url|default:'/api/revenue-data/' }}">

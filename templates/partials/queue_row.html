@@ -4,12 +4,14 @@
     <div class="queue-thumbnail">
         <img src="{{ event.image_url|default:event_image_url }}" alt="Detection image for {{ event.raw_plate_text|default:'unreadable plate' }}">
         {% if event.bounding_box %}
-        <span class="bbox bbox--warning"
-              data-bbox
-              data-x="{{ event.bounding_box.0|default:0 }}"
-              data-y="{{ event.bounding_box.1|default:0 }}"
-              data-width="{{ event.bounding_box.2|default:0 }}"
-              data-height="{{ event.bounding_box.3|default:0 }}"></span>
+        <canvas class="bbox-canvas"
+                data-bbox-canvas
+                data-band="{{ event.confidence_band }}"
+                data-label="{{ event.confidence_percent }}%"
+                data-x="{{ event.bounding_box.0|default:0 }}"
+                data-y="{{ event.bounding_box.1|default:0 }}"
+                data-width="{{ event.bounding_box.2|default:0 }}"
+                data-height="{{ event.bounding_box.3|default:0 }}"></canvas>
         {% endif %}
     </div>
     <div class="queue-row__info">
@@ -17,7 +19,7 @@
             <span class="direction direction--{{ event.event_type }}">{{ event.event_type|upper }}</span>
             <span>{{ event.lot_name|default:event.lot.name|default:"Unknown lot" }}</span>
             <time class="mono">{{ event.timestamp_display|default:event.timestamp|date:"Y-m-d H:i:s" }}</time>
-            <span class="confidence confidence--warning">{{ event.confidence_percent|default:"0" }}%</span>
+            <span class="confidence confidence--{{ event.confidence_band }}">{{ event.confidence_percent|default:"0" }}%</span>
         </div>
         <p>Raw OCR: <strong class="mono">{{ event.raw_plate_text|default:"Unreadable" }}</strong></p>
     </div>
