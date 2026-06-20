@@ -41,6 +41,12 @@ apps/cv/weights/*.pth
 # not baked into the image. The volume persists across container restarts.
 media/
 
+# --- Collected static files ---
+# collectstatic populates this runtime named volume during production startup.
+# Excluding local output keeps stale generated assets out of the image and
+# ensures the Dockerfile-owned mount point is tested consistently.
+staticfiles/
+
 # --- Test and coverage artifacts ---
 .coverage
 htmlcov/
