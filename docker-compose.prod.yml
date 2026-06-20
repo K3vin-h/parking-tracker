@@ -1,0 +1,87 @@
+# ============================================================
+# docker-compose.prod.yml — production override
+# ============================================================
+# Layered ON TOP of docker-compose.yml. Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build -d
+#
+# What this override changes versus the dev base:
+#   - Runs gunicorn (a real WSGI server) instead of manage.py runserver
+#   - Builds production-only dependencies (INSTALL_DEV_REQUIREMENTS=false)
+#   - Drops the dev '.:/app' source bind mount so host files and the
+#     plaintext .env are NOT exposed inside the container — the image's
+#     own baked-in code is used instead
+#   - Forces DEBUG=False even when the base env_file points at a development
+#     .env, because production images do not install debug-only dependencies
+#   - Mounts host-trained CV weights read-only at the settings defaults
+#   - Keeps the named media + staticfiles volumes for persistence
+#
+# Secrets (SECRET_KEY, DB_PASSWORD, HEALTH_CHECK_TOKEN, ...) must be injected
+# by the orchestrator or a host .env — never baked into the image.
+# ============================================================
+
+services:
+  web:
+    build:
+      args:
+        # Production image: runtime deps only (no django_extensions / dev tools).
+        INSTALL_DEV_REQUIREMENTS: "false"
+
+    environment:
+      # The base service loads .env, which is also used for local development
+      # and commonly contains DEBUG=True. Service-level environment values take
+      # precedence over env_file values, so production cannot accidentally boot
+      # with debug pages or try to import absent development dependencies.
+      DEBUG: "False"
+
+    # Replace the dev runserver with gunicorn. entrypoint.sh still runs first
+    # (wait-for-db, migrate, collectstatic), then exec's this command, so
+    # gunicorn becomes PID 1's child and receives SIGTERM directly.
+    #   --workers: each worker is a separate process that loads its OWN copy of
+    #     the CV models, so keep this modest. Tune with GUNICORN_WORKERS.
+    #   --timeout 120: CV inference on an uploaded image can exceed gunicorn's
+    #     30s default; 120s avoids killing in-flight uploads. Tune with
+    #     GUNICORN_TIMEOUT.
+    #   --max-requests / --max-requests-jitter: periodically recycle workers to
+    #     bound memory growth in long-lived PyTorch processes.
+    #   --access-logfile/--error-logfile '-': log to stdout/stderr for Docker.
+    #   --access-logformat: retain request observability without %(r)s, which
+    #     includes the query string and could expose plate-search PII. %(U)s is
+    #     the URL path only; referrer and other request headers are omitted too.
+    command:
+      - gunicorn
+      - config.wsgi:application
+      - --bind=0.0.0.0:8000
+      - --workers=${GUNICORN_WORKERS:-3}
+      - --timeout=${GUNICORN_TIMEOUT:-120}
+      - --max-requests=1000
+      - --max-requests-jitter=100
+      - --access-logfile=-
+      - '--access-logformat=%(h)s %(t)s "%(m)s %(U)s %(H)s" %(s)s %(b)s %(M)sms'
+      - --error-logfile=-
+
+    # The base file publishes 8000 on ALL host interfaces (0.0.0.0), which would
+    # expose gunicorn directly to the internet on a public host. gunicorn is not
+    # meant to face the internet unproxied, so bind the published port to host
+    # loopback only — a reverse proxy running ON THE HOST (nginx/Caddy doing TLS)
+    # reaches it via 127.0.0.1. A proxy running as another container instead talks
+    # to 'web' over app_net and needs no published port at all (drop this block).
+    # !override replaces the base list rather than merging into it.
+    ports: !override
+      - "127.0.0.1:8000:8000"
+
+    # Compose MERGES volume lists across files, so re-listing alone would NOT
+    # remove the base '.:/app' bind mount. The !override tag (Compose >= 2.24)
+    # forces this list to REPLACE the base list entirely, dropping the dev
+    # bind mount while keeping the persistent named volumes. Model weights are
+    # trained outside Docker and excluded from the image, so mount their host
+    # directory read-only. create_host_path=false makes a missing directory a
+    # deployment error instead of silently creating an empty weights directory.
+    volumes: !override
+      - media:/app/media
+      - staticfiles:/app/staticfiles
+      - type: bind
+        source: ${CV_WEIGHTS_DIR:-./apps/cv/weights}
+        target: /app/apps/cv/weights
+        read_only: true
+        bind:
+          create_host_path: false

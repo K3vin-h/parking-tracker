@@ -80,12 +80,17 @@ COPY --from=builder /venv /venv
 
 WORKDIR /app
 
-# Create a non-root user.
+# Create a non-root user and the runtime volume mount points.
 # WHY non-root: if an attacker exploits the application, they get a limited
 # user account rather than root on the host. This limits the blast radius
 # of any container escape or RCE vulnerability.
+# WHY create media/staticfiles here: on a clean checkout those ignored
+# directories are absent from the build context. Docker would otherwise create
+# fresh named-volume mount points as root, preventing appuser from writing
+# uploads or collectstatic output on first production startup.
 RUN groupadd -r appgroup \
     && useradd -r -g appgroup -u 1000 appuser \
+    && mkdir -p /app/media /app/staticfiles \
     && chown -R appuser:appgroup /app
 
 # Copy project source and transfer ownership to appuser in one layer.
