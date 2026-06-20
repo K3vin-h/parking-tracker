@@ -10,6 +10,9 @@
 #   - Drops the dev '.:/app' source bind mount so host files and the
 #     plaintext .env are NOT exposed inside the container — the image's
 #     own baked-in code is used instead
+#   - Forces DEBUG=False even when the base env_file points at a development
+#     .env, because production images do not install debug-only dependencies
+#   - Mounts host-trained CV weights read-only at the settings defaults
 #   - Keeps the named media + staticfiles volumes for persistence
 #
 # Secrets (SECRET_KEY, DB_PASSWORD, HEALTH_CHECK_TOKEN, ...) must be injected
@@ -22,6 +25,13 @@ services:
       args:
         # Production image: runtime deps only (no django_extensions / dev tools).
         INSTALL_DEV_REQUIREMENTS: "false"
+
+    environment:
+      # The base service loads .env, which is also used for local development
+      # and commonly contains DEBUG=True. Service-level environment values take
+      # precedence over env_file values, so production cannot accidentally boot
+      # with debug pages or try to import absent development dependencies.
+      DEBUG: "False"
 
     # Replace the dev runserver with gunicorn. entrypoint.sh still runs first
     # (wait-for-db, migrate, collectstatic), then exec's this command, so
@@ -62,7 +72,16 @@ services:
     # Compose MERGES volume lists across files, so re-listing alone would NOT
     # remove the base '.:/app' bind mount. The !override tag (Compose >= 2.24)
     # forces this list to REPLACE the base list entirely, dropping the dev
-    # bind mount while keeping the persistent named volumes.
+    # bind mount while keeping the persistent named volumes. Model weights are
+    # trained outside Docker and excluded from the image, so mount their host
+    # directory read-only. create_host_path=false makes a missing directory a
+    # deployment error instead of silently creating an empty weights directory.
     volumes: !override
       - media:/app/media
       - staticfiles:/app/staticfiles
+      - type: bind
+        source: ${CV_WEIGHTS_DIR:-./apps/cv/weights}
+        target: /app/apps/cv/weights
+        read_only: true
+        bind:
+          create_host_path: false
