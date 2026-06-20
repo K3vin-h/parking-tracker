@@ -34,6 +34,9 @@ services:
     #   --max-requests / --max-requests-jitter: periodically recycle workers to
     #     bound memory growth in long-lived PyTorch processes.
     #   --access-logfile/--error-logfile '-': log to stdout/stderr for Docker.
+    #   --access-logformat: retain request observability without %(r)s, which
+    #     includes the query string and could expose plate-search PII. %(U)s is
+    #     the URL path only; referrer and other request headers are omitted too.
     command:
       - gunicorn
       - config.wsgi:application
@@ -43,6 +46,7 @@ services:
       - --max-requests=1000
       - --max-requests-jitter=100
       - --access-logfile=-
+      - '--access-logformat=%(h)s %(t)s "%(m)s %(U)s %(H)s" %(s)s %(b)s %(M)sms'
       - --error-logfile=-
 
     # The base file publishes 8000 on ALL host interfaces (0.0.0.0), which would
