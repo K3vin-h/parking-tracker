@@ -134,6 +134,10 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     # Adds security HTTP headers: HSTS, X-Content-Type-Options, Referrer-Policy.
     "django.middleware.security.SecurityMiddleware",
+    # Injects the Content-Security-Policy response header on every response.
+    # Must come immediately after SecurityMiddleware so headers are added before
+    # any middleware downstream can send a response without them.
+    "csp.middleware.CSPMiddleware",
     # Loads the session from the database based on the session cookie.
     "django.contrib.sessions.middleware.SessionMiddleware",
     # Normalizes URL paths (adds trailing slashes when APPEND_SLASH=True).
@@ -447,3 +451,45 @@ if not DEBUG:
     # Without these, a network attacker could steal session/CSRF tokens over HTTP.
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
+
+
+# ── Content Security Policy ────────────────────────────────────────────────────
+
+# Defined unconditionally (dev AND prod) so CSP violations surface early in
+# development rather than only being caught after deployment.
+#
+# Policy rationale:
+#   default-src 'self'       — baseline: only same-origin resources allowed.
+#   script-src  'self'       — no 'unsafe-eval' or 'unsafe-inline': all JS lives
+#                              in self-hosted static files (htmx, chart.js, app.js,
+#                              upload.js, revenue.js). HTMX allowEval is disabled
+#                              via the htmx-config meta tag so eval is never needed.
+#   style-src   'unsafe-inline' — Django/HTMX templates emit inline style= attributes
+#                              (e.g. display:none toggling), so inline styles must be
+#                              allowed. No external stylesheet CDNs are used.
+#   img-src     data: blob:  — the upload page draws a canvas overlay and generates
+#                              a blob: URL for the plate-image preview; data: is used
+#                              by some browser rendering paths for the same canvas.
+#   connect-src 'self'       — HTMX XHR and the PATCH correction endpoint are same-origin.
+#   font-src    'self'       — JetBrains Mono is self-hosted under static/fonts/.
+#   object-src  'none'       — blocks Flash/plugin execution entirely.
+#   base-uri    'self'       — prevents an injected <base> tag redirecting relative URLs.
+#   form-action 'self'       — POST/PATCH only to our own origin; blocks form hijacking.
+#   frame-ancestors 'none'   — clickjacking protection. In CSP-Level-2+ browsers
+#                              this overrides X-Frame-Options; XFrameOptionsMiddleware
+#                              (X-Frame-Options: DENY) remains as a fallback for
+#                              older clients that ignore frame-ancestors.
+CONTENT_SECURITY_POLICY = {
+    "DIRECTIVES": {
+        "default-src": ["'self'"],
+        "script-src": ["'self'"],
+        "style-src": ["'self'", "'unsafe-inline'"],
+        "img-src": ["'self'", "data:", "blob:"],
+        "connect-src": ["'self'"],
+        "font-src": ["'self'"],
+        "object-src": ["'none'"],
+        "base-uri": ["'self'"],
+        "form-action": ["'self'"],
+        "frame-ancestors": ["'none'"],
+    }
+}
