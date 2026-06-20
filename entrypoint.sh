@@ -10,6 +10,14 @@
 
 set -e
 
+# Match Django's DEBUG parsing so values such as "True" and whitespace-padded
+# values behave the same in startup safety checks as they do in settings.py.
+# Python is guaranteed in this application image and avoids adding a hidden
+# dependency on a particular shell utility implementation.
+DEBUG_NORMALIZED=$(
+    python -c 'import os; print(os.environ.get("DEBUG", "False").strip().lower())'
+)
+
 # ── Production safety guard: detect a leaked dev bind mount ────────────────────
 # docker-compose.prod.yml uses the Compose `!override` tag to drop the dev
 # `.:/app` bind mount. On Docker Compose < 2.24 that tag is silently ignored and
@@ -19,7 +27,7 @@ set -e
 # if that bind mount was applied. In a non-debug (production) run that means the
 # override did not take effect: abort loudly instead of serving with leaked
 # secrets on an unexpectedly public port.
-if [ "${DEBUG:-false}" != "true" ] && [ -f /app/.env ]; then
+if [ "$DEBUG_NORMALIZED" != "true" ] && [ -f /app/.env ]; then
     echo "ERROR: /app/.env present in a non-debug run — the dev bind mount leaked in." >&2
     echo "       docker-compose.prod.yml needs Docker Compose >= 2.24 for its" >&2
     echo "       !override tags to take effect. Check: docker compose version" >&2
@@ -82,7 +90,7 @@ python manage.py migrate --no-input
 # at build time, so the collect must happen here, after the volume is mounted.
 # set -e is active, so a real collectstatic failure aborts startup loudly
 # rather than serving a site with missing CSS/JS.
-if [ "${DEBUG:-false}" != "true" ]; then
+if [ "$DEBUG_NORMALIZED" != "true" ]; then
     echo "Collecting static files..."
     python manage.py collectstatic --no-input
 fi
