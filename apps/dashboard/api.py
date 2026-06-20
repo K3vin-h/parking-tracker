@@ -26,23 +26,17 @@ import tempfile
 import uuid
 import warnings
 from contextlib import contextmanager
-from datetime import UTC, date, datetime, time, timedelta
-from decimal import Decimal
-import json
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from django.conf import settings
 from django.contrib.auth.decorators import user_passes_test
-from django.core.exceptions import SuspiciousFileOperation
 from django.core.files.storage import default_storage
 from django.db import transaction
-from django.db.models import Avg, Count, Q, Sum
-from django.db.models.functions import ExtractHour, TruncDate
-from django.http import FileResponse, Http404, HttpRequest, JsonResponse, QueryDict
-from django.shortcuts import get_object_or_404, render
+from django.http import HttpRequest, JsonResponse
+from django.shortcuts import render
 from django.urls import reverse
 from django.views.decorators.csrf import csrf_protect
-from django.views.decorators.http import require_GET, require_POST, require_http_methods
+from django.views.decorators.http import require_POST
 from PIL import Image, UnidentifiedImageError
 
 from apps.cv.pipeline import PipelineResult, get_pipeline
@@ -53,10 +47,9 @@ from apps.parking.models import (
     ParkingSession,
     PlateDetectionEvent,
 )
-from apps.parking.services import correct_plate, handle_entry, handle_exit
+from apps.parking.services import handle_entry, handle_exit
 
 from .utils import confidence_band
-from .views import build_dashboard_context, build_session_context
 
 logger = logging.getLogger("apps.dashboard")
 
@@ -611,279 +604,3 @@ def _unreadable_entry_payload(
     )
     payload.update(_event_fields(event))
     return payload
-
-
-@staff_required
-@require_GET
-def dashboard_stats(request: HttpRequest):
-    """Render the single live region used by the 10-second dashboard poll."""
-    return render(
-        request,
-        "partials/dashboard_stats.html",
-        build_dashboard_context(request),
-    )
-
-
-@staff_required
-@require_GET
-def sessions(request: HttpRequest):
-    """Render a filtered, 25-row session table for HTMX replacement."""
-    response = render(
-        request,
-        "partials/session_table.html",
-        build_session_context(request),
-    )
-    # WHY override HTMX history: the API returns only a table fragment, so a
-    # refreshable or shareable browser URL must remain on the full log page.
-    query_string = request.GET.urlencode()
-    log_url = reverse("dashboard:log")
-    response["HX-Push-Url"] = f"{log_url}?{query_string}" if query_string else log_url
-    return response
-
-
-@csrf_protect
-@staff_required
-@require_http_methods(["PATCH"])
-def correct_event(request: HttpRequest, event_id: int):
-    """
-    Apply a manual correction through the transactional parking service.
-
-    WHY parse QueryDict explicitly: Django populates request.POST only for POST,
-    while HTMX sends the correction as URL-encoded PATCH per the API contract.
-    """
-    if request.content_type != "application/x-www-form-urlencoded":
-        return JsonResponse({"error": "Use form-encoded PATCH data."}, status=415)
-    data = QueryDict(request.body)
-    corrected_text = data.get("corrected_plate", "")
-    with transaction.atomic():
-        event = (
-            PlateDetectionEvent.objects.select_for_update().filter(pk=event_id).first()
-        )
-        if event is None:
-            return JsonResponse({"error": "Detection event not found."}, status=404)
-        if event.manually_corrected or not (
-            event.is_low_confidence or event.session_id is None
-        ):
-            return JsonResponse(
-                {"error": "Detection event is no longer pending review."},
-                status=409,
-            )
-        try:
-            event = correct_plate(
-                event_id,
-                corrected_text,
-                locked_event=event,
-            )
-        except ValueError as exc:
-            return JsonResponse({"error": str(exc)}, status=400)
-        queue_count = PlateDetectionEvent.objects.filter(
-            Q(is_low_confidence=True) | Q(session__isnull=True),
-            manually_corrected=False,
-        ).count()
-    response = render(
-        request,
-        "partials/queue_corrected.html",
-        {"event": event, "corrected": True, "queue_count": queue_count},
-    )
-    response["HX-Trigger"] = json.dumps({"queueCountChanged": {"count": queue_count}})
-    return response
-
-
-def _parse_revenue_range(request: HttpRequest) -> tuple[str, date, date]:
-    """
-    Resolve presets/custom dates as inclusive UTC calendar dates.
-
-    WHY raise ValueError: malformed analytics input is a client error and must
-    not silently fall back to a different financial reporting period.
-    """
-    preset = (request.GET.get("range") or "30").strip()
-    today = datetime.now(UTC).date()
-    if preset in {"7", "30", "90"}:
-        days = int(preset)
-        return preset, today - timedelta(days=days - 1), today
-    if preset != "custom":
-        raise ValueError("range must be 7, 30, 90, or custom.")
-    try:
-        start = date.fromisoformat(request.GET["start"])
-        end = date.fromisoformat(request.GET["end"])
-    except (KeyError, ValueError):
-        raise ValueError("Custom ranges require valid start and end dates.") from None
-    if end < start:
-        raise ValueError("End date must be on or after start date.")
-    if (end - start).days > 365:
-        raise ValueError("Custom ranges cannot exceed 366 days.")
-    return preset, start, end
-
-
-def _revenue_lot(request: HttpRequest) -> ParkingLot | None:
-    """Resolve the optional analytics lot filter without widening bad input."""
-    raw_lot = (request.GET.get("lot") or "").strip()
-    if not raw_lot or raw_lot == "all":
-        return None
-    try:
-        return ParkingLot.objects.get(pk=int(raw_lot))
-    except (ValueError, ParkingLot.DoesNotExist):
-        raise Http404("Unknown parking lot") from None
-
-
-def _money(value) -> str:
-    """Serialize money as an exact two-decimal string for Chart.js consumers."""
-    return str((value or Decimal("0.00")).quantize(Decimal("0.01")))
-
-
-@staff_required
-@require_GET
-def revenue_data(request: HttpRequest) -> JsonResponse:
-    """
-    Return UTC revenue summaries plus dense daily, lot, and hourly chart series.
-
-    Zero-filled dates/hours keep chart axes stable even when no sessions closed.
-    """
-    try:
-        preset, start_date, end_date = _parse_revenue_range(request)
-    except ValueError as exc:
-        return JsonResponse({"error": str(exc)}, status=400)
-    try:
-        selected_lot = _revenue_lot(request)
-    except Http404:
-        # Keep the JSON contract intact: the Chart.js client cannot parse
-        # Django's default HTML 404 page.
-        return JsonResponse({"error": "Unknown parking lot."}, status=404)
-    start = datetime.combine(start_date, time.min, tzinfo=UTC)
-    end_exclusive = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=UTC)
-    queryset = ParkingSession.objects.filter(
-        status=ParkingSession.Status.COMPLETED,
-        exit_time__gte=start,
-        exit_time__lt=end_exclusive,
-    )
-    if selected_lot is not None:
-        queryset = queryset.filter(lot=selected_lot)
-
-    summary = queryset.aggregate(
-        total_revenue=Sum("charge_amount"),
-        session_count=Count("pk"),
-        average_charge=Avg("charge_amount"),
-        average_duration_seconds=Avg("duration_seconds"),
-    )
-    daily_rows = {
-        row["day"]: row
-        for row in queryset.annotate(day=TruncDate("exit_time", tzinfo=UTC))
-        .values("day")
-        .annotate(revenue=Sum("charge_amount"), session_count=Count("pk"))
-        .order_by("day")
-    }
-    daily = []
-    cursor = start_date
-    while cursor <= end_date:
-        row = daily_rows.get(cursor, {})
-        daily.append(
-            {
-                "date": cursor.isoformat(),
-                "revenue": _money(row.get("revenue")),
-                "session_count": row.get("session_count", 0),
-            }
-        )
-        cursor += timedelta(days=1)
-
-    by_lot = [
-        {
-            "lot_id": row["lot_id"],
-            "lot_name": row["lot__name"],
-            "revenue": _money(row["revenue"]),
-            "session_count": row["session_count"],
-        }
-        for row in queryset.values("lot_id", "lot__name")
-        .annotate(revenue=Sum("charge_amount"), session_count=Count("pk"))
-        .order_by("lot__name")
-    ]
-    hourly_rows = {
-        row["hour"]: row
-        for row in queryset.annotate(hour=ExtractHour("exit_time", tzinfo=UTC))
-        .values("hour")
-        .annotate(revenue=Sum("charge_amount"), session_count=Count("pk"))
-        .order_by("hour")
-    }
-    hourly = [
-        {
-            "hour": hour,
-            "revenue": _money(hourly_rows.get(hour, {}).get("revenue")),
-            "session_count": hourly_rows.get(hour, {}).get("session_count", 0),
-        }
-        for hour in range(24)
-    ]
-    return JsonResponse(
-        {
-            "range": {
-                "preset": preset,
-                "start": start_date.isoformat(),
-                "end": end_date.isoformat(),
-                "timezone": "UTC",
-            },
-            "lot": (
-                {"id": selected_lot.pk, "name": selected_lot.name}
-                if selected_lot
-                else None
-            ),
-            "summary": {
-                "total_revenue": _money(summary["total_revenue"]),
-                "session_count": summary["session_count"],
-                "average_charge": _money(summary["average_charge"]),
-                "average_duration_seconds": int(
-                    summary["average_duration_seconds"] or 0
-                ),
-            },
-            "daily": daily,
-            "by_lot": by_lot,
-            "hourly": hourly,
-        }
-    )
-
-
-@staff_required
-@require_GET
-def event_image(request: HttpRequest, event_id: int) -> FileResponse:
-    """
-    Serve a plate image only to authenticated staff.
-
-    Images are deliberately absent from public MEDIA_URL routing. Opening through
-    Django storage also works for local and remote backends, while ``private,
-    no-store`` prevents browsers and shared proxies from retaining plate data.
-    """
-    event = get_object_or_404(PlateDetectionEvent, pk=event_id)
-    stored_name = event.image.name
-    if not stored_name:
-        raise Http404
-    storage_path = PurePosixPath(stored_name)
-    if (
-        storage_path.is_absolute()
-        or ".." in storage_path.parts
-        or not storage_path.parts
-        or storage_path.parts[0] != "plates"
-    ):
-        logger.error("Event %s references an unsafe image name", event.pk)
-        raise Http404
-
-    content_types = {
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".png": "image/png",
-    }
-    content_type = content_types.get(Path(stored_name).suffix.lower())
-    if content_type is None:
-        logger.error("Event %s references an unsupported image extension", event.pk)
-        raise Http404
-
-    try:
-        image_file = default_storage.open(stored_name, "rb")
-    except (FileNotFoundError, OSError, SuspiciousFileOperation):
-        logger.warning("Stored image missing for event %s", event.pk)
-        raise Http404 from None
-
-    response = FileResponse(
-        image_file,
-        content_type=content_type,
-        as_attachment=False,
-        filename=f"plate-event-{event.pk}{Path(stored_name).suffix.lower()}",
-    )
-    response["Cache-Control"] = "private, no-store"
-    return response

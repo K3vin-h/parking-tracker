@@ -12,8 +12,8 @@ A parking lot management system that uses computer vision to read license plates
 - [Session & Billing](#session--billing)
 - [Creating the Dataset for Training](#creating-the-dataset-for-training)
 - [Web Application](#web-application)
-- [Checking Day 9 and Day 10](#checking-day-9-and-day-10)
 - [Docker](#docker)
+- [Security](#security)
 
 ---
 
@@ -583,6 +583,34 @@ Confidence indicators use consistent fixed display bands:
 - Red: `< 60%`
 
 
+## Scheduled maintenance (image retention)
+
+`cleanup_old_images` deletes uploaded plate images older than each lot's
+`image_retention_days` setting (privacy and disk retention) — it clears the
+`image` field on the `PlateDetectionEvent` row but **keeps** the session and
+event records intact for billing and audit purposes.
+
+A lot whose `image_retention_days` is `NULL` (unset) is treated as "keep
+forever" and is skipped entirely by the command.
+
+**Preview without deleting** (always safe to run):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml exec -T web \
+    python manage.py cleanup_old_images --dry-run
+```
+
+**Host crontab — run daily at 02:00:**
+
+```
+0 2 * * * cd /path/to/parking-tracker && docker compose -f docker-compose.yml -f docker-compose.prod.yml exec -T web python manage.py cleanup_old_images
+```
+
+Orchestrators can use a native scheduler instead — for example, a Kubernetes
+`CronJob` running `python manage.py cleanup_old_images` directly in the web pod.
+
+---
+
 ## Docker
 
 The application runs as two containers orchestrated by Docker Compose:
@@ -608,3 +636,43 @@ docker-compose exec web python manage.py createsuperuser
 # Run the test suite
 docker-compose exec web pytest --cov=apps/accounts --cov=apps/parking --cov-fail-under=80
 ```
+
+### Production
+
+The base `docker-compose.yml` targets local development (runserver, live code
+mount). For production, layer `docker-compose.prod.yml` on top — it swaps in
+Gunicorn, installs runtime-only dependencies, drops the dev source bind mount,
+and publishes port 8000 on host loopback only (front it with a reverse proxy):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build -d
+```
+
+> **Requires Docker Compose ≥ 2.24.** The override uses the `!override` tag to
+> drop the development bind mount. On older Compose, that tag is ignored and the
+> mount is silently kept — re-exposing host source and `.env` inside the
+> container. Verify with `docker compose version` before deploying.
+
+---
+
+## Security
+
+The following protections have been verified by an OWASP Top 10 audit of the
+codebase (branch `feat/ops-hardening`, PR #12).
+
+| Area | Protection |
+| :--- | :--- |
+| **Access control** | Every operator page and dashboard API requires an authenticated staff account (`is_staff = True`). Login and Django auth routes remain public. |
+| **Image uploads** | Declared MIME type, Pillow structure, and format checks run before any CV decode. Uploads are capped at 10 MB (compressed) and 12 MP (pre-decode). Files are saved under randomized names in private storage. |
+| **Plate images** | Never served via public `MEDIA_URL`. Only accessible through the authenticated `GET /api/events/<id>/image/` endpoint, which validates the stored path (must start with `plates/`, no `..`, extension allowlist) and sets `Cache-Control: private, no-store` on every response. |
+| **State-changing endpoints** | CSRF protection on all forms and PATCH endpoints. `correct_event` additionally uses `select_for_update()` inside `transaction.atomic()` to prevent concurrent double-correction. |
+| **Injection** | Parameterized Django ORM throughout — no raw SQL. Revenue date inputs parsed with `date.fromisoformat()` (raises `ValueError` on bad input → 400). Lot IDs cast to `int()` before ORM lookup. |
+| **Secrets** | All secrets via environment variables or a host `.env` file. `.dockerignore` excludes `.env` from the image build so secrets are never baked in. |
+| **Production deployment** | Gunicorn runs behind a reverse proxy. Port 8000 is bound to host loopback only (`127.0.0.1`). The dev source bind mount is dropped in the production Compose override. A startup guard in `entrypoint.sh` aborts the container if `/app/.env` is present in a non-debug run, detecting a silently failed bind-mount drop. |
+
+### Known follow-ups
+
+A dedicated security audit will add a production Content-Security-Policy header,
+disable HTMX `allowEval`/`allowScriptTags` to align with that policy, and confirm
+that `MEDIA_URL` is fully blocked at the infrastructure level so raw plate images
+are unreachable outside the authenticated image endpoint.
