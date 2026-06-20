@@ -72,7 +72,9 @@ Copy the example env file and fill in values:
 cp .env.example .env
 ```
 
-Required variables: `SECRET_KEY`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `DEBUG`.
+Required variables: `SECRET_KEY`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, and
+`DEBUG`. Compose maps the three `DB_*` values to PostgreSQL's internal
+`POSTGRES_*` variables, so configure the `DB_*` names shown in `.env.example`.
 
 ### 2. Start services
 
