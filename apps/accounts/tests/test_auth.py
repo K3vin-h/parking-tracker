@@ -44,9 +44,9 @@ def regular_user(db):
     tells pytest-django that this fixture needs database access.
     """
     return User.objects.create_user(
-        username='testuser',
-        email='testuser@example.com',
-        password='testpassword123',
+        username="testuser",
+        email="testuser@example.com",
+        password="testpassword123",
     )
 
 
@@ -64,7 +64,7 @@ class TestLoginPage:
           3. The template renders without errors
         """
         # reverse() looks up the URL name — 'login' is provided by django.contrib.auth.urls
-        url = reverse('login')
+        url = reverse("login")
         response = client.get(url)
         assert response.status_code == 200
 
@@ -74,12 +74,12 @@ class TestLoginPage:
 
         Tests that the template is rendering the Django form correctly.
         """
-        url = reverse('login')
+        url = reverse("login")
         response = client.get(url)
         content = response.content.decode()
         # Check that the rendered page contains form input fields
         assert 'type="password"' in content, "Login page must have a password field"
-        assert '<form' in content, "Login page must have a form element"
+        assert "<form" in content, "Login page must have a form element"
 
     def test_valid_login_redirects(self, client, regular_user):
         """
@@ -88,15 +88,18 @@ class TestLoginPage:
         Django's LoginView checks credentials and redirects on success.
         We verify it redirects to the right URL (configured in settings.py).
         """
-        url = reverse('login')
-        response = client.post(url, {
-            'username': 'testuser',
-            'password': 'testpassword123',
-        })
+        url = reverse("login")
+        response = client.post(
+            url,
+            {
+                "username": "testuser",
+                "password": "testpassword123",
+            },
+        )
         # 302 is a redirect response
         assert response.status_code == 302
         # The redirect should go to LOGIN_REDIRECT_URL
-        assert response['Location'] == '/'
+        assert response["Location"] == "/"
 
     def test_invalid_login_stays_on_login_page(self, client, regular_user):
         """
@@ -105,11 +108,14 @@ class TestLoginPage:
         Django doesn't redirect on failure — it re-renders the login page with
         error messages. This is why we check for 200 (not 302) on failure.
         """
-        url = reverse('login')
-        response = client.post(url, {
-            'username': 'testuser',
-            'password': 'wrongpassword',
-        })
+        url = reverse("login")
+        response = client.post(
+            url,
+            {
+                "username": "testuser",
+                "password": "wrongpassword",
+            },
+        )
         assert response.status_code == 200
 
     def test_unknown_user_login_fails(self, client):
@@ -120,11 +126,14 @@ class TestLoginPage:
         wrong username AND wrong password — this prevents username enumeration
         (an attacker can't tell if the username exists).
         """
-        url = reverse('login')
-        response = client.post(url, {
-            'username': 'doesnotexist',
-            'password': 'anypassword',
-        })
+        url = reverse("login")
+        response = client.post(
+            url,
+            {
+                "username": "doesnotexist",
+                "password": "anypassword",
+            },
+        )
         assert response.status_code == 200
 
 
@@ -142,11 +151,11 @@ class TestLogout:
         # First log in
         client.force_login(regular_user)
 
-        url = reverse('logout')
+        url = reverse("logout")
         response = client.post(url)  # Django 5.x requires POST for logout (security)
 
         assert response.status_code == 302
-        assert response['Location'] == '/login/'
+        assert response["Location"] == "/login/"
 
     def test_authenticated_user_can_logout(self, client, regular_user):
         """
@@ -157,13 +166,13 @@ class TestLogout:
         client.force_login(regular_user)
 
         # Verify they're logged in
-        assert '_auth_user_id' in client.session
+        assert "_auth_user_id" in client.session
 
         # Logout
-        client.post(reverse('logout'))
+        client.post(reverse("logout"))
 
         # Session should be cleared
-        assert '_auth_user_id' not in client.session
+        assert "_auth_user_id" not in client.session
 
     def test_base_template_uses_post_logout_form(self, regular_user):
         """
@@ -173,10 +182,10 @@ class TestLogout:
         vulnerable to crawlers or prefetchers ending a user's session.
         """
         html = render_to_string(
-            'base.html',
+            "base.html",
             {
-                'csrf_token': 'masked-csrf-token',
-                'user': regular_user,
+                "csrf_token": "masked-csrf-token",
+                "user": regular_user,
             },
         )
 
@@ -197,17 +206,38 @@ class TestBaseFrontendAssets:
         retaining Django's masked-token protection.
         """
         html = render_to_string(
-            'base.html',
+            "base.html",
             {
-                'csrf_token': 'masked-csrf-token',
+                "csrf_token": "masked-csrf-token",
             },
         )
 
-        assert 'hx-headers=' in html
-        assert 'X-CSRFToken' in html
-        assert 'masked-csrf-token' in html
-        assert '/static/js/vendor/htmx-2.0.10.min.js' in html
-        assert 'cdn.jsdelivr.net' not in html
+        assert "hx-headers=" in html
+        assert "X-CSRFToken" in html
+        assert "masked-csrf-token" in html
+        assert "/static/js/vendor/htmx-2.0.10.min.js" in html
+        assert "cdn.jsdelivr.net" not in html
+
+    def test_base_template_disables_htmx_eval_and_script_tags(self):
+        """
+        The shared shell must carry the htmx-config meta tag that disables eval()
+        and <script> execution in HTMX-swapped responses.
+
+        This defence-in-depth measure lets the CSP keep script-src at 'self' with
+        no 'unsafe-eval' or 'unsafe-inline'. Core HTMX attributes (hx-get,
+        hx-post, hx-trigger polling, hx-swap) are unaffected — only eval-based
+        filter expressions and response <script> tags are blocked.
+        """
+        html = render_to_string(
+            "base.html",
+            {
+                "csrf_token": "masked-csrf-token",
+            },
+        )
+
+        assert 'name="htmx-config"' in html
+        assert '"allowEval":false' in html
+        assert '"allowScriptTags":false' in html
 
     def test_chart_is_local_but_not_loaded_globally(self):
         """
@@ -216,13 +246,10 @@ class TestBaseFrontendAssets:
         The shared shell should not transfer the chart bundle on login or pages
         that contain no chart.
         """
-        html = render_to_string('base.html')
+        html = render_to_string("base.html")
 
-        assert (
-            '<script src="/static/js/vendor/chart-4.5.1.umd.min.js">'
-            not in html
-        )
-        assert finders.find('js/vendor/chart-4.5.1.umd.min.js') is not None
+        assert '<script src="/static/js/vendor/chart-4.5.1.umd.min.js">' not in html
+        assert finders.find("js/vendor/chart-4.5.1.umd.min.js") is not None
 
     def test_fonts_are_local_and_external_font_hosts_are_absent(self):
         """
@@ -231,19 +258,28 @@ class TestBaseFrontendAssets:
         Font files are resolved through Django staticfiles for deterministic,
         offline-capable rendering.
         """
-        html = render_to_string('base.html')
+        html = render_to_string("base.html")
 
-        assert 'fonts.googleapis.com' not in html
-        assert 'fonts.gstatic.com' not in html
-        assert finders.find(
-            'fonts/jetbrains-mono/JetBrainsMono-Regular.ttf',
-        ) is not None
-        assert finders.find(
-            'fonts/jetbrains-mono/JetBrainsMono-Medium.ttf',
-        ) is not None
-        assert finders.find(
-            'fonts/jetbrains-mono/JetBrainsMono-Bold.ttf',
-        ) is not None
+        assert "fonts.googleapis.com" not in html
+        assert "fonts.gstatic.com" not in html
+        assert (
+            finders.find(
+                "fonts/jetbrains-mono/JetBrainsMono-Regular.ttf",
+            )
+            is not None
+        )
+        assert (
+            finders.find(
+                "fonts/jetbrains-mono/JetBrainsMono-Medium.ttf",
+            )
+            is not None
+        )
+        assert (
+            finders.find(
+                "fonts/jetbrains-mono/JetBrainsMono-Bold.ttf",
+            )
+            is not None
+        )
 
 
 @pytest.mark.django_db
@@ -258,10 +294,10 @@ class TestProtectedAccess:
         (or regular non-staff users) are redirected to the admin's own
         login URL (which Django routes to our LOGIN_URL).
         """
-        response = client.get('/admin/')
+        response = client.get("/admin/")
         # The admin redirects unauthenticated users
         assert response.status_code == 302
-        assert '/login' in response['Location'] or 'admin' in response['Location']
+        assert "/login" in response["Location"] or "admin" in response["Location"]
 
     # NOTE: Additional protected URL tests for /upload/, /log/, /errors/, /revenue/,
     # and /settings/ will be added in Days 8–10 when those views are implemented.
