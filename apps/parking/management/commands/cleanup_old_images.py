@@ -5,7 +5,8 @@ Purges the image FILE and clears the image FIELD on PlateDetectionEvent rows
 that are older than each lot's configured image_retention_days setting, while
 KEEPING the event row itself so that plate text, confidence scores, and
 timestamps survive as an audit record.  Lots with image_retention_days=None
-are skipped (null means "keep forever").
+are skipped (null means "keep forever"). Unresolved review-queue events keep
+their images until an operator corrects them, even after the retention cutoff.
 
 USAGE:
   docker-compose exec web python manage.py cleanup_old_images
@@ -37,6 +38,7 @@ class Command(BaseCommand):
     help = (
         "Purge uploaded plate images older than each lot's image_retention_days setting "
         "(deletes the image file and clears the image field but keeps the event record). "
+        "Unresolved review-queue events are preserved until corrected. "
         "Lots with image_retention_days=None are skipped. "
         "Use --dry-run to preview what would be cleared without making changes."
     )
@@ -73,20 +75,31 @@ class Command(BaseCommand):
             lot = lot_settings.lot
             cutoff = timezone.now() - timedelta(days=lot_settings.image_retention_days)
 
-            # Events in this lot, older than the cutoff, that still hold an image.
+            # Corrected/reviewed events in this lot, older than the cutoff, that
+            # still hold an image. Unresolved queue events must keep their image:
+            # operators cannot safely correct unreadable/low-confidence plates
+            # without the original evidence, and the queue always displays it.
             # exclude(image='') keeps the command idempotent: once an image is
             # purged the row is no longer re-counted on later runs. The direct lot
             # FK includes unmatched exit review events with session=None;
             # session__lot is a fallback for older rows where event.lot is NULL.
-            old_events = PlateDetectionEvent.objects.filter(
-                Q(lot=lot) | Q(lot__isnull=True, session__lot=lot),
-                timestamp__lt=cutoff,
-            ).exclude(image="")
+            old_events = (
+                PlateDetectionEvent.objects.filter(
+                    Q(lot=lot) | Q(lot__isnull=True, session__lot=lot),
+                    timestamp__lt=cutoff,
+                )
+                .exclude(
+                    Q(manually_corrected=False)
+                    & (Q(is_low_confidence=True) | Q(session__isnull=True))
+                )
+                .exclude(image="")
+            )
 
             count = old_events.count()
             if count == 0:
                 self.stdout.write(
-                    f'  "{lot.name}": no images older than {lot_settings.image_retention_days} days.'
+                    f'  "{lot.name}": no eligible images older than '
+                    f"{lot_settings.image_retention_days} days."
                 )
                 continue
 

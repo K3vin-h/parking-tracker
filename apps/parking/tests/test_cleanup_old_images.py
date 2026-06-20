@@ -3,9 +3,9 @@ Tests for the cleanup_old_images management command.
 
 WHY THIS FILE EXISTS:
   Image retention is part of the privacy boundary for uploaded plate photos.
-  The command must include both normal session-linked events and unmatched
-  review-queue events, because both store vehicle images under the same lot
-  retention policy.
+  The command must preserve unresolved review-queue images until correction,
+  because operators need that evidence to verify low-confidence and unmatched
+  detections. Once reviewed, those images follow the normal lot retention policy.
 
   Critically, the command purges image FILES and clears the image FIELD while
   KEEPING the PlateDetectionEvent row — so audit data (plate text, confidence,
@@ -32,8 +32,8 @@ from apps.parking.models import (
 class TestCleanupOldImages:
     """Regression tests for lot-scoped image cleanup selection."""
 
-    def test_dry_run_counts_sessionless_lot_events(self):
-        """Unmatched exit events with session=None still follow lot retention."""
+    def test_dry_run_skips_unresolved_sessionless_lot_events(self):
+        """Unmatched events keep their evidence until an operator corrects them."""
         lot = ParkingLot.objects.create(name="Cleanup Lot")
         LotSettings.objects.create(lot=lot, image_retention_days=1)
         event = PlateDetectionEvent.objects.create(
@@ -52,7 +52,96 @@ class TestCleanupOldImages:
         stdout = StringIO()
         call_command("cleanup_old_images", "--dry-run", stdout=stdout)
 
-        assert '"Cleanup Lot": would clear 1 image(s)' in stdout.getvalue()
+        assert '"Cleanup Lot": no eligible images older than 1 days.' in (
+            stdout.getvalue()
+        )
+        event.refresh_from_db()
+        assert event.image.name == "plates/sessionless-old.jpg"
+
+    def test_cleanup_does_not_delete_unresolved_review_image(self):
+        """The live cleanup path must not touch evidence still pending review."""
+        from unittest.mock import patch
+
+        lot = ParkingLot.objects.create(name="Pending Review Lot")
+        LotSettings.objects.create(lot=lot, image_retention_days=1)
+        event = PlateDetectionEvent.objects.create(
+            session=None,
+            lot=lot,
+            image="plates/pending-review-old.jpg",
+            raw_plate_text="",
+            confidence_score=0.0,
+            event_type="entry",
+            is_low_confidence=True,
+        )
+        PlateDetectionEvent.objects.filter(pk=event.pk).update(
+            timestamp=timezone.now() - timedelta(days=2)
+        )
+
+        with patch(
+            "django.core.files.storage.FileSystemStorage.delete"
+        ) as delete_image:
+            call_command("cleanup_old_images")
+
+        delete_image.assert_not_called()
+        event.refresh_from_db()
+        assert event.image.name == "plates/pending-review-old.jpg"
+
+    def test_dry_run_counts_corrected_sessionless_lot_events(self):
+        """A reviewed sessionless event returns to the normal retention policy."""
+        lot = ParkingLot.objects.create(name="Corrected Cleanup Lot")
+        LotSettings.objects.create(lot=lot, image_retention_days=1)
+        event = PlateDetectionEvent.objects.create(
+            session=None,
+            lot=lot,
+            image="plates/sessionless-corrected-old.jpg",
+            raw_plate_text="NOENTRY",
+            confidence_score=0.8,
+            event_type="exit",
+            is_low_confidence=True,
+            manually_corrected=True,
+            corrected_plate="ABC123",
+        )
+        PlateDetectionEvent.objects.filter(pk=event.pk).update(
+            timestamp=timezone.now() - timedelta(days=2)
+        )
+
+        stdout = StringIO()
+        call_command("cleanup_old_images", "--dry-run", stdout=stdout)
+
+        assert '"Corrected Cleanup Lot": would clear 1 image(s)' in stdout.getvalue()
+
+    def test_dry_run_skips_unresolved_low_confidence_session_event(self):
+        """A linked low-confidence event also stays protected until review."""
+        lot = ParkingLot.objects.create(name="Low Confidence Cleanup Lot")
+        LotSettings.objects.create(lot=lot, image_retention_days=1)
+        session = ParkingSession.objects.create(
+            plate_text="LOW123",
+            lot=lot,
+            entry_time=timezone.now() - timedelta(days=3),
+            status="active",
+        )
+        event = PlateDetectionEvent.objects.create(
+            session=session,
+            lot=lot,
+            image="plates/low-confidence-old.jpg",
+            raw_plate_text="LOWI23",
+            confidence_score=0.2,
+            event_type="entry",
+            is_low_confidence=True,
+        )
+        PlateDetectionEvent.objects.filter(pk=event.pk).update(
+            timestamp=timezone.now() - timedelta(days=2)
+        )
+
+        stdout = StringIO()
+        call_command("cleanup_old_images", "--dry-run", stdout=stdout)
+
+        assert (
+            '"Low Confidence Cleanup Lot": no eligible images older than 1 days.'
+            in stdout.getvalue()
+        )
+        event.refresh_from_db()
+        assert event.image.name == "plates/low-confidence-old.jpg"
 
     def test_dry_run_counts_session_event_with_null_lot(self):
         """Legacy session-linked events with lot=None still clean via session.lot."""
@@ -117,6 +206,8 @@ class TestCleanupOldImages:
                     raw_plate_text="REALFILE",
                     confidence_score=0.9,
                     event_type="entry",
+                    manually_corrected=True,
+                    corrected_plate="REALFILE",
                 )
                 PlateDetectionEvent.objects.filter(pk=event.pk).update(
                     timestamp=timezone.now() - timedelta(days=2)
@@ -209,6 +300,8 @@ class TestCleanupOldImages:
             raw_plate_text="DRYRUN",
             confidence_score=0.9,
             event_type="entry",
+            manually_corrected=True,
+            corrected_plate="DRYRUN",
         )
         PlateDetectionEvent.objects.filter(pk=event.pk).update(
             timestamp=timezone.now() - timedelta(days=2)
@@ -277,6 +370,8 @@ class TestCleanupOldImages:
             raw_plate_text="FLAKY",
             confidence_score=0.9,
             event_type="entry",
+            manually_corrected=True,
+            corrected_plate="FLAKY",
         )
         PlateDetectionEvent.objects.filter(pk=event.pk).update(
             timestamp=timezone.now() - timedelta(days=2)
