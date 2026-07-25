@@ -68,6 +68,36 @@ def test_trusted_proxy_uses_forwarded_client_identity(settings):
 
 
 @pytest.mark.django_db
+def test_trusted_proxy_requires_single_forwarded_address(settings):
+    """Multi-hop X-Forwarded-For from a trusted proxy must not become client identity."""
+    settings.TRUSTED_PROXY_IPS = frozenset({"10.0.0.10"})
+
+    @rate_limit(scope="proxy-multihop-test", limit=1, window_seconds=60)
+    def endpoint(request):
+        return HttpResponse("ok")
+
+    factory = RequestFactory()
+    first = endpoint(
+        factory.post(
+            "/",
+            REMOTE_ADDR="10.0.0.10",
+            HTTP_X_FORWARDED_FOR="198.51.100.1, 203.0.113.9",
+        )
+    )
+    # Both requests collapse to the proxy itself because the header is invalid.
+    second = endpoint(
+        factory.post(
+            "/",
+            REMOTE_ADDR="10.0.0.10",
+            HTTP_X_FORWARDED_FOR="198.51.100.2, 203.0.113.10",
+        )
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 429
+
+
+@pytest.mark.django_db
 def test_untrusted_peer_cannot_spoof_forwarded_identity(settings):
     """Forwarding headers from public peers must not bypass an IP limit."""
     settings.TRUSTED_PROXY_IPS = frozenset({"10.0.0.10"})
