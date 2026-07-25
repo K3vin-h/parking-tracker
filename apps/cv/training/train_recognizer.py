@@ -53,7 +53,10 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Subset, random_split
 
 from apps.cv.models.recognizer import PlateRecognizerCRNN
-from apps.cv.training.augment import RecognizerAugment
+from apps.cv.training.augment import (
+    NORMALIZED_PREPROCESSING_VERSION,
+    RecognizerAugment,
+)
 from apps.cv.training.dataset import (
     IDX_TO_CHAR,
     PlateRecognizerDataset,
@@ -633,7 +636,15 @@ def main() -> None:
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_epoch = epoch
-            torch.save(model.state_dict(), output_path)
+            # Store the preprocessing contract beside the weights so inference
+            # can reject ambiguous files instead of guessing their input scale.
+            torch.save(
+                {
+                    "preprocessing_version": NORMALIZED_PREPROCESSING_VERSION,
+                    "state_dict": model.state_dict(),
+                },
+                output_path,
+            )
             logger.info(
                 "  ↳ New best (val_loss=%.6f) → saved to %s", best_val_loss, output_path
             )
@@ -643,10 +654,7 @@ def main() -> None:
         best_val_loss,
         output_path,
     )
-    logger.info(
-        "Load with: model.load_state_dict(torch.load(%r, weights_only=True))",
-        str(output_path),
-    )
+    logger.info("Load through PlateRecognitionPipeline: %s", output_path)
 
     # ── Training curve ─────────────────────────────────────────────────────
     # WHY two separate guards: bundling plot-save and viewer-launch in one

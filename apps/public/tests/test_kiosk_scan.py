@@ -368,6 +368,61 @@ class TestKioskAuthorization:
         assert different_image.status_code == 200
         assert alternating_replay.status_code == 403
 
+    def test_stale_nonce_response_reissues_nonce_for_retry(
+        self,
+        client,
+        lot_settings,
+    ):
+        """A lost successful response must not strand later kiosk retries."""
+        _activate(client, event_type="entry", lot=lot_settings.lot.name)
+        lost_response_nonce = client.session["kiosk_scan_nonce"]
+        storage, factory = _mocks()
+        with (
+            patch("apps.dashboard.scan_core.default_storage", storage),
+            patch("apps.dashboard.scan_core.get_pipeline", factory),
+        ):
+            client.post(
+                SCAN_URL,
+                {
+                    "event_type": "entry",
+                    "lot": lot_settings.lot.name,
+                    "kiosk_nonce": lost_response_nonce,
+                    "image": _image(content=_real_image_bytes()),
+                },
+            )
+            stale_response = client.post(
+                SCAN_URL,
+                {
+                    "event_type": "entry",
+                    "lot": lot_settings.lot.name,
+                    "kiosk_nonce": lost_response_nonce,
+                    "image": _image(
+                        content=_real_image_bytes("PNG"),
+                        content_type="image/png",
+                        name="retry.png",
+                    ),
+                },
+            )
+            replacement_nonce = stale_response.headers.get("X-Kiosk-Nonce", "")
+            retry = client.post(
+                SCAN_URL,
+                {
+                    "event_type": "entry",
+                    "lot": lot_settings.lot.name,
+                    "kiosk_nonce": replacement_nonce,
+                    "image": _image(
+                        content=_real_image_bytes("PNG"),
+                        content_type="image/png",
+                        name="retry.png",
+                    ),
+                },
+            )
+
+        assert stale_response.status_code == 403
+        assert replacement_nonce
+        assert replacement_nonce != lost_response_nonce
+        assert retry.status_code == 200
+
     def test_failed_scan_allows_same_image_retry(self, client, lot_settings):
         """A rejected upload must not blacklist the same photo for the replay window."""
         _activate(client, event_type="entry", lot=lot_settings.lot.name)
@@ -491,7 +546,7 @@ def test_scan_nonce_has_one_atomic_concurrent_winner(client, lot_settings):
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(lambda _: consume(), range(2)))
 
-    assert sum(result is not None for result in results) == 1
+    assert sum(result is not None and result.accepted for result in results) == 1
 
 
 # ── Privacy: never leak image route / event id / balance ──────────────────────

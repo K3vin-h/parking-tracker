@@ -20,6 +20,7 @@ import hashlib
 import hmac
 import logging
 import secrets
+from dataclasses import dataclass
 from datetime import timedelta
 from functools import wraps
 
@@ -43,6 +44,21 @@ from apps.parking.models import (
 from .ratelimit import rate_limit
 
 logger = logging.getLogger("apps.public")
+
+
+@dataclass(frozen=True)
+class KioskRequestDecision:
+    """
+    Result of validating one kiosk request under the capability row lock.
+
+    WHY a structured result: a stale one-time nonce is recoverable for an
+    otherwise valid capability, while a missing, expired, or wrongly scoped
+    capability must remain a plain rejection with no replacement credential.
+    """
+
+    accepted: bool
+    next_nonce: str
+    image_digest: str = ""
 
 
 class KioskView(TemplateView):
@@ -130,9 +146,9 @@ def _issue_kiosk_nonce(request: HttpRequest) -> str:
     return nonce
 
 
-def _consume_kiosk_request(request: HttpRequest) -> tuple[str, str] | None:
+def _consume_kiosk_request(request: HttpRequest) -> KioskRequestDecision | None:
     """
-    Atomically validate scope/nonce and return (next_nonce, image_digest).
+    Atomically validate scope/nonce and return the locked request decision.
 
     The image digest is recorded here so concurrent identical uploads lose the
     race under the same row lock. Callers must forget the digest when the scan
@@ -160,7 +176,7 @@ def _consume_kiosk_request(request: HttpRequest) -> tuple[str, str] | None:
         )
         if capability is None:
             return None
-        valid = (
+        valid_scope = (
             secrets.compare_digest(
                 capability.token_fingerprint,
                 configured_fingerprint,
@@ -170,14 +186,24 @@ def _consume_kiosk_request(request: HttpRequest) -> tuple[str, str] | None:
                 or submitted_event_type == capability.event_type
             )
             and (not submitted_lot or submitted_lot == capability.lot.name)
-            and bool(submitted_nonce)
-            and secrets.compare_digest(
-                _nonce_hash(submitted_nonce),
-                capability.nonce_hash,
-            )
         )
-        if not valid:
+        if not valid_scope:
             return None
+        valid_nonce = bool(submitted_nonce) and secrets.compare_digest(
+            _nonce_hash(submitted_nonce),
+            capability.nonce_hash,
+        )
+        if not valid_nonce:
+            # Only an active, correctly scoped capability reaches this branch.
+            # Rotate under the same row lock so a lost prior response receives
+            # one replacement without reviving expired/deleted capabilities.
+            capability.nonce_hash = _nonce_hash(next_nonce)
+            capability.save(update_fields=["nonce_hash"])
+            request.session["kiosk_scan_nonce"] = next_nonce
+            return KioskRequestDecision(
+                accepted=False,
+                next_nonce=next_nonce,
+            )
         replay_cutoff = now - timedelta(
             seconds=settings.KIOSK_IMAGE_REPLAY_SECONDS
         )
@@ -196,7 +222,11 @@ def _consume_kiosk_request(request: HttpRequest) -> tuple[str, str] | None:
                 seen_at=now,
             )
     request.session["kiosk_scan_nonce"] = next_nonce
-    return next_nonce, image_digest
+    return KioskRequestDecision(
+        accepted=True,
+        next_nonce=next_nonce,
+        image_digest=image_digest,
+    )
 
 
 def _forget_image_digest(request: HttpRequest, image_digest: str) -> None:
@@ -386,16 +416,19 @@ def kiosk_scan(request: HttpRequest):
     errors (bad image, wrong type) render as HTML 200 for HTMX (which does not swap
     4xx by default) while JSON clients keep the real status code.
     """
-    next_nonce_and_digest = _consume_kiosk_request(request)
-    if next_nonce_and_digest is None:
+    decision = _consume_kiosk_request(request)
+    if decision is None:
         logger.warning("Rejected kiosk scan with invalid scope or nonce")
         return JsonResponse({"error": "Invalid kiosk request."}, status=403)
-    next_nonce, image_digest = next_nonce_and_digest
+    if not decision.accepted:
+        logger.warning("Rejected kiosk scan with a stale one-time nonce")
+        response = JsonResponse({"error": "Invalid kiosk request."}, status=403)
+        return _attach_nonce(response, decision.next_nonce)
 
     outcome = run_plate_scan(request)
     if outcome.outcome == "error":
         # Release the provisional replay mark so the driver can retry this photo.
-        _forget_image_digest(request, image_digest)
+        _forget_image_digest(request, decision.image_digest)
 
     payload = _public_payload(outcome)
     if _is_htmx(request):
@@ -406,4 +439,4 @@ def kiosk_scan(request: HttpRequest):
         )
     else:
         response = JsonResponse(payload, status=outcome.status)
-    return _attach_nonce(response, next_nonce)
+    return _attach_nonce(response, decision.next_nonce)
