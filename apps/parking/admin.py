@@ -211,13 +211,13 @@ class WalletTransactionInline(admin.TabularInline):
 
 
 @admin.register(Wallet)
-class WalletAdmin(admin.ModelAdmin):
+class WalletAdmin(AuditOnlyAdminMixin, admin.ModelAdmin):
     """
     Admin view for prepaid wallets — lets staff see balances and arrears.
 
-    Balance is read-only here: it is a cached total of the immutable ledger and
-    must only ever move through apps/parking/wallet.py, never by hand (a manual
-    edit would desync it from the transactions and corrupt the audit trail).
+    The entire record is audit-only here: balance changes must pass through
+    apps/parking/wallet.py, and deletion would either destroy an empty account or
+    attempt to remove protected ledger history.
     """
 
     list_display = ["user", "balance", "updated_at"]

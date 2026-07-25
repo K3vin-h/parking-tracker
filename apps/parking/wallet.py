@@ -27,6 +27,7 @@ import logging
 from decimal import Decimal
 
 from django.db import transaction
+from django.db.models import Sum
 
 from apps.parking.models import ParkingSession, Wallet, WalletTransaction
 
@@ -60,11 +61,20 @@ def credit_wallet(
     caller bug, and allowing it would let the top-up path be abused to forge
     debits. Deductions go through debit_wallet_for_session, not here.
 
-    Returns the refreshed wallet. Raises ValueError on a non-positive amount.
+    The provider confirmation reference is the idempotency key. Replaying the
+    same reference and amount for the same wallet returns the original result
+    without writing another credit. A reference reused for a different wallet or
+    amount is rejected as a connector integrity error.
+
+    Returns the refreshed wallet. Raises ValueError on invalid input or a
+    conflicting payment reference.
     """
     amount = Decimal(amount).quantize(_MONEY_QUANTUM)
     if amount <= 0:
         raise ValueError("Top-up amount must be positive.")
+    reference = reference.strip()
+    if not reference:
+        raise ValueError("Top-up requires a payment confirmation reference.")
 
     # Ensure the row exists, THEN lock it for the read-modify-write. Doing the
     # get_or_create separately (rather than select_for_update().get_or_create())
@@ -72,6 +82,31 @@ def credit_wallet(
     # same OneToOne wallet — same pattern as debit_wallet_for_session.
     Wallet.objects.get_or_create(user=user)
     wallet = Wallet.objects.select_for_update().get(user=user)
+    existing = (
+        WalletTransaction.objects.select_related("wallet")
+        .filter(
+            kind=WalletTransaction.Kind.TOPUP,
+            reference=reference,
+        )
+        .first()
+    )
+    if existing is not None:
+        if existing.wallet_id != wallet.pk or existing.amount != amount:
+            logger.error(
+                "Payment reference collision for wallet %s (existing wallet %s)",
+                wallet.pk,
+                existing.wallet_id,
+            )
+            raise ValueError(
+                "Payment reference belongs to a different wallet or amount."
+            )
+        logger.info(
+            "Ignored replayed top-up confirmation for wallet %s (ref=%s)",
+            wallet.pk,
+            reference,
+        )
+        return wallet
+
     WalletTransaction.objects.create(
         wallet=wallet,
         amount=amount,  # positive = credit
@@ -135,3 +170,74 @@ def debit_wallet_for_session(session: ParkingSession, charge: Decimal) -> Wallet
         wallet.balance,
     )
     return wallet
+
+
+@transaction.atomic
+def reconcile_wallet_for_session_owner(
+    session: ParkingSession,
+    previous_user_id: int | None,
+) -> None:
+    """
+    Move a completed session's net charge when staff corrects its owner.
+
+    WHY LEDGER ADJUSTMENTS: the original charge is immutable evidence, so a
+    correction must not edit or delete it. Instead, this function computes each
+    affected wallet's required net amount for the session and appends the exact
+    signed adjustment needed to reach that amount. Repeating a correction is
+    therefore idempotent, and moving a session back to an earlier owner remains
+    correct.
+
+    PRECONDITION: the caller has locked and saved `session` inside an atomic
+    transaction. The current `session.user_id` is the corrected owner.
+    """
+    if session.status != ParkingSession.Status.COMPLETED:
+        raise ValueError("Only completed session charges can be reconciled.")
+
+    charge = Decimal(session.charge_amount).quantize(_MONEY_QUANTUM)
+    if charge <= 0 or previous_user_id == session.user_id:
+        return
+
+    affected_user_ids = {
+        user_id
+        for user_id in (previous_user_id, session.user_id)
+        if user_id is not None
+    }
+    # Create any missing legacy wallet rows first, then acquire row locks in a
+    # deterministic order so simultaneous cross-owner corrections cannot deadlock.
+    for user_id in sorted(affected_user_ids):
+        Wallet.objects.get_or_create(user_id=user_id)
+    wallets = {
+        wallet.user_id: wallet
+        for wallet in Wallet.objects.select_for_update()
+        .filter(user_id__in=affected_user_ids)
+        .order_by("user_id")
+    }
+
+    for user_id in sorted(affected_user_ids):
+        wallet = wallets[user_id]
+        current_net = (
+            WalletTransaction.objects.filter(wallet=wallet, session=session).aggregate(
+                total=Sum("amount")
+            )["total"]
+            or Decimal("0.00")
+        )
+        expected_net = -charge if user_id == session.user_id else Decimal("0.00")
+        adjustment = (expected_net - current_net).quantize(_MONEY_QUANTUM)
+        if adjustment == 0:
+            continue
+
+        WalletTransaction.objects.create(
+            wallet=wallet,
+            amount=adjustment,
+            kind=WalletTransaction.Kind.ADJUSTMENT,
+            session=session,
+            description=f"Ownership correction for session {session.pk}",
+        )
+        wallet.balance = wallet.balance + adjustment
+        wallet.save(update_fields=["balance", "updated_at"])
+        logger.info(
+            "Wallet %s adjusted %s for corrected session %s",
+            wallet.pk,
+            adjustment,
+            session.pk,
+        )

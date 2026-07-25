@@ -461,7 +461,7 @@ class TestKioskBilling:
     def test_registered_exit_bills_wallet(self, client, parking_lot, lot_settings):
         user = User.objects.create_user(username="drv", password="x", email="d@e.com")
         plate = LicensePlate.objects.create(user=user, plate_text="ABC123")
-        credit_wallet(user, Decimal("20.00"))
+        credit_wallet(user, Decimal("20.00"), reference="kiosk-exit-credit")
         self._active(parking_lot, user=user, plate_obj=plate)
 
         data = _post_scan(client, event_type="exit", image=_image()).json()

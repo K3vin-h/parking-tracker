@@ -8,19 +8,20 @@ WHY THIS FILE EXISTS AS A SEAM:
   single, clearly-marked boundary where a real integration will drop in later.
 
   Everything above this line (wallet ledger, balance math) is production-grade and
-  stays. Only `charge_payment_method` is a stub. Replacing it with a real SDK call
-  is the entire integration effort.
+  stays. `PaymentConnector` is the narrow contract a real provider adapter will
+  implement later.
 
 SECURITY NOTE:
   A real implementation belongs behind server-side secrets (never in the client)
   and must verify the provider's response/signature before crediting a wallet.
-  This placeholder holds NO secrets and always "succeeds" — it must never run in a
-  deployment that handles real money without being replaced.
+  This placeholder holds NO secrets and deliberately FAILS CLOSED. The top-up page
+  remains available, but no spendable credit is created until a real connector
+  verifies a provider response and returns success.
 """
 
-import uuid
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Protocol
 
 
 @dataclass(frozen=True)
@@ -32,24 +33,43 @@ class PaymentResult:
     message: str = ""
 
 
-def charge_payment_method(user, amount: Decimal) -> PaymentResult:
-    """
-    Charge the user's external payment method for a top-up. PLACEHOLDER.
+class PaymentConnector(Protocol):
+    """Define the provider-confirmation boundary required before wallet credit."""
 
-    A real integration would call the provider here, wait for confirmation, and
-    return success only after the provider confirms the charge. This stub validates
-    the amount and returns a synthetic reference so the wallet-crediting flow (in
-    the view) is already correct end-to-end; swapping in the real call is all that
-    remains.
+    def charge(self, user, amount: Decimal) -> PaymentResult:
+        """Return success only after the provider confirms the external charge."""
+        ...
 
-    Returns a PaymentResult; the caller credits the wallet only when success=True.
-    """
-    if amount is None or Decimal(amount) <= 0:
+
+class PlaceholderPaymentConnector:
+    """Keep the integration seam explicit while refusing unverified payments."""
+
+    def charge(self, user, amount: Decimal) -> PaymentResult:
+        """Validate the request, then fail because no payment provider is wired."""
+        if amount is None or Decimal(amount) <= 0:
+            return PaymentResult(
+                success=False,
+                reference="",
+                message="Amount must be positive.",
+            )
         return PaymentResult(
-            success=False, reference="", message="Amount must be positive."
+            success=False,
+            reference="",
+            message="Payment connector is not configured. Contact an operator.",
         )
 
-    # Synthetic, obviously-fake reference so it's clear in logs/history this did
-    # not touch a real payment network.
-    reference = f"placeholder-{uuid.uuid4().hex[:16]}"
-    return PaymentResult(success=True, reference=reference)
+
+# WHY A MODULE-LEVEL CONNECTOR: the view depends only on charge_payment_method,
+# while a future provider adapter has one well-defined object to replace.
+_payment_connector: PaymentConnector = PlaceholderPaymentConnector()
+
+
+def charge_payment_method(user, amount: Decimal) -> PaymentResult:
+    """
+    Ask the configured connector to charge an external payment method.
+
+    WHY THIS WRAPPER: callers have one stable function while the placeholder can
+    later be replaced with a provider adapter that verifies signed confirmation.
+    The caller credits the wallet only when the result explicitly succeeds.
+    """
+    return _payment_connector.charge(user, amount)

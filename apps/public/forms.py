@@ -17,8 +17,8 @@ from apps.parking.services import normalize_plate
 
 User = get_user_model()
 
-# A sane ceiling so a single top-up can't inject an absurd balance via the
-# placeholder gateway. Real limits would come from the payment provider.
+# A sane ceiling so a single provider-confirmed top-up cannot inject an absurd
+# balance. A real connector may impose a lower provider-specific limit.
 MAX_TOPUP = Decimal("1000.00")
 
 
@@ -80,7 +80,7 @@ class PlateForm(forms.Form):
 
 
 class TopupForm(forms.Form):
-    """Add funds to the current user's wallet through the placeholder gateway."""
+    """Collect the amount a payment connector must confirm before wallet credit."""
 
     amount = forms.DecimalField(
         max_digits=10,

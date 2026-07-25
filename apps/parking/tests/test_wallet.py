@@ -19,6 +19,7 @@ from decimal import Decimal
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.db.models import ProtectedError
 from django.db.models import Sum
 from django.utils import timezone
 
@@ -92,6 +93,16 @@ class TestGetOrCreateWallet:
         assert wallet.balance == Decimal("0.00")
         assert Wallet.objects.filter(user=user).count() == 1
 
+    def test_wallet_with_ledger_history_cannot_be_deleted(self, user):
+        """Deleting a wallet must never cascade away its immutable ledger."""
+        wallet = credit_wallet(user, Decimal("25.00"), reference="paid-1")
+
+        with pytest.raises(ProtectedError):
+            wallet.delete()
+
+        assert Wallet.objects.filter(pk=wallet.pk).exists()
+        assert WalletTransaction.objects.filter(wallet=wallet).count() == 1
+
     def test_is_idempotent(self, user):
         first = get_or_create_wallet(user)
         second = get_or_create_wallet(user)
@@ -114,10 +125,33 @@ class TestCreditWallet:
         assert _reconciles(wallet)
 
     def test_multiple_credits_accumulate(self, user):
-        credit_wallet(user, Decimal("10.00"))
-        wallet = credit_wallet(user, Decimal("5.50"))
+        credit_wallet(user, Decimal("10.00"), reference="paid-10")
+        wallet = credit_wallet(user, Decimal("5.50"), reference="paid-550")
         assert wallet.balance == Decimal("15.50")
         assert wallet.transactions.count() == 2
+        assert _reconciles(wallet)
+
+    def test_replayed_payment_reference_is_idempotent(self, user):
+        """A provider retry must return the original credit without minting more."""
+        first = credit_wallet(user, Decimal("25.00"), reference="paid-replay")
+        second = credit_wallet(user, Decimal("25.00"), reference="paid-replay")
+
+        second.refresh_from_db()
+        assert second.pk == first.pk
+        assert second.balance == Decimal("25.00")
+        assert second.transactions.filter(reference="paid-replay").count() == 1
+        assert _reconciles(second)
+
+    def test_payment_reference_collision_is_rejected(self, user):
+        """One confirmation reference cannot authorize two different amounts."""
+        credit_wallet(user, Decimal("25.00"), reference="paid-collision")
+
+        with pytest.raises(ValueError, match="different wallet or amount"):
+            credit_wallet(user, Decimal("30.00"), reference="paid-collision")
+
+        wallet = Wallet.objects.get(user=user)
+        assert wallet.balance == Decimal("25.00")
+        assert wallet.transactions.filter(reference="paid-collision").count() == 1
         assert _reconciles(wallet)
 
     def test_zero_topup_rejected(self, user):
@@ -148,7 +182,7 @@ class TestDebitWallet:
         )
 
     def test_debit_reduces_balance_and_records_ledger(self, user, parking_lot):
-        credit_wallet(user, Decimal("20.00"))
+        credit_wallet(user, Decimal("20.00"), reference="exit-credit-1")
         session = self._completed_session(user, parking_lot, Decimal("5.00"))
         wallet = debit_wallet_for_session(session, Decimal("5.00"))
         assert wallet.balance == Decimal("15.00")
@@ -205,7 +239,7 @@ class TestExitDeductsWallet:
     def test_registered_exit_deducts_from_wallet(
         self, user, parking_lot, lot_settings, registered_plate
     ):
-        credit_wallet(user, Decimal("20.00"))
+        credit_wallet(user, Decimal("20.00"), reference="exit-credit-2")
         self._active(parking_lot, user=user, plate_obj=registered_plate)
         session = handle_exit("ABC123", 0.9, [], PLATE_IMAGE, parking_lot)
 
@@ -237,7 +271,7 @@ class TestExitDeductsWallet:
     def test_registered_grace_exit_charges_nothing(
         self, user, parking_lot, lot_settings, registered_plate
     ):
-        credit_wallet(user, Decimal("20.00"))
+        credit_wallet(user, Decimal("20.00"), reference="exit-credit-3")
         self._active(parking_lot, user=user, plate_obj=registered_plate, minutes_ago=5)
         session = handle_exit("ABC123", 0.9, [], PLATE_IMAGE, parking_lot)
         assert session.charge_amount == Decimal("0.00")

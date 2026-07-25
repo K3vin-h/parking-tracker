@@ -4,8 +4,12 @@ import pytest
 from django.contrib.admin.sites import AdminSite
 from django.test import RequestFactory
 
-from apps.parking.admin import ParkingSessionAdmin, PlateDetectionEventAdmin
-from apps.parking.models import ParkingSession, PlateDetectionEvent
+from apps.parking.admin import (
+    ParkingSessionAdmin,
+    PlateDetectionEventAdmin,
+    WalletAdmin,
+)
+from apps.parking.models import ParkingSession, PlateDetectionEvent, Wallet
 
 
 @pytest.fixture
@@ -19,6 +23,7 @@ def admin_request():
     [
         (ParkingSessionAdmin, ParkingSession),
         (PlateDetectionEventAdmin, PlateDetectionEvent),
+        (WalletAdmin, Wallet),
     ],
 )
 def test_audit_records_cannot_be_added_changed_or_deleted(
