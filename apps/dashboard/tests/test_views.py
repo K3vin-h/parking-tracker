@@ -57,7 +57,7 @@ class TestPageAuthorization:
 
     @pytest.mark.parametrize(
         "route_name",
-        ["dashboard", "upload", "log", "errors", "revenue", "settings"],
+        ["dashboard", "log", "errors", "revenue", "settings"],
     )
     def test_anonymous_user_is_redirected(self, client, route_name):
         """Prevent unauthenticated access before any page query or rendering."""
@@ -67,7 +67,7 @@ class TestPageAuthorization:
 
     @pytest.mark.parametrize(
         "route_name",
-        ["dashboard", "upload", "log", "errors", "revenue", "settings"],
+        ["dashboard", "log", "errors", "revenue", "settings"],
     )
     def test_non_staff_user_is_redirected(self, client, users, route_name):
         """Apply the requested login redirect consistently to authenticated drivers."""
@@ -354,14 +354,6 @@ class TestSettingsView:
         assert b"0.01" in response.content
         first.settings.refresh_from_db()
         assert first.settings.rate == Decimal("5.00")
-
-    def test_upload_page_renders_for_staff(self, client, users, lots):
-        """Expose upload controls with lot choices on initial GET."""
-        staff, _ = users
-        client.force_login(staff)
-        response = client.get(reverse("dashboard:upload"))
-        assert response.status_code == 200
-        assert b"Upload" in response.content
 
     def test_revenue_page_renders_with_range_preset(self, client, users, lots):
         """Render the analytics shell with the selected preset in context."""

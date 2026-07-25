@@ -98,8 +98,9 @@ class TestLoginPage:
         )
         # 302 is a redirect response
         assert response.status_code == 302
-        # The redirect should go to LOGIN_REDIRECT_URL
-        assert response["Location"] == "/"
+        # LOGIN_REDIRECT_URL now points at the post-login dispatcher, which then
+        # routes staff to the dashboard and residents to their wallet.
+        assert response["Location"] == "/post-login/"
 
     def test_invalid_login_stays_on_login_page(self, client, regular_user):
         """
@@ -141,11 +142,11 @@ class TestLoginPage:
 class TestLogout:
     """Tests for the logout flow."""
 
-    def test_logout_redirects_to_login(self, client, regular_user):
+    def test_logout_redirects_to_kiosk(self, client, regular_user):
         """
-        Logging out redirects to LOGOUT_REDIRECT_URL (/login/).
+        Logging out redirects to LOGOUT_REDIRECT_URL (the public gate kiosk, "/").
 
-        After logout, users should land on the login page — not get a 404
+        After logout, users should land on the public kiosk — not get a 404
         or be redirected to an external site.
         """
         # First log in
@@ -155,7 +156,7 @@ class TestLogout:
         response = client.post(url)  # Django 5.x requires POST for logout (security)
 
         assert response.status_code == 302
-        assert response["Location"] == "/login/"
+        assert response["Location"] == "/"
 
     def test_authenticated_user_can_logout(self, client, regular_user):
         """
@@ -217,7 +218,6 @@ class TestBaseFrontendAssets:
         assert "masked-csrf-token" in html
         assert "/static/js/vendor/htmx-2.0.10.min.js" in html
         assert "cdn.jsdelivr.net" not in html
-
     def test_base_template_disables_htmx_eval_and_script_tags(self):
         """
         The shared shell must carry the htmx-config meta tag that disables eval()

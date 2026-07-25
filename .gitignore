@@ -66,6 +66,7 @@ CLAUDE.md
 PLAN.md
 .claude/
 .claude.md
+.superpowers/
 
 # ── Synthetic training data (generated, not committed) ────────────────────────
 # Background images are real parking-lot photos supplied by the user.

@@ -1728,3 +1728,433 @@ svg {
     justify-content: flex-end;
     margin-top: 14px;
 }
+
+/* ============================================================================
+   PUBLIC SURFACE — gate kiosk + resident portal (China redesign)
+   Reuses the existing design tokens (:root). No hardcoded palette values.
+   ============================================================================ */
+
+/* --- Public shell -------------------------------------------------------- */
+.public-shell {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+}
+.public-topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0 1.25rem;
+    height: var(--topbar-height);
+    border-bottom: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+}
+.wordmark--public {
+    text-decoration: none;
+    color: var(--text-primary);
+}
+.public-nav {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+.public-nav__link {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 0.9rem;
+}
+.public-nav__link:hover,
+.public-nav__link.is-active {
+    color: var(--text-primary);
+}
+.public-nav__logout {
+    margin: 0;
+}
+.public-main {
+    flex: 1;
+    width: 100%;
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 2rem 1.25rem 3rem;
+}
+
+/* --- Gate kiosk ---------------------------------------------------------- */
+.kiosk {
+    max-width: 560px;
+    margin: 1rem auto;
+}
+.kiosk-panel {
+    position: relative;
+}
+.kiosk__card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    padding: 2rem;
+    text-align: center;
+    box-shadow: 0 20px 55px rgba(0, 0, 0, 0.22);
+}
+.kiosk__title {
+    font-size: 1.75rem;
+    margin: 0 0 0.25rem;
+}
+.kiosk__subtitle {
+    color: var(--text-secondary);
+    margin: 0 0 1.5rem;
+}
+.kiosk__form {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+    text-align: left;
+}
+.kiosk__review-copy {
+    text-align: center;
+}
+.kiosk__review-copy h2 {
+    margin: 0 0 0.25rem;
+    font-size: 1.15rem;
+}
+.kiosk__review-copy p {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+.kiosk__segment {
+    display: flex;
+    gap: 0.5rem;
+    border: 0;
+    padding: 0;
+    margin: 0;
+}
+.kiosk__segment-option {
+    flex: 1;
+    position: relative;
+    cursor: pointer;
+}
+.kiosk__segment-option input {
+    position: absolute;
+    opacity: 0;
+    inset: 0;
+    cursor: pointer;
+}
+.kiosk__segment-option span {
+    display: block;
+    text-align: center;
+    padding: 0.65rem;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+.kiosk__segment-option input:checked + span {
+    border-color: var(--accent-blue);
+    color: var(--text-primary);
+    box-shadow: inset 0 0 0 1px var(--accent-blue);
+}
+.kiosk__dropzone {
+    display: block;
+    position: relative;
+    border: 2px dashed var(--border-color);
+    border-radius: var(--radius);
+    padding: 1.75rem;
+    text-align: center;
+    cursor: pointer;
+    background: rgba(15, 17, 23, 0.32);
+    transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+.kiosk__dropzone:hover,
+.kiosk__dropzone.is-dragging,
+.kiosk__dropzone:focus-within {
+    border-color: var(--accent-blue);
+    background: rgba(59, 130, 246, 0.06);
+}
+.kiosk__file-input {
+    position: absolute;
+    opacity: 0;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    cursor: pointer;
+}
+.kiosk__file-input:focus-visible {
+    outline: 3px solid var(--accent-blue);
+    outline-offset: 4px;
+    border-radius: var(--radius);
+}
+.kiosk__dropzone-inner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.5rem;
+    color: var(--text-secondary);
+}
+.kiosk__dropzone-inner svg {
+    width: 32px;
+    height: 32px;
+    stroke: currentColor;
+    fill: none;
+    stroke-width: 2;
+}
+.kiosk__hint {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+.kiosk__preview {
+    display: block;
+    max-width: 100%;
+    width: 100%;
+    max-height: 220px;
+    object-fit: contain;
+    border-radius: var(--radius);
+    margin: 0 auto;
+}
+.kiosk__change-photo {
+    align-self: center;
+    padding: 0;
+    border: 0;
+    color: var(--accent-blue);
+    background: transparent;
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.9rem;
+}
+.kiosk__change-photo:hover {
+    text-decoration: underline;
+}
+.kiosk__change-photo:focus-visible,
+.kiosk-out button:focus-visible {
+    outline: 3px solid var(--accent-blue);
+    outline-offset: 3px;
+}
+
+/* Processing replaces the uploader so duplicate actions cannot compete. */
+.kiosk-processing {
+    min-height: 390px;
+    padding: 3rem 2rem;
+    place-content: center;
+    text-align: center;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    box-shadow: 0 20px 55px rgba(0, 0, 0, 0.22);
+}
+.kiosk-panel.is-processing .kiosk-processing {
+    display: grid;
+}
+.kiosk-processing__spinner {
+    display: block;
+    width: 42px;
+    height: 42px;
+    margin: 0 auto 1.25rem;
+    border: 3px solid var(--bg-tertiary);
+    border-top-color: var(--accent-blue);
+    border-radius: 50%;
+    animation: kiosk-spin 0.6s linear infinite;
+}
+.kiosk-processing h2 {
+    margin: 0;
+    font-size: 1.35rem;
+}
+.kiosk-processing p {
+    margin: 0.5rem 0 1.5rem;
+    color: var(--text-secondary);
+}
+.kiosk-processing__stages {
+    display: flex;
+    justify-content: center;
+    gap: 1.25rem;
+    margin: 0;
+    padding: 0;
+    color: var(--text-secondary);
+    list-style: none;
+    font: 0.78rem/1.2 var(--font-mono);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+.kiosk-processing__stages li::before {
+    content: "";
+    display: inline-block;
+    width: 0.45rem;
+    height: 0.45rem;
+    margin-right: 0.4rem;
+    border: 1px solid currentColor;
+    border-radius: 50%;
+}
+.kiosk-processing__stages li:first-child {
+    color: var(--accent-blue);
+}
+.kiosk-processing__stages li:first-child::before {
+    background: currentColor;
+}
+@keyframes kiosk-spin {
+    to { transform: rotate(360deg); }
+}
+
+/* --- Kiosk result -------------------------------------------------------- */
+.kiosk__result:empty { display: none; }
+.kiosk-out {
+    margin-top: 1.5rem;
+    padding: 2rem;
+    text-align: center;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-left-width: 4px;
+    border-radius: var(--radius);
+    box-shadow: 0 20px 55px rgba(0, 0, 0, 0.22);
+}
+.kiosk-panel.is-success .kiosk-out {
+    min-height: 390px;
+    margin-top: 0;
+    place-content: center;
+}
+.kiosk-panel.is-success .kiosk-out[data-kiosk-result-mode="success"] {
+    display: grid;
+}
+.kiosk-out--good {
+    border-left-color: var(--status-active);
+}
+.kiosk-out--warning {
+    border-left-color: var(--status-warning);
+}
+.kiosk-out--error {
+    border-left-color: var(--status-error);
+}
+.kiosk-out__icon {
+    display: grid;
+    width: 3rem;
+    height: 3rem;
+    margin: 0 auto 1rem;
+    place-items: center;
+    color: var(--status-active);
+    background: rgba(34, 197, 94, 0.12);
+    border: 1px solid rgba(34, 197, 94, 0.42);
+    border-radius: 50%;
+    font-size: 1.5rem;
+}
+.kiosk-out__status {
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    margin: 0 0 0.5rem;
+}
+.kiosk-out__plate {
+    font-size: 2.75rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    margin: 0.25rem 0;
+}
+.kiosk-out__amount {
+    font-size: 3.25rem;
+    font-weight: 700;
+    margin: 0.5rem 0;
+}
+.kiosk-out__badge {
+    display: inline-block;
+    padding: 0.25rem 0.75rem;
+    border-radius: 999px;
+    font-size: 0.8rem;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+}
+.kiosk-out__badge--ok {
+    color: var(--status-active);
+    box-shadow: inset 0 0 0 1px var(--status-active);
+}
+.kiosk-out__detail {
+    max-width: 36ch;
+    margin: 0.75rem auto 0;
+    color: var(--text-secondary);
+}
+.kiosk-out__actions {
+    display: flex;
+    justify-content: center;
+    gap: 0.75rem;
+    margin-top: 1.25rem;
+}
+.kiosk-out__actions .btn {
+    margin: 0;
+}
+
+@media (max-width: 640px) {
+    .kiosk {
+        margin-top: 0;
+    }
+    .kiosk__card,
+    .kiosk-out,
+    .kiosk-processing {
+        padding: 1.25rem;
+    }
+    .kiosk-processing,
+    .kiosk-panel.is-success .kiosk-out {
+        min-height: 340px;
+    }
+    .kiosk-out__plate {
+        font-size: 2.15rem;
+    }
+    .kiosk-out__amount {
+        font-size: 2.6rem;
+    }
+    .kiosk-out__actions {
+        flex-direction: column;
+    }
+    .kiosk-processing__stages {
+        gap: 0.65rem;
+        font-size: 0.68rem;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .kiosk-processing__spinner {
+        animation: none;
+    }
+}
+
+/* --- Resident portal ----------------------------------------------------- */
+.portal, .portal-narrow { margin: 0 auto; }
+.portal-narrow { max-width: 460px; }
+.portal-title { font-size: 1.6rem; margin: 0 0 0.25rem; }
+.portal-subtitle { font-size: 1.05rem; margin: 0 0 1rem; }
+.portal-lead { color: var(--text-secondary); margin: 0 0 1.5rem; }
+.portal-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    padding: 1.5rem;
+    margin-bottom: 1.5rem;
+}
+.portal-empty { color: var(--text-secondary); }
+.portal-alt, .portal-note, .login-alt { margin-top: 1rem; color: var(--text-secondary); font-size: 0.9rem; }
+.form-help { color: var(--text-secondary); font-size: 0.8rem; margin: 0.25rem 0 0; }
+
+/* Plate list */
+.plate-list { list-style: none; margin: 0; padding: 0; }
+.plate-list__item {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.75rem 0;
+    border-bottom: 1px solid var(--border-color);
+}
+.plate-list__item:last-child { border-bottom: 0; }
+.plate-list__text { font-size: 1.1rem; font-weight: 600; }
+.plate-list__label { color: var(--text-secondary); font-size: 0.85rem; }
+.plate-list__delete { margin: 0 0 0 auto; }
+
+/* Wallet */
+.wallet-balance-card { text-align: center; }
+.wallet-balance__label { color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.8rem; margin: 0; }
+.wallet-balance__amount { font-size: 3rem; font-weight: 700; margin: 0.25rem 0 1rem; }
+.wallet-balance__amount.is-negative { color: var(--status-error); }
+.wallet-balance__note { color: var(--status-error); font-size: 0.85rem; margin: 0 0 1rem; }
+.wallet-table { width: 100%; border-collapse: collapse; }
+.wallet-table th, .wallet-table td { text-align: left; padding: 0.6rem 0.5rem; border-bottom: 1px solid var(--border-color); font-size: 0.9rem; }
+.wallet-table th { color: var(--text-secondary); font-weight: 500; }
+.wallet-table__amount { text-align: right; }
+.wallet-table .is-credit { color: var(--status-active); }
+.wallet-table .is-debit { color: var(--status-error); }
