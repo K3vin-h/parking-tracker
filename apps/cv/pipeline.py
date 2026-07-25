@@ -17,7 +17,7 @@ share one loaded copy across all requests in the same process.
 import logging
 import os
 import threading
-from typing import TypedDict
+from typing import TypedDict, cast
 
 import torch
 
@@ -32,6 +32,7 @@ from apps.cv.preprocessing import (
     resize_for_detector,
     to_tensor,
 )
+from apps.cv.training.augment import DetectorAugment, RecognizerAugment
 from apps.cv.training.dataset import BLANK_IDX
 from apps.cv.utils.device import get_device
 
@@ -47,6 +48,11 @@ LOW_CONFIDENCE_THRESHOLD: float = 0.6
 # the detector found nothing meaningful.  A 5 % plate would be ~32 px wide on
 # a 640 px image — too small for the recognizer to read reliably.
 _MIN_BBOX_SIZE: float = 0.05
+
+# Reuse the validation transforms during inference so deployed inputs have the
+# exact same normalization as the tensors used to select trained checkpoints.
+_DETECTOR_EVAL_TRANSFORM = DetectorAugment(train=False)
+_RECOGNIZER_EVAL_TRANSFORM = RecognizerAugment(train=False)
 
 
 def _detector_bbox_to_original_image(
@@ -235,6 +241,9 @@ class PlateRecognitionPipeline:
         rgb = bgr_to_rgb(bgr)                                 # (H, W, 3) uint8 RGB
         rgb_resized = resize_for_detector(rgb)                # (480, 640, 3) uint8 RGB
         tensor = to_tensor(normalize_pixels(rgb_resized))     # (3, 480, 640) float32
+        # bbox=None guarantees DetectorAugment returns only the image tensor;
+        # cast narrows its bbox-aware union return type for static checkers.
+        tensor = cast(torch.Tensor, _DETECTOR_EVAL_TRANSFORM(tensor))
 
         # ── Step 2: detect plate bounding box ─────────────────────────────
         # unsqueeze(0) adds the batch dimension: (3, 480, 640) → (1, 3, 480, 640)
@@ -286,6 +295,7 @@ class PlateRecognitionPipeline:
                 "is_low_confidence": True,
             }
         crop_tensor = prepare_for_recognizer(crop)             # (1, 32, 128) float32
+        crop_tensor = _RECOGNIZER_EVAL_TRANSFORM(crop_tensor)  # zero-centered
 
         # ── Step 5: recognise text ────────────────────────────────────────
         recog_input = crop_tensor.unsqueeze(0).to(self.device)  # (1, 1, 32, 128)
