@@ -21,6 +21,7 @@ WHY WRITE TESTS FOR A MODEL THAT JUST PASSES?
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.db import IntegrityError
 
 # get_user_model() is the correct way to get the active User model in tests.
 # It reads AUTH_USER_MODEL from settings and returns the right class.
@@ -130,3 +131,19 @@ class TestUserModel:
         """
         user = User.objects.create_user(username='plateowner', email='owner@test.com', password='pass')
         assert str(user) == 'plateowner'
+
+    def test_email_is_normalized_and_unique_case_insensitively(self):
+        """Database identity must match login/recovery's case-insensitive semantics."""
+        first = User.objects.create_user(
+            username="email-owner",
+            email="  Owner@Example.COM ",
+            password="pass",
+        )
+
+        assert first.email == "owner@example.com"
+        with pytest.raises(IntegrityError):
+            User.objects.create_user(
+                username="email-collision",
+                email="OWNER@example.com",
+                password="pass",
+            )

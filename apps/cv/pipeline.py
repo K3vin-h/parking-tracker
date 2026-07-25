@@ -17,7 +17,7 @@ share one loaded copy across all requests in the same process.
 import logging
 import os
 import threading
-from typing import TypedDict
+from typing import TypedDict, cast
 
 import torch
 
@@ -31,6 +31,11 @@ from apps.cv.preprocessing import (
     prepare_for_recognizer,
     resize_for_detector,
     to_tensor,
+)
+from apps.cv.training.augment import (
+    NORMALIZED_PREPROCESSING_VERSION,
+    DetectorAugment,
+    RecognizerAugment,
 )
 from apps.cv.training.dataset import BLANK_IDX
 from apps.cv.utils.device import get_device
@@ -47,6 +52,11 @@ LOW_CONFIDENCE_THRESHOLD: float = 0.6
 # the detector found nothing meaningful.  A 5 % plate would be ~32 px wide on
 # a 640 px image — too small for the recognizer to read reliably.
 _MIN_BBOX_SIZE: float = 0.05
+
+# Reuse the validation transforms during inference so deployed inputs have the
+# exact same normalization as the tensors used to select trained checkpoints.
+_DETECTOR_EVAL_TRANSFORM = DetectorAugment(train=False)
+_RECOGNIZER_EVAL_TRANSFORM = RecognizerAugment(train=False)
 
 
 def _detector_bbox_to_original_image(
@@ -155,12 +165,20 @@ class PlateRecognitionPipeline:
         # (with internal paths) would crash the first upload request.  The full
         # error is logged server-side; callers get a clean, actionable message.
         self.detector = PlateDetectorCNN()
-        self._load_weights(self.detector, detector_path, model_name="detector")
+        self._load_weights(
+            self.detector,
+            detector_path,
+            model_name="detector",
+        )
         self.detector.to(self.device)
         self.detector.eval()
 
         self.recognizer = PlateRecognizerCRNN()
-        self._load_weights(self.recognizer, recognizer_path, model_name="recognizer")
+        self._load_weights(
+            self.recognizer,
+            recognizer_path,
+            model_name="recognizer",
+        )
         self.recognizer.to(self.device)
         self.recognizer.eval()
 
@@ -170,17 +188,37 @@ class PlateRecognitionPipeline:
         self, model: torch.nn.Module, path: str, model_name: str
     ) -> None:
         """
-        Load a state dict into `model`, converting corruption / mismatch errors
-        into clean RuntimeErrors.
+        Load versioned model weights that declare their preprocessing contract.
 
         WHY a helper: both models need identical guard logic, and keeping the
         except clause in one place ensures the no-path-leak policy (full path
         logged internally, generic message raised) stays consistent.
         torch.load fails on corrupt/truncated files; load_state_dict fails on
         architecture mismatches — both must be guarded.
+
+        WHY reject unversioned weights: plain state dicts may have been trained
+        either before or after normalization was introduced. There is no safe
+        way to infer their required input distribution, so failing closed
+        prevents confident misreads and forces an explicit retraining/migration.
         """
         try:
-            state_dict = torch.load(path, map_location=self.device, weights_only=True)
+            checkpoint = torch.load(
+                path,
+                map_location=self.device,
+                weights_only=True,
+            )
+            if not isinstance(checkpoint, dict):
+                raise ValueError("Checkpoint payload is not a state dictionary")
+
+            if (
+                checkpoint.get("preprocessing_version")
+                != NORMALIZED_PREPROCESSING_VERSION
+            ):
+                raise ValueError("Checkpoint preprocessing version is unsupported")
+            state_dict = checkpoint.get("state_dict")
+            if not isinstance(state_dict, dict):
+                raise ValueError("Checkpoint state dictionary is missing")
+
             model.load_state_dict(state_dict)
         except Exception as exc:
             logger.error(
@@ -235,6 +273,9 @@ class PlateRecognitionPipeline:
         rgb = bgr_to_rgb(bgr)                                 # (H, W, 3) uint8 RGB
         rgb_resized = resize_for_detector(rgb)                # (480, 640, 3) uint8 RGB
         tensor = to_tensor(normalize_pixels(rgb_resized))     # (3, 480, 640) float32
+        # bbox=None guarantees DetectorAugment returns only the image tensor;
+        # cast narrows its bbox-aware union return type for static checkers.
+        tensor = cast(torch.Tensor, _DETECTOR_EVAL_TRANSFORM(tensor))
 
         # ── Step 2: detect plate bounding box ─────────────────────────────
         # unsqueeze(0) adds the batch dimension: (3, 480, 640) → (1, 3, 480, 640)
@@ -286,6 +327,7 @@ class PlateRecognitionPipeline:
                 "is_low_confidence": True,
             }
         crop_tensor = prepare_for_recognizer(crop)             # (1, 32, 128) float32
+        crop_tensor = _RECOGNIZER_EVAL_TRANSFORM(crop_tensor)
 
         # ── Step 5: recognise text ────────────────────────────────────────
         recog_input = crop_tensor.unsqueeze(0).to(self.device)  # (1, 1, 32, 128)

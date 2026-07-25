@@ -5,8 +5,8 @@ Purges the image FILE and clears the image FIELD on PlateDetectionEvent rows
 that are older than each lot's configured image_retention_days setting, while
 KEEPING the event row itself so that plate text, confidence scores, and
 timestamps survive as an audit record.  Lots with image_retention_days=None
-are skipped (null means "keep forever"). Unresolved review-queue events keep
-their images until an operator corrects them, even after the retention cutoff.
+are skipped (null means "keep forever"). Unresolved review-queue evidence has
+a separate finite ceiling so an abandoned queue cannot retain images forever.
 
 USAGE:
   docker-compose exec web python manage.py cleanup_old_images
@@ -21,6 +21,7 @@ WHY a management command?
 import logging
 from datetime import timedelta
 
+from django.conf import settings
 from django.core.management.base import BaseCommand
 from django.db.models import Q
 from django.utils import timezone
@@ -38,8 +39,8 @@ class Command(BaseCommand):
     help = (
         "Purge uploaded plate images older than each lot's image_retention_days setting "
         "(deletes the image file and clears the image field but keeps the event record). "
-        "Unresolved review-queue events are preserved until corrected. "
-        "Lots with image_retention_days=None are skipped. "
+        "Unresolved review images use UNRESOLVED_IMAGE_RETENTION_DAYS. "
+        "Resolved images are skipped when image_retention_days=None. "
         "Use --dry-run to preview what would be cleared without making changes."
     )
 
@@ -59,54 +60,65 @@ class Command(BaseCommand):
                 self.style.WARNING("DRY RUN — no files or records will be changed.\n")
             )
 
-        # Only process lots that have a retention policy configured.
-        # select_related('lot') avoids an extra query per row when accessing lot.name.
-        settings_with_retention = LotSettings.objects.filter(
-            image_retention_days__isnull=False
-        ).select_related("lot")
+        # Every lot participates because unresolved evidence has a finite global
+        # ceiling even when resolved images are configured to stay forever.
+        settings_with_retention = LotSettings.objects.select_related("lot")
 
         if not settings_with_retention.exists():
             self.stdout.write(
-                "No lots have image_retention_days configured. Nothing to do."
+                "No lots have settings configured. Nothing to do."
             )
             return
 
         for lot_settings in settings_with_retention:
             lot = lot_settings.lot
-            cutoff = timezone.now() - timedelta(days=lot_settings.image_retention_days)
+            now = timezone.now()
+            unresolved_cutoff = now - timedelta(
+                days=settings.UNRESOLVED_IMAGE_RETENTION_DAYS
+            )
+            unresolved = Q(manually_corrected=False) & (
+                Q(is_low_confidence=True) | Q(session__isnull=True)
+            )
+            eligible = unresolved & Q(timestamp__lt=unresolved_cutoff)
+            if lot_settings.image_retention_days is not None:
+                normal_cutoff = now - timedelta(
+                    days=lot_settings.image_retention_days
+                )
+                eligible |= ~unresolved & Q(timestamp__lt=normal_cutoff)
 
-            # Corrected/reviewed events in this lot, older than the cutoff, that
-            # still hold an image. Unresolved queue events must keep their image:
-            # operators cannot safely correct unreadable/low-confidence plates
-            # without the original evidence, and the queue always displays it.
+            # Resolved evidence follows the lot policy; unresolved evidence uses
+            # the privacy ceiling. The direct lot FK includes unmatched events;
+            # session__lot covers legacy rows where event.lot is NULL.
             # exclude(image='') keeps the command idempotent: once an image is
-            # purged the row is no longer re-counted on later runs. The direct lot
-            # FK includes unmatched exit review events with session=None;
-            # session__lot is a fallback for older rows where event.lot is NULL.
+            # purged the row is no longer re-counted on later runs.
             old_events = (
                 PlateDetectionEvent.objects.filter(
                     Q(lot=lot) | Q(lot__isnull=True, session__lot=lot),
-                    timestamp__lt=cutoff,
-                )
-                .exclude(
-                    Q(manually_corrected=False)
-                    & (Q(is_low_confidence=True) | Q(session__isnull=True))
+                    eligible,
                 )
                 .exclude(image="")
             )
 
             count = old_events.count()
             if count == 0:
+                if lot_settings.image_retention_days is None:
+                    message = (
+                        f'  "{lot.name}": no eligible images for configured retention.'
+                    )
+                else:
+                    message = (
+                        f'  "{lot.name}": no eligible images older than '
+                        f"{lot_settings.image_retention_days} days."
+                    )
                 self.stdout.write(
-                    f'  "{lot.name}": no eligible images older than '
-                    f"{lot_settings.image_retention_days} days."
+                    message
                 )
                 continue
 
             if dry_run:
                 self.stdout.write(
                     f'  "{lot.name}": would clear {count} image(s) '
-                    f"(older than {cutoff.date()} — {lot_settings.image_retention_days} days)."
+                    "under the configured retention policies."
                 )
                 continue
 
@@ -147,8 +159,7 @@ class Command(BaseCommand):
 
             self.stdout.write(
                 self.style.SUCCESS(
-                    f'  "{lot.name}": cleared {cleared_count} image(s) '
-                    f"(older than {cutoff.date()})."
+                    f'  "{lot.name}": cleared {cleared_count} image(s).'
                 )
             )
             logger.info(

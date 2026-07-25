@@ -147,6 +147,8 @@ See [Scheduled Maintenance](#scheduled-maintenance) for the crontab entry.
 
 ## Database Models
 
+PostgreSQL is used for the database, because it can store decimal values exactly, support for native JSON columns, and allows for multiple simultaneous writers.
+
 ### User
 
 Built on Django's `AbstractUser`. Controls who can access the dashboard or admin panel.
@@ -242,6 +244,7 @@ The CV audit log — records every entry and exit event from the CV pipeline.
 | Field | Description |
 | :--- | :--- |
 | `session` | The parking session this event belongs to |
+| `lot` | The parking lot this event belongs to |
 | `image` | Uploaded plate image file path |
 | `raw_plate_text` | Plate text as read by the CV pipeline |
 | `confidence_score` | Confidence score from the CV pipeline |

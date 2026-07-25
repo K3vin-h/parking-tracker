@@ -17,6 +17,7 @@ WHY environment variables for secrets?
 Django settings reference: https://docs.djangoproject.com/en/5.1/topics/settings/
 """
 
+import ipaddress
 import os
 from pathlib import Path
 
@@ -102,6 +103,59 @@ if not DEBUG and not HEALTH_CHECK_TOKEN:
         "a database query and cannot rely on loopback trust behind a reverse proxy."
     )
 
+# Trusted kiosk browsers exchange this environment-only token for a revocable
+# session capability. No fallback is committed because that would make activation
+# public knowledge.
+KIOSK_ACTIVATION_TOKEN = os.environ.get("KIOSK_ACTIVATION_TOKEN", "").strip()
+if not DEBUG:
+    insecure_kiosk_tokens = {
+        "",
+        "change-this-to-a-long-random-kiosk-token",
+        "replace-with-a-long-random-kiosk-token",
+    }
+    if (
+        KIOSK_ACTIVATION_TOKEN.lower() in insecure_kiosk_tokens
+        or len(KIOSK_ACTIVATION_TOKEN) < 32
+    ):
+        raise ImproperlyConfigured(
+            "KIOSK_ACTIVATION_TOKEN must be a non-example secret of at least "
+            "32 characters when DEBUG=False."
+        )
+
+try:
+    KIOSK_SESSION_SECONDS = int(os.environ.get("KIOSK_SESSION_SECONDS", "43200"))
+except ValueError as exc:
+    raise ImproperlyConfigured("KIOSK_SESSION_SECONDS must be an integer.") from exc
+if KIOSK_SESSION_SECONDS <= 0:
+    raise ImproperlyConfigured("KIOSK_SESSION_SECONDS must be positive.")
+
+try:
+    KIOSK_IMAGE_REPLAY_SECONDS = int(
+        os.environ.get("KIOSK_IMAGE_REPLAY_SECONDS", "300")
+    )
+except ValueError as exc:
+    raise ImproperlyConfigured(
+        "KIOSK_IMAGE_REPLAY_SECONDS must be an integer."
+    ) from exc
+if KIOSK_IMAGE_REPLAY_SECONDS <= 0:
+    raise ImproperlyConfigured("KIOSK_IMAGE_REPLAY_SECONDS must be positive.")
+
+# Forwarded client addresses are trusted only from these exact direct peers. Values
+# are validated at startup so a typo cannot silently collapse limiter identities.
+_trusted_proxy_values = [
+    value.strip()
+    for value in os.environ.get("TRUSTED_PROXY_IPS", "").split(",")
+    if value.strip()
+]
+try:
+    TRUSTED_PROXY_IPS = frozenset(
+        str(ipaddress.ip_address(value)) for value in _trusted_proxy_values
+    )
+except ValueError as exc:
+    raise ImproperlyConfigured(
+        "TRUSTED_PROXY_IPS must contain comma-separated IP addresses."
+    ) from exc
+
 
 # ── Installed Applications ────────────────────────────────────────────────────
 
@@ -123,7 +177,8 @@ INSTALLED_APPS = [
     "apps.accounts",  # Custom User model (Day 1)
     "apps.parking",  # Parking sessions, billing, plate data (Day 1 models)
     "apps.cv",  # Computer vision pipeline (Day 2+)
-    "apps.dashboard",  # Web views and API endpoints (Day 8+)
+    "apps.dashboard",  # Staff operator pages and API endpoints (Day 8+)
+    "apps.public",  # Public gate kiosk + resident portal (China redesign)
 ]
 
 # ── Middleware ────────────────────────────────────────────────────────────────
@@ -245,11 +300,12 @@ AUTH_USER_MODEL = "accounts.User"
 LOGIN_URL = "/login/"
 
 # Where users land after a successful login (if no 'next' URL param is present).
-LOGIN_REDIRECT_URL = "/"
+# One login page now serves two roles, so route through a dispatcher that sends
+# staff to the operator dashboard and residents to their wallet.
+LOGIN_REDIRECT_URL = "/post-login/"
 
-# Where users land after clicking logout.
-# Redirecting to login ensures they can't navigate back to a cached protected page.
-LOGOUT_REDIRECT_URL = "/login/"
+# Where users land after clicking logout — the public gate kiosk (site root).
+LOGOUT_REDIRECT_URL = "/"
 
 
 # ── Password Validation ───────────────────────────────────────────────────────
@@ -324,6 +380,22 @@ CV_PROCESSING_TEMP_ROOT = os.environ.get(
     "CV_PROCESSING_TEMP_ROOT",
     "/tmp/parking-tracker-cv",
 )
+
+# Unresolved review evidence is useful, but not safe to retain forever when an
+# operator abandons the queue. This ceiling applies even when resolved images
+# are kept indefinitely.
+try:
+    UNRESOLVED_IMAGE_RETENTION_DAYS = int(
+        os.environ.get("UNRESOLVED_IMAGE_RETENTION_DAYS", "30")
+    )
+except ValueError as exc:
+    raise ImproperlyConfigured(
+        "UNRESOLVED_IMAGE_RETENTION_DAYS must be an integer."
+    ) from exc
+if UNRESOLVED_IMAGE_RETENTION_DAYS <= 0:
+    raise ImproperlyConfigured(
+        "UNRESOLVED_IMAGE_RETENTION_DAYS must be positive."
+    )
 
 # Hard upload boundary shared by the streaming handler and the endpoint.
 # UPLOAD_FORM_OVERHEAD_BYTES permits multipart boundaries and short form fields

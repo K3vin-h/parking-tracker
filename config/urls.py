@@ -22,12 +22,32 @@ import logging
 import secrets
 
 from django.contrib import admin
+from django.contrib.auth.views import LoginView, PasswordResetView
 from django.db import connection
 from django.http import HttpResponseForbidden, JsonResponse
 from django.urls import include, path
 from django.conf import settings
+from django.utils.decorators import method_decorator
+
+from apps.public.ratelimit import rate_limit
 
 logger = logging.getLogger(__name__)
+
+
+@method_decorator(
+    rate_limit(scope="login", limit=5, window_seconds=300),
+    name="dispatch",
+)
+class ThrottledLoginView(LoginView):
+    """Apply shared credential-guess throttling without changing Django auth."""
+
+
+@method_decorator(
+    rate_limit(scope="password_reset", limit=5, window_seconds=300),
+    name="dispatch",
+)
+class ThrottledPasswordResetView(PasswordResetView):
+    """Bound reset-email generation while retaining Django anti-enumeration."""
 
 
 def _is_internal_probe(request) -> bool:
@@ -105,12 +125,23 @@ urlpatterns = [
     #
     # We only actively use login and logout for Day 1, but including the full set
     # now means password reset is available without any additional code.
+    path("login/", ThrottledLoginView.as_view(), name="login"),
+    path(
+        "password_reset/",
+        ThrottledPasswordResetView.as_view(),
+        name="password_reset",
+    ),
     path("", include("django.contrib.auth.urls")),
-    # ── Dashboard App ──────────────────────────────────────────────────────────
-    # All parking management pages and API endpoints.
-    # apps/dashboard/urls.py is currently empty (Day 1 placeholder).
-    # Views are added in Days 8–10.
-    path("", include("apps.dashboard.urls")),
+    # ── Staff Dashboard App ─────────────────────────────────────────────────────
+    # Operator-only pages + API endpoints. Nested under /staff/ so the public gate
+    # kiosk can own the site root. The `dashboard:` namespace is unchanged, so all
+    # {% url %}/reverse() callers keep working — only the URL path moved.
+    path("staff/", include("apps.dashboard.urls")),
+    # ── Public App ──────────────────────────────────────────────────────────────
+    # Unauthenticated gate kiosk (site root) + resident self-service portal
+    # (signup, plate management, wallet). Registered last so its root "" pattern is
+    # the site's landing page.
+    path("", include("apps.public.urls")),
 ]
 
 # Uploaded plate images are intentionally not exposed through MEDIA_URL, even in

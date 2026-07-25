@@ -30,6 +30,8 @@ from apps.parking.models import (
     ParkingLot,
     ParkingSession,
     PlateDetectionEvent,
+    Wallet,
+    WalletTransaction,
 )
 from apps.parking.services import (
     calculate_charge,
@@ -356,16 +358,15 @@ class TestHandleEntry:
         event2 = PlateDetectionEvent.objects.get(session=session2)
         assert event2.bounding_box == []  # wrong length → empty
 
-    def test_links_lowest_pk_on_multi_user_plate(
+    def test_rejects_duplicate_multi_user_plate(
         self, parking_lot, lot_settings, license_plate, user
     ):
-        """When two users register the same plate, link to the lowest-pk one."""
-        other = User.objects.create_user(username="other", password="x")
-        LicensePlate.objects.create(user=other, plate_text="ABC123")  # higher pk
+        """Ambiguous cross-account ownership is rejected before session matching."""
+        from django.db import IntegrityError
 
-        session = handle_entry("ABC123", 0.9, [], PLATE_IMAGE, parking_lot)
-        assert session.license_plate == license_plate  # the lower-pk registration
-        assert session.user == user
+        other = User.objects.create_user(username="other", password="x")
+        with pytest.raises(IntegrityError):
+            LicensePlate.objects.create(user=other, plate_text="ABC123")
 
 
 # ── handle_exit ──────────────────────────────────────────────────────────────
@@ -531,6 +532,96 @@ class TestCorrectPlate:
         session.refresh_from_db()
         assert session.license_plate is None
         assert session.user is None
+
+    def test_completed_session_correction_moves_charge_to_new_owner(
+        self, parking_lot, lot_settings, license_plate, user
+    ):
+        """Changing ownership must reverse the old debit and charge the new owner."""
+        other_user = User.objects.create_user(
+            username="correct-owner",
+            password="testpass123",
+        )
+        other_plate = LicensePlate.objects.create(
+            user=other_user,
+            plate_text="NEW123",
+        )
+        session = handle_entry("ABC123", 0.4, [], PLATE_IMAGE, parking_lot)
+        session.entry_time = timezone.now() - timedelta(minutes=90)
+        session.save(update_fields=["entry_time"])
+        completed = handle_exit("ABC123", 0.4, [], PLATE_IMAGE, parking_lot)
+        exit_event = PlateDetectionEvent.objects.get(
+            session=completed,
+            event_type="exit",
+        )
+
+        correct_plate(exit_event.pk, other_plate.plate_text)
+
+        completed.refresh_from_db()
+        old_wallet = Wallet.objects.get(user=user)
+        new_wallet = Wallet.objects.get(user=other_user)
+        assert completed.user == other_user
+        assert old_wallet.balance == Decimal("0.00")
+        assert new_wallet.balance == -completed.charge_amount
+        assert old_wallet.transactions.filter(
+            session=completed,
+            kind=WalletTransaction.Kind.ADJUSTMENT,
+            amount=completed.charge_amount,
+        ).exists()
+        assert new_wallet.transactions.filter(
+            session=completed,
+            kind=WalletTransaction.Kind.ADJUSTMENT,
+            amount=-completed.charge_amount,
+        ).exists()
+
+    def test_completed_session_correction_to_guest_reverses_charge(
+        self, parking_lot, lot_settings, license_plate, user
+    ):
+        """Removing ownership from a completed session must refund its old wallet."""
+        session = handle_entry("ABC123", 0.4, [], PLATE_IMAGE, parking_lot)
+        session.entry_time = timezone.now() - timedelta(minutes=90)
+        session.save(update_fields=["entry_time"])
+        completed = handle_exit("ABC123", 0.4, [], PLATE_IMAGE, parking_lot)
+        exit_event = PlateDetectionEvent.objects.get(
+            session=completed,
+            event_type="exit",
+        )
+
+        correct_plate(exit_event.pk, "GUEST9")
+
+        completed.refresh_from_db()
+        wallet = Wallet.objects.get(user=user)
+        assert completed.user is None
+        assert wallet.balance == Decimal("0.00")
+        assert wallet.transactions.filter(
+            session=completed,
+            kind=WalletTransaction.Kind.ADJUSTMENT,
+            amount=completed.charge_amount,
+        ).exists()
+
+    def test_completed_guest_correction_charges_registered_owner(
+        self, parking_lot, lot_settings, license_plate, user
+    ):
+        """Linking a completed guest stay must apply its charge to the new owner."""
+        session = handle_entry("MISRED", 0.4, [], PLATE_IMAGE, parking_lot)
+        session.entry_time = timezone.now() - timedelta(minutes=90)
+        session.save(update_fields=["entry_time"])
+        completed = handle_exit("MISRED", 0.4, [], PLATE_IMAGE, parking_lot)
+        exit_event = PlateDetectionEvent.objects.get(
+            session=completed,
+            event_type="exit",
+        )
+
+        correct_plate(exit_event.pk, license_plate.plate_text)
+
+        completed.refresh_from_db()
+        wallet = Wallet.objects.get(user=user)
+        assert completed.user == user
+        assert wallet.balance == -completed.charge_amount
+        assert wallet.transactions.filter(
+            session=completed,
+            kind=WalletTransaction.Kind.ADJUSTMENT,
+            amount=-completed.charge_amount,
+        ).exists()
 
     def test_correction_of_orphan_exit_event_without_match(
         self, parking_lot, lot_settings

@@ -1,0 +1,154 @@
+{% extends "public/public_base.html" %}
+{% load static %}
+
+{% block title %}Gate Kiosk — Parking Tracker{% endblock %}
+
+{% block content %}
+<section class="kiosk" aria-labelledby="kiosk-heading">
+    {% if kiosk_activated %}
+    {# The persistent panel lets JavaScript hide the uploader without destroying its nonce. #}
+    <div class="kiosk-panel" id="kiosk-panel" aria-busy="false">
+        <div class="kiosk__card" data-kiosk-uploader>
+            <h1 id="kiosk-heading" class="kiosk__title">Parking Gate</h1>
+            <p class="kiosk__subtitle">
+                {{ kiosk_lot.name }} — {{ kiosk_event_type|title }} lane
+            </p>
+
+            <form id="kiosk-form"
+                  class="kiosk__form"
+                  hx-post="{% url 'public:kiosk_scan' %}"
+                  hx-target="#kiosk-result"
+                  hx-encoding="multipart/form-data"
+                  hx-indicator="#kiosk-processing"
+                  enctype="multipart/form-data"
+                  method="post">
+                {% csrf_token %}
+                <input type="hidden" name="event_type" value="{{ kiosk_event_type }}">
+                <input type="hidden" name="lot" value="{{ kiosk_lot.name }}">
+                <input id="kiosk-nonce" type="hidden" name="kiosk_nonce"
+                       value="{{ kiosk_scan_nonce }}">
+
+                {# The local preview helps reject a blurry photo before it reaches the server. #}
+                <div class="kiosk__review-copy" data-kiosk-review-copy hidden>
+                    <h2>Review plate photo</h2>
+                    <p>Make sure the plate is visible and readable.</p>
+                </div>
+                <label class="kiosk__dropzone"
+                       id="kiosk-dropzone"
+                       for="kiosk-image"
+                       data-dropzone>
+                    <input class="kiosk__file-input"
+                           id="kiosk-image"
+                           type="file"
+                           name="image"
+                           accept="image/jpeg,image/png"
+                           required>
+                    <div class="kiosk__dropzone-inner" data-dropzone-prompt>
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                            <path d="m17 8-5-5-5 5"></path>
+                            <path d="M12 3v12"></path>
+                        </svg>
+                        <span>Drop a plate photo here or click to choose</span>
+                        <span class="kiosk__hint mono">JPEG or PNG · up to 10&nbsp;MB</span>
+                    </div>
+                    <img class="kiosk__preview"
+                         data-dropzone-preview
+                         alt="Selected plate photo preview"
+                         hidden>
+                </label>
+
+                <button class="btn btn--primary btn--full"
+                        type="button"
+                        data-kiosk-choose-file>
+                    Choose plate photo
+                </button>
+                <button class="btn btn--primary btn--full"
+                        type="submit"
+                        data-kiosk-submit
+                        hidden>
+                    Scan plate
+                </button>
+                <button class="kiosk__change-photo"
+                        type="button"
+                        data-kiosk-choose-file
+                        hidden>
+                    Choose a different photo
+                </button>
+            </form>
+        </div>
+
+        {# Real processing stages communicate work without fabricating a percentage. #}
+        <div class="kiosk-processing"
+             id="kiosk-processing"
+             role="status"
+             aria-live="polite"
+             hidden>
+            <span class="kiosk-processing__spinner" aria-hidden="true"></span>
+            <h2>Reading the plate…</h2>
+            <p>Please wait. Do not close this screen.</p>
+            <ol class="kiosk-processing__stages" aria-label="Scan progress">
+                <li>Validate</li>
+                <li>Detect</li>
+                <li>Record</li>
+            </ol>
+        </div>
+
+        <div id="kiosk-result" class="kiosk__result" aria-live="polite"></div>
+    </div>
+    {% else %}
+    <div class="kiosk__card">
+        <h1 id="kiosk-heading" class="kiosk__title">Parking Gate</h1>
+        <p class="kiosk__subtitle">
+            This kiosk must be activated by an authorized operator.
+        </p>
+        <form class="kiosk__form"
+              data-kiosk-activation-form
+              hx-post="{% url 'public:kiosk_activate' %}"
+              hx-swap="none"
+              method="post">
+            {% csrf_token %}
+            <div class="form-group">
+                <label class="form-label" for="kiosk-activation-token">
+                    Activation token
+                </label>
+                <input class="form-control mono"
+                       id="kiosk-activation-token"
+                       name="token"
+                       type="password"
+                       autocomplete="off"
+                       required>
+            </div>
+            <fieldset class="kiosk__segment" aria-label="Lane direction">
+                <label class="kiosk__segment-option">
+                    <input type="radio" name="event_type" value="entry" checked>
+                    <span>Entry lane</span>
+                </label>
+                <label class="kiosk__segment-option">
+                    <input type="radio" name="event_type" value="exit">
+                    <span>Exit lane</span>
+                </label>
+            </fieldset>
+            <div class="form-group">
+                <label class="form-label" for="kiosk-lot">Parking lot</label>
+                <select class="form-control" id="kiosk-lot" name="lot" required>
+                    {% for lot in lots %}
+                    <option value="{{ lot.name }}">{{ lot.name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <button class="btn btn--primary btn--full" type="submit">
+                Activate kiosk
+            </button>
+        </form>
+        <div class="kiosk__result"
+             data-kiosk-activation-result
+             aria-live="assertive"></div>
+    </div>
+    {% endif %}
+</section>
+{% endblock %}
+
+{% block extra_js %}
+<script src="{% static 'js/kiosk.js' %}" defer></script>
+{% endblock %}

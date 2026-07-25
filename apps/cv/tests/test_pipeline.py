@@ -2,7 +2,7 @@
 Unit tests for PlateRecognitionPipeline.
 
 All tests mock the model I/O — no trained weights or real images needed.
-One integration test is skipped unless both weight files are present on disk.
+One integration test is skipped unless both compatible weight files are present.
 
 Fixtures
 ────────
@@ -36,11 +36,15 @@ _WEIGHTS_PRESENT = Path(_DETECTOR_PATH).exists() and Path(_RECOGNIZER_PATH).exis
 # After YOLO→top-left conversion: x=0.3, y=0.4, w=0.4, h=0.2.
 # On 640×480: x1=192, y1=192, x2=448, y2=288 — well within bounds.
 _VALID_BBOX = [0.5, 0.5, 0.4, 0.2]  # [cx, cy, w, h]
+_NORMALIZED_CHECKPOINT = {
+    "preprocessing_version": "normalized-v1",
+    "state_dict": {},
+}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _make_pipeline() -> PlateRecognitionPipeline:
+def _make_pipeline(checkpoint: dict | None = None) -> PlateRecognitionPipeline:
     """
     Build a pipeline with all model I/O mocked.
 
@@ -48,10 +52,15 @@ def _make_pipeline() -> PlateRecognitionPipeline:
     succeeds without any weight files on disk.  The pipeline's .detector and
     .recognizer attributes are MagicMock instances whose methods (predict,
     decode_predictions) can be configured per-test.
+
+    Args:
+        checkpoint: Serialized checkpoint payload returned for both models.
+                    Defaults to the current normalized checkpoint format.
     """
+    checkpoint = checkpoint if checkpoint is not None else _NORMALIZED_CHECKPOINT
     with (
         patch("apps.cv.pipeline.os.path.isfile", return_value=True),
-        patch("apps.cv.pipeline.torch.load", return_value={}),
+        patch("apps.cv.pipeline.torch.load", return_value=checkpoint),
         patch("apps.cv.pipeline.PlateDetectorCNN"),
         patch("apps.cv.pipeline.PlateRecognizerCRNN"),
     ):
@@ -156,6 +165,40 @@ class TestPlateRecognitionPipelineInit:
         pipeline.detector.to.assert_called_with(torch.device("cpu"))
         pipeline.recognizer.to.assert_called_with(torch.device("cpu"))
 
+    def test_unknown_preprocessing_version_is_rejected(self) -> None:
+        """A checkpoint with unknown preprocessing must fail before inference."""
+        incompatible = {
+            "preprocessing_version": "future-normalization",
+            "state_dict": {},
+        }
+        with (
+            patch("apps.cv.pipeline.os.path.isfile", return_value=True),
+            patch("apps.cv.pipeline.torch.load", return_value=incompatible),
+            patch("apps.cv.pipeline.PlateDetectorCNN"),
+            patch("apps.cv.pipeline.PlateRecognizerCRNN"),
+            pytest.raises(RuntimeError, match="detector model weights"),
+        ):
+            PlateRecognitionPipeline(
+                "det.pth",
+                "rec.pth",
+                device=torch.device("cpu"),
+            )
+
+    def test_unversioned_checkpoint_is_rejected(self) -> None:
+        """Ambiguous plain state dicts must fail instead of guessing preprocessing."""
+        with (
+            patch("apps.cv.pipeline.os.path.isfile", return_value=True),
+            patch("apps.cv.pipeline.torch.load", return_value={}),
+            patch("apps.cv.pipeline.PlateDetectorCNN"),
+            patch("apps.cv.pipeline.PlateRecognizerCRNN"),
+            pytest.raises(RuntimeError, match="detector model weights"),
+        ):
+            PlateRecognitionPipeline(
+                "det.pth",
+                "rec.pth",
+                device=torch.device("cpu"),
+            )
+
 
 # ── Process tests ─────────────────────────────────────────────────────────────
 
@@ -168,6 +211,43 @@ class TestPlateRecognitionPipelineProcess:
         pipeline = _make_pipeline()
         result = _run_process(pipeline, _VALID_BBOX, torch.zeros(16, 1, 37))
         assert set(result.keys()) == {"plate_text", "confidence", "bounding_box", "is_low_confidence"}
+
+    def test_detector_receives_training_normalized_input(self) -> None:
+        """
+        Detector inference must use the ImageNet normalization used in training.
+
+        A black RGB pixel starts at 0.0 after [0, 255] scaling, so ImageNet
+        normalization must produce -mean/std for each channel. This catches
+        train/serve skew where production accidentally sends raw [0, 1] data.
+        """
+        pipeline = _make_pipeline()
+
+        _run_process(pipeline, _VALID_BBOX, torch.zeros(16, 1, 37))
+
+        detector_input = pipeline.detector.predict.call_args.args[0]
+        expected_pixel = torch.tensor([
+            -0.485 / 0.229,
+            -0.456 / 0.224,
+            -0.406 / 0.225,
+        ])
+        torch.testing.assert_close(detector_input[0, :, 0, 0], expected_pixel)
+
+    def test_recognizer_receives_training_normalized_input(self) -> None:
+        """
+        Recognizer inference must use the zero-centered training normalization.
+
+        A black grayscale pixel starts at 0.0, and (0.0 - 0.5) / 0.5 is -1.0.
+        This protects production recognition from diverging from validation.
+        """
+        pipeline = _make_pipeline()
+
+        _run_process(pipeline, _VALID_BBOX, torch.zeros(16, 1, 37))
+
+        recognizer_input = pipeline.recognizer.predict.call_args.args[0]
+        torch.testing.assert_close(
+            recognizer_input,
+            torch.full_like(recognizer_input, -1.0),
+        )
 
     def test_plate_text_matches_model_output(self) -> None:
         """plate_text is taken from decode_predictions()[0]."""
@@ -364,7 +444,10 @@ class TestGetPipeline:
         monkeypatch.setattr(pipeline_module, "_instance", None)
         with (
             patch("apps.cv.pipeline.os.path.isfile", return_value=True),
-            patch("apps.cv.pipeline.torch.load", return_value={}),
+            patch(
+                "apps.cv.pipeline.torch.load",
+                return_value=_NORMALIZED_CHECKPOINT,
+            ),
             patch("apps.cv.pipeline.PlateDetectorCNN"),
             patch("apps.cv.pipeline.PlateRecognizerCRNN"),
         ):
@@ -378,7 +461,10 @@ class TestGetPipeline:
         monkeypatch.setattr(pipeline_module, "_instance", None)
         with (
             patch("apps.cv.pipeline.os.path.isfile", return_value=True),
-            patch("apps.cv.pipeline.torch.load", return_value={}),
+            patch(
+                "apps.cv.pipeline.torch.load",
+                return_value=_NORMALIZED_CHECKPOINT,
+            ),
             patch("apps.cv.pipeline.PlateDetectorCNN"),
             patch("apps.cv.pipeline.PlateRecognizerCRNN"),
         ):
@@ -409,6 +495,20 @@ class TestPipelineIntegration:
         guard accepts files in the pytest temporary directory.
         """
         from apps.cv.training.synthetic_data import generate_recognizer_dataset
+
+        for checkpoint_path in (_DETECTOR_PATH, _RECOGNIZER_PATH):
+            checkpoint = torch.load(
+                checkpoint_path,
+                map_location="cpu",
+                weights_only=True,
+            )
+            if (
+                not isinstance(checkpoint, dict)
+                or checkpoint.get("preprocessing_version") != "normalized-v1"
+            ):
+                pytest.skip(
+                    "Local weights predate the versioned preprocessing contract"
+                )
 
         generate_recognizer_dataset(n=1, output_dir=str(tmp_path))
 

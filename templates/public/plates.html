@@ -1,0 +1,54 @@
+{% extends "public/public_base.html" %}
+{% load static %}
+
+{% block title %}My Plates — Parking Tracker{% endblock %}
+
+{% block content %}
+<section class="portal" aria-labelledby="plates-heading">
+    <h1 id="plates-heading" class="portal-title">My Plates</h1>
+    <p class="portal-lead">Plates linked to your account are billed automatically on exit.</p>
+
+    <div class="portal-card">
+        <h2 class="portal-subtitle">Add a plate</h2>
+        <form method="post" action="{% url 'public:plates' %}" class="plate-add-form" novalidate>
+            {% csrf_token %}
+            {% for field in form %}
+            <div class="form-group">
+                <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+                {{ field }}
+                {% if field.help_text %}<p class="form-help">{{ field.help_text }}</p>{% endif %}
+                {% for error in field.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
+            </div>
+            {% endfor %}
+            <button class="btn btn--primary" type="submit">Add plate</button>
+        </form>
+    </div>
+
+    <div class="portal-card">
+        <h2 class="portal-subtitle">Registered plates</h2>
+        {% if plates %}
+        <ul class="plate-list">
+            {% for plate in plates %}
+            <li class="plate-list__item">
+                <span class="plate-list__text mono">{{ plate.plate_text }}</span>
+                {% if plate.label %}<span class="plate-list__label">{{ plate.label }}</span>{% endif %}
+                <form class="plate-list__delete"
+                      data-plate-delete
+                      method="post"
+                      action="{% url 'public:plate_delete' plate.pk %}">
+                    {% csrf_token %}
+                    <button class="btn btn--secondary btn--compact" type="submit">Remove</button>
+                </form>
+            </li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <p class="portal-empty">You haven't registered any plates yet.</p>
+        {% endif %}
+    </div>
+</section>
+{% endblock %}
+
+{% block extra_js %}
+<script src="{% static 'js/plates.js' %}" defer></script>
+{% endblock %}

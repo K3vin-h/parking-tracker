@@ -34,7 +34,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 from django.core.management.base import BaseCommand, CommandError
-from django.db import transaction
+from django.db import IntegrityError, transaction
 
 from apps.parking.models import LotSettings, ParkingLot
 
@@ -90,7 +90,7 @@ class Command(BaseCommand):
         """
         User = get_user_model()
 
-        email = os.environ.get("DEFAULT_SUPERUSER_EMAIL", "").strip()
+        email = os.environ.get("DEFAULT_SUPERUSER_EMAIL", "").strip().lower()
         password = os.environ.get("DEFAULT_SUPERUSER_PASSWORD", "").strip()
 
         # Validate that required env vars are set — fail clearly rather than
@@ -115,27 +115,52 @@ class Command(BaseCommand):
                 f"(minimum {MIN_SUPERUSER_PASSWORD_LEN} characters). "
                 "Choose a stronger password in your .env file."
             )
+        # Supply the prospective identity so UserAttributeSimilarityValidator
+        # can compare this privileged password with its username and email.
+        candidate = User(username=email, email=email)
         try:
-            validate_password(password)
+            validate_password(password, user=candidate)
         except ValidationError as exc:
             raise CommandError(
                 "DEFAULT_SUPERUSER_PASSWORD is too weak: " + " ".join(exc.messages)
             )
 
-        # Use the email as the username as well, for simplicity.
-        # filter().exists() is preferred over get() because it returns False
-        # instead of raising an exception when the user doesn't exist.
-        if User.objects.filter(email=email).exists():
+        # Treat email as a case-insensitive identity. Silently skipping a
+        # resident collision would leave a deployment with no configured admin.
+        matching_users = User.objects.filter(email__iexact=email)
+        if matching_users.count() > 1:
+            raise CommandError(
+                "DEFAULT_SUPERUSER_EMAIL matches multiple existing accounts. "
+                "Resolve duplicate email identities before bootstrapping."
+            )
+        existing = matching_users.first()
+        if existing is not None:
+            if not existing.is_staff or not existing.is_superuser:
+                raise CommandError(
+                    "DEFAULT_SUPERUSER_EMAIL already belongs to a non-superuser "
+                    "account. Choose another address or promote it explicitly."
+                )
             self.stdout.write("  Superuser already exists (skipped)")
             return
+        if User.objects.filter(username__iexact=email).exists():
+            raise CommandError(
+                "DEFAULT_SUPERUSER_EMAIL conflicts with an existing username. "
+                "Choose another bootstrap address."
+            )
 
         # create_superuser() hashes the password before storing it.
         # NEVER store plain-text passwords — even in development.
-        User.objects.create_superuser(
-            username=email,
-            email=email,
-            password=password,
-        )
+        try:
+            User.objects.create_superuser(
+                username=email,
+                email=email,
+                password=password,
+            )
+        except IntegrityError as exc:
+            raise CommandError(
+                "The bootstrap administrator conflicted with an account created "
+                "concurrently. Re-run after verifying account identities."
+            ) from exc
         # WHY no email in the output: this command runs during container
         # initialization, so stdout lands in CI/CD build logs.  The admin
         # email is a username and PII — printing it there invites targeted

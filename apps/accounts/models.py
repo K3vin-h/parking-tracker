@@ -34,6 +34,8 @@ ACCESS CONTROL MODEL (from PLAN.md):
 """
 
 from django.contrib.auth.models import AbstractUser
+from django.db import models
+from django.db.models.functions import Lower
 
 
 class User(AbstractUser):
@@ -54,3 +56,19 @@ class User(AbstractUser):
     class Meta:
         verbose_name = 'user'
         verbose_name_plural = 'users'
+        constraints = [
+            # Empty emails remain allowed for Django-created technical users,
+            # while real email identities are unique under login/recovery's
+            # case-insensitive comparison.
+            models.UniqueConstraint(
+                Lower("email"),
+                condition=~models.Q(email=""),
+                name="unique_user_email_ci",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        """Store one canonical email spelling across all ORM creation paths."""
+        if self.email:
+            self.email = self.email.strip().lower()
+        return super().save(*args, **kwargs)
