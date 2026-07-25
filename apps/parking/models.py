@@ -916,7 +916,8 @@ class Wallet(models.Model):
     """
 
     # OneToOne: each user has exactly one wallet. related_name='wallet' enables
-    # user.wallet. CASCADE: deleting the user removes their wallet + ledger.
+    # user.wallet. A wallet that has ledger history is protected from deletion by
+    # WalletTransaction.wallet below, including through a user cascade.
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
@@ -961,7 +962,7 @@ class WalletTransaction(models.Model):
     """
 
     class Kind(models.TextChoices):
-        # A prepaid top-up (credit). Reference holds the payment placeholder id.
+        # A prepaid top-up (credit). Reference holds the provider confirmation id.
         TOPUP = "topup", "Top-up"
         # An automatic parking deduction (debit) linked to a completed session.
         CHARGE = "charge", "Parking charge"
@@ -970,7 +971,9 @@ class WalletTransaction(models.Model):
 
     wallet = models.ForeignKey(
         Wallet,
-        on_delete=models.CASCADE,
+        # PROTECT preserves the immutable money audit trail. Wallets with no
+        # history may be removed, but a parent delete can never erase ledger rows.
+        on_delete=models.PROTECT,
         related_name="transactions",
         help_text="The wallet this ledger entry belongs to.",
     )
@@ -1005,7 +1008,7 @@ class WalletTransaction(models.Model):
     # text that could widen PII exposure beyond what the session already holds.
     description = models.CharField(max_length=200, blank=True, default="")
 
-    # External payment reference from the (placeholder) gateway for top-ups.
+    # External payment confirmation reference from the connector for top-ups.
     reference = models.CharField(max_length=100, blank=True, default="")
 
     # Ledger rows are insert-only: created once, never updated. Hence only a
@@ -1022,6 +1025,15 @@ class WalletTransaction(models.Model):
             models.Index(
                 fields=["wallet", "-created_at"],
                 name="wallet_txn_wallet_time_idx",
+            ),
+        ]
+        constraints = [
+            # Provider retries may deliver the same confirmation repeatedly.
+            # One nonblank top-up reference can authorize exactly one credit.
+            models.UniqueConstraint(
+                fields=["reference"],
+                condition=models.Q(kind="topup") & ~models.Q(reference=""),
+                name="unique_wallet_topup_reference",
             ),
         ]
 

@@ -48,7 +48,10 @@ from apps.parking.models import (
     PlateDetectionEvent,
 )
 from apps.parking.normalization import canonicalize_plate
-from apps.parking.wallet import debit_wallet_for_session
+from apps.parking.wallet import (
+    debit_wallet_for_session,
+    reconcile_wallet_for_session_owner,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -599,6 +602,7 @@ def correct_plate(
     if event.session_id is not None:
         # Lock the session row too so the relink can't race a concurrent exit.
         session = ParkingSession.objects.select_for_update().get(pk=event.session_id)
+        previous_user_id = session.user_id
         duplicate_voided = 0
         if session.status == ParkingSession.Status.ACTIVE:
             duplicate_voided = _void_duplicate_active_sessions(
@@ -620,6 +624,14 @@ def correct_plate(
                 "user",
             ]
         )
+        if (
+            session.status == ParkingSession.Status.COMPLETED
+            and previous_user_id != session.user_id
+        ):
+            # The old debit is immutable ledger evidence. Append compensating
+            # entries so the old owner is restored and the corrected owner bears
+            # the charge (or nobody does when correction makes it a guest).
+            reconcile_wallet_for_session_owner(session, previous_user_id)
         # Only write `lot` when we actually backfill it; otherwise the save would
         # rewrite an unchanged column (and clobber it if logic ever diverges).
         event_update_fields = ["manually_corrected", "corrected_plate"]

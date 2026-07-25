@@ -9,6 +9,7 @@ from django.contrib.auth import get_user_model
 from django.urls import reverse
 
 from apps.parking.models import Wallet, WalletTransaction
+from apps.parking.payments import PaymentResult
 
 User = get_user_model()
 
@@ -43,7 +44,17 @@ class TestWalletViews:
         resp = client.get(WALLET_URL)
         assert resp.status_code == 200
 
-    def test_topup_credits_and_records_ledger(self, client, user):
+    def test_topup_credits_only_after_connector_confirmation(
+        self, client, user, monkeypatch
+    ):
+        """A provider-confirmed charge may become spendable wallet credit."""
+        monkeypatch.setattr(
+            "apps.public.wallet_views.charge_payment_method",
+            lambda _user, _amount: PaymentResult(
+                success=True,
+                reference="provider-confirmed-123",
+            ),
+        )
         client.force_login(user)
         resp = client.post(TOPUP_URL, {"amount": "25.00"})
         assert resp.status_code == 302
@@ -53,7 +64,37 @@ class TestWalletViews:
         assert wallet.balance == Decimal("25.00")
         txn = wallet.transactions.get(kind=WalletTransaction.Kind.TOPUP)
         assert txn.amount == Decimal("25.00")
-        assert txn.reference  # placeholder gateway reference recorded
+        assert txn.reference == "provider-confirmed-123"
+
+    def test_unconfigured_connector_does_not_credit_wallet(self, client, user):
+        """The placeholder keeps top-up UI available without minting funds."""
+        client.force_login(user)
+
+        resp = client.post(TOPUP_URL, {"amount": "25.00"})
+
+        assert resp.status_code == 200
+        assert b"not configured" in resp.content.lower()
+        assert not WalletTransaction.objects.exists()
+        assert not Wallet.objects.filter(
+            user=user,
+            balance__gt=Decimal("0.00"),
+        ).exists()
+
+    def test_connector_success_without_reference_does_not_credit(
+        self, client, user, monkeypatch
+    ):
+        """A boolean alone is not durable proof that an external charge occurred."""
+        monkeypatch.setattr(
+            "apps.public.wallet_views.charge_payment_method",
+            lambda _user, _amount: PaymentResult(success=True, reference=""),
+        )
+        client.force_login(user)
+
+        resp = client.post(TOPUP_URL, {"amount": "25.00"})
+
+        assert resp.status_code == 200
+        assert b"confirmation" in resp.content.lower()
+        assert not WalletTransaction.objects.exists()
 
     def test_topup_rejects_zero(self, client, user):
         client.force_login(user)
