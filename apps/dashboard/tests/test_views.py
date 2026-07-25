@@ -79,6 +79,37 @@ class TestPageAuthorization:
 
 
 @pytest.mark.django_db
+class TestSecurityHeaders:
+    """Verify that security headers are present on authenticated dashboard responses."""
+
+    def test_dashboard_response_sets_content_security_policy(self, client, users):
+        """
+        Every staff dashboard response must carry a Content-Security-Policy header.
+
+        This catches misconfiguration of CSPMiddleware (e.g. removed from MIDDLEWARE
+        or placed before SecurityMiddleware where it would be bypassed).
+        The header must restrict script-src to 'self' with no unsafe directives,
+        reflecting that all JS is self-hosted and HTMX eval is disabled.
+        """
+        staff, _ = users
+        client.force_login(staff)
+        response = client.get(reverse("dashboard:dashboard"))
+        assert response.status_code == 200
+        csp = response.get("Content-Security-Policy", "")
+        assert csp, "Content-Security-Policy header must be present"
+        assert "default-src 'self'" in csp
+        assert "unsafe-eval" not in csp
+
+        # Assert the script-src directive itself contains no unsafe keyword — a
+        # substring check on the whole header would miss a regression that added
+        # 'unsafe-inline' to script-src specifically.
+        script_src = next(
+            d.strip() for d in csp.split(";") if d.strip().startswith("script-src")
+        )
+        assert script_src == "script-src 'self'"
+
+
+@pytest.mark.django_db
 class TestDashboardContext:
     """Verify UTC statistics, live charges, and lot scoping."""
 

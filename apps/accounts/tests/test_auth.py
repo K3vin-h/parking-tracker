@@ -218,6 +218,26 @@ class TestBaseFrontendAssets:
         assert "masked-csrf-token" in html
         assert "/static/js/vendor/htmx-2.0.10.min.js" in html
         assert "cdn.jsdelivr.net" not in html
+    def test_base_template_disables_htmx_eval_and_script_tags(self):
+        """
+        The shared shell must carry the htmx-config meta tag that disables eval()
+        and <script> execution in HTMX-swapped responses.
+
+        This defence-in-depth measure lets the CSP keep script-src at 'self' with
+        no 'unsafe-eval' or 'unsafe-inline'. Core HTMX attributes (hx-get,
+        hx-post, hx-trigger polling, hx-swap) are unaffected — only eval-based
+        filter expressions and response <script> tags are blocked.
+        """
+        html = render_to_string(
+            "base.html",
+            {
+                "csrf_token": "masked-csrf-token",
+            },
+        )
+
+        assert 'name="htmx-config"' in html
+        assert '"allowEval":false' in html
+        assert '"allowScriptTags":false' in html
 
     def test_chart_is_local_but_not_loaded_globally(self):
         """

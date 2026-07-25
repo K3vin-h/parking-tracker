@@ -9,6 +9,8 @@
 # --- Core web framework ---
 # Django 5.1.x — the LTS-eligible release in the 5.x generation.
 Django>=5.1,<5.2
+# django-csp: injects the Content-Security-Policy response header via middleware.
+django-csp>=4.0,<5
 
 # --- Database adapter ---
 # psycopg2-binary: pre-compiled PostgreSQL adapter. No local pg_config needed.
