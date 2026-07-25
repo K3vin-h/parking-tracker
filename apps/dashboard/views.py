@@ -328,20 +328,6 @@ class DashboardView(StaffRequiredMixin, TemplateView):
         return context
 
 
-class UploadView(StaffRequiredMixin, TemplateView):
-    """Render upload controls with every configured lot available for routing."""
-
-    template_name = "upload.html"
-
-    def get_context_data(self, **kwargs):
-        """Expose lot choices without auto-selecting ambiguously in multi-lot setups."""
-        context = super().get_context_data(**kwargs)
-        context["lots"] = ParkingLot.objects.order_by("name")
-        context["selected_lot"] = _selected_lot(self.request)
-        context.update(_shell_context("upload"))
-        return context
-
-
 class LogView(StaffRequiredMixin, TemplateView):
     """Render the session-log shell and its initial filtered page."""
 

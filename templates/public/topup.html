@@ -1,0 +1,30 @@
+{% extends "public/public_base.html" %}
+
+{% block title %}Add Funds — Parking Tracker{% endblock %}
+
+{% block content %}
+<section class="portal-narrow" aria-labelledby="topup-heading">
+    <div class="portal-card">
+        <h1 id="topup-heading">Add funds</h1>
+        <p class="portal-lead">Top up your balance to cover automatic parking charges.</p>
+
+        <form method="post" action="{% url 'public:topup' %}" novalidate>
+            {% csrf_token %}
+            {% for field in form %}
+            <div class="form-group">
+                <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+                {{ field }}
+                {% if field.help_text %}<p class="form-help">{{ field.help_text }}</p>{% endif %}
+                {% for error in field.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
+            </div>
+            {% endfor %}
+            <button class="btn btn--primary btn--full" type="submit">Add funds</button>
+        </form>
+
+        <p class="portal-note">
+            This is a placeholder payment step — no real payment method is charged.
+        </p>
+        <p class="portal-alt"><a href="{% url 'public:wallet' %}">Back to wallet</a></p>
+    </div>
+</section>
+{% endblock %}

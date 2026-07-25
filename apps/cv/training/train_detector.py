@@ -48,9 +48,10 @@ if str(REPO_ROOT) not in sys.path:
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset, random_split
 
 from apps.cv.models.plate_detector import PlateDetectorCNN
+from apps.cv.training.augment import DetectorAugment
 from apps.cv.training.dataset import PlateDetectorDataset
 from apps.cv.training._train_utils import (
     BG_PRIMARY,
@@ -469,6 +470,35 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _build_datasets(data_dir: Path, seed: int) -> tuple[Subset, Subset]:
+    """
+    Build one reproducible split backed by separate train/eval transforms.
+
+    WHY separate dataset objects: a Subset delegates to its parent dataset, so
+    splitting one augmented dataset would apply random distortion to validation
+    too and make the reported IoU noisy and misleading.
+    """
+    index_source = PlateDetectorDataset(data_dir)
+    rng = torch.Generator().manual_seed(seed)
+    train_indices, val_indices = random_split(
+        range(len(index_source)),
+        [0.8, 0.2],
+        generator=rng,
+    )
+    train_dataset = PlateDetectorDataset(
+        data_dir,
+        transform=DetectorAugment(train=True),
+    )
+    val_dataset = PlateDetectorDataset(
+        data_dir,
+        transform=DetectorAugment(train=False),
+    )
+    return (
+        Subset(train_dataset, train_indices.indices),
+        Subset(val_dataset, val_indices.indices),
+    )
+
+
 def main() -> None:
     args = _parse_args()
 
@@ -479,14 +509,8 @@ def main() -> None:
     logger.info("Using device: %s", device)
 
     # ── Data ───────────────────────────────────────────────────────────────
-    dataset = PlateDetectorDataset(args.data_dir)
-    logger.info("Dataset size: %d samples", len(dataset))
-
-    # 80/20 train/val split.
-    # WHY float split (requires PyTorch ≥ 2.0): cleaner than computing integer
-    # counts manually, and automatically handles odd-sized datasets.
-    rng = torch.Generator().manual_seed(args.seed)
-    train_set, val_set = random_split(dataset, [0.8, 0.2], generator=rng)
+    train_set, val_set = _build_datasets(args.data_dir, args.seed)
+    logger.info("Dataset size: %d samples", len(train_set) + len(val_set))
     logger.info("Train: %d  |  Val: %d", len(train_set), len(val_set))
 
     train_loader = DataLoader(

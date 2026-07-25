@@ -1,0 +1,166 @@
+{% comment %}
+Privacy-reduced kiosk result fragment. The server supplies one explicit
+presentation_state so an unknown outcome can never fall through as a success.
+Raw backend errors, owner data, balances, event IDs, and image paths are never
+rendered at this anonymous boundary.
+{% endcomment %}
+
+{% if result.presentation_state == "entry_success" %}
+<section class="kiosk-out kiosk-out--good"
+         data-kiosk-result-mode="success"
+         aria-labelledby="kiosk-result-heading">
+    <span class="kiosk-out__icon" aria-hidden="true">✓</span>
+    <p class="kiosk-out__status"
+       id="kiosk-result-heading"
+       data-kiosk-result-heading
+       tabindex="-1">Welcome</p>
+    <p class="kiosk-out__plate mono">{{ result.plate_text }}</p>
+    {% if result.registered %}
+    <p class="kiosk-out__badge kiosk-out__badge--ok">Registered vehicle</p>
+    {% endif %}
+    <p class="kiosk-out__detail">Entry recorded. Please proceed through the gate.</p>
+    <div class="kiosk-out__actions">
+        <button class="btn btn--secondary" type="button" data-kiosk-reset>
+            Scan another vehicle
+        </button>
+    </div>
+</section>
+
+{% elif result.presentation_state == "exit_success" %}
+<section class="kiosk-out kiosk-out--good"
+         data-kiosk-result-mode="success"
+         aria-labelledby="kiosk-result-heading">
+    <span class="kiosk-out__icon" aria-hidden="true">✓</span>
+    <p class="kiosk-out__status"
+       id="kiosk-result-heading"
+       data-kiosk-result-heading
+       tabindex="-1">Goodbye</p>
+    <p class="kiosk-out__plate mono">{{ result.plate_text }}</p>
+    <p class="kiosk-out__amount mono">${{ result.charge_amount }}</p>
+    {% if result.billed_to_account %}
+    <p class="kiosk-out__badge kiosk-out__badge--ok">Billed to your account</p>
+    {% else %}
+    <p class="kiosk-out__detail">Amount due — please pay at the gate.</p>
+    {% endif %}
+    <p class="kiosk-out__detail">Exit recorded. Please proceed.</p>
+    <div class="kiosk-out__actions">
+        <button class="btn btn--secondary" type="button" data-kiosk-reset>
+            Scan another vehicle
+        </button>
+    </div>
+</section>
+
+{% elif result.presentation_state == "low_confidence" %}
+<section class="kiosk-out kiosk-out--warning"
+         data-kiosk-result-mode="recovery"
+         role="alert"
+         aria-labelledby="kiosk-result-heading">
+    <p class="kiosk-out__status"
+       id="kiosk-result-heading"
+       data-kiosk-result-heading
+       tabindex="-1">Check this plate</p>
+    {% if result.plate_text %}
+    <p class="kiosk-out__plate mono">{{ result.plate_text }}?</p>
+    {% endif %}
+    <p class="kiosk-out__detail">
+        The reading was uncertain. Retake a closer photo or ask the attendant.
+    </p>
+    <div class="kiosk-out__actions">
+        <button class="btn btn--primary" type="button" data-kiosk-retake>
+            Retake photo
+        </button>
+        <button class="btn btn--secondary" type="button" data-kiosk-attendant>
+            Call attendant
+        </button>
+    </div>
+</section>
+
+{% elif result.presentation_state == "unreadable" %}
+<section class="kiosk-out kiosk-out--warning"
+         data-kiosk-result-mode="recovery"
+         role="alert"
+         aria-labelledby="kiosk-result-heading">
+    <p class="kiosk-out__status"
+       id="kiosk-result-heading"
+       data-kiosk-result-heading
+       tabindex="-1">We couldn't read the plate clearly</p>
+    <p class="kiosk-out__detail">
+        Move closer, improve the lighting, and keep the plate level in the photo.
+    </p>
+    <div class="kiosk-out__actions">
+        <button class="btn btn--primary" type="button" data-kiosk-retake>
+            Retake photo
+        </button>
+        <button class="btn btn--secondary" type="button" data-kiosk-attendant>
+            Call attendant
+        </button>
+    </div>
+</section>
+
+{% elif result.presentation_state == "invalid_image" %}
+<section class="kiosk-out kiosk-out--error"
+         data-kiosk-result-mode="recovery"
+         role="alert"
+         aria-labelledby="kiosk-result-heading">
+    <p class="kiosk-out__status"
+       id="kiosk-result-heading"
+       data-kiosk-result-heading
+       tabindex="-1">This image cannot be used</p>
+    <p class="kiosk-out__detail">
+        The file must be a valid JPEG or PNG smaller than 10 MB.
+    </p>
+    <div class="kiosk-out__actions">
+        <button class="btn btn--primary" type="button" data-kiosk-retake>
+            Choose another photo
+        </button>
+    </div>
+</section>
+
+{% elif result.presentation_state == "unmatched_exit" %}
+<section class="kiosk-out kiosk-out--warning"
+         data-kiosk-result-mode="recovery"
+         role="alert"
+         aria-labelledby="kiosk-result-heading">
+    <p class="kiosk-out__status"
+       id="kiosk-result-heading"
+       data-kiosk-result-heading
+       tabindex="-1">No matching entry found</p>
+    {% if result.plate_text %}
+    <p class="kiosk-out__plate mono">{{ result.plate_text }}</p>
+    {% endif %}
+    <p class="kiosk-out__detail">
+        Retake the photo or contact the attendant before leaving.
+    </p>
+    <div class="kiosk-out__actions">
+        <button class="btn btn--primary" type="button" data-kiosk-retake>
+            Retake photo
+        </button>
+        <button class="btn btn--secondary" type="button" data-kiosk-attendant>
+            Call attendant
+        </button>
+    </div>
+</section>
+
+{% else %}
+{# Model failures and unknown states share one deliberately generic safe fallback. #}
+<section class="kiosk-out kiosk-out--error"
+         data-kiosk-result-mode="recovery"
+         role="alert"
+         aria-labelledby="kiosk-result-heading">
+    <p class="kiosk-out__status"
+       id="kiosk-result-heading"
+       data-kiosk-result-heading
+       tabindex="-1">We could not process the scan</p>
+    <p class="kiosk-out__detail">
+        Try once more. If this continues, contact the gate attendant.
+    </p>
+    <div class="kiosk-out__actions">
+        <button class="btn btn--primary" type="button" data-kiosk-retry>
+            Try again
+        </button>
+        <button class="btn btn--secondary" type="button" data-kiosk-attendant>
+            Call attendant
+        </button>
+    </div>
+</section>
+{% endif %}

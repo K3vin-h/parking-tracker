@@ -255,10 +255,9 @@ class TestCleanupOldImages:
         # Field must be unchanged.
         assert event.image.name == "plates/new.jpg"
 
-    def test_null_retention_keeps_everything(self):
+    def test_null_retention_keeps_resolved_images(self):
         """
-        Lots with image_retention_days=None are skipped entirely — the operator
-        has opted for indefinite retention and the command must not touch them.
+        A resolved event follows the lot's explicit keep-forever policy.
         """
         lot = ParkingLot.objects.create(name="Forever Lot")
         LotSettings.objects.create(lot=lot, image_retention_days=None)
@@ -269,6 +268,8 @@ class TestCleanupOldImages:
             raw_plate_text="FOREVER",
             confidence_score=0.9,
             event_type="entry",
+            manually_corrected=True,
+            corrected_plate="FOREVER",
         )
         # 999 days old — ancient, but retention is null so must survive.
         PlateDetectionEvent.objects.filter(pk=event.pk).update(
@@ -278,13 +279,38 @@ class TestCleanupOldImages:
         stdout = StringIO()
         call_command("cleanup_old_images", stdout=stdout)
 
-        # Command should report nothing to do (no lots with retention configured).
-        assert "Nothing to do" in stdout.getvalue()
+        assert "no eligible images for configured retention" in stdout.getvalue()
 
         # Row and image field must be untouched.
         event.refresh_from_db()
         assert event.image.name == "plates/keep-forever.jpg"
         assert PlateDetectionEvent.objects.filter(pk=event.pk).exists() is True
+
+    def test_unresolved_image_has_a_finite_privacy_retention(
+        self,
+        settings,
+    ):
+        """Forgotten review items cannot retain sensitive images indefinitely."""
+        settings.UNRESOLVED_IMAGE_RETENTION_DAYS = 7
+        lot = ParkingLot.objects.create(name="Unresolved Privacy Lot")
+        LotSettings.objects.create(lot=lot, image_retention_days=None)
+        event = PlateDetectionEvent.objects.create(
+            session=None,
+            lot=lot,
+            image="plates/stale-unresolved.jpg",
+            raw_plate_text="",
+            confidence_score=0.0,
+            event_type="entry",
+            is_low_confidence=True,
+        )
+        PlateDetectionEvent.objects.filter(pk=event.pk).update(
+            timestamp=timezone.now() - timedelta(days=8)
+        )
+
+        call_command("cleanup_old_images")
+
+        event.refresh_from_db()
+        assert not event.image
 
     def test_dry_run_reports_but_does_not_clear(self):
         """

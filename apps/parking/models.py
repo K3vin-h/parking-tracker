@@ -52,10 +52,14 @@ RELATIONSHIP DIAGRAM
 """
 
 from decimal import Decimal
+import uuid
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
+
+from apps.parking.normalization import canonicalize_plate
 
 
 class LicensePlate(models.Model):
@@ -126,23 +130,25 @@ class LicensePlate(models.Model):
     class Meta:
         verbose_name = "license plate"
         verbose_name_plural = "license plates"
-        # Prevents one user from registering the same plate twice.
-        # Does NOT prevent two DIFFERENT users from registering the same plate_text.
-        # DAY 7 NOTE: handle_entry() in services.py must handle the ambiguous case
-        # where multiple LicensePlate records share the same plate_text across users.
-        # Resolution strategy: match via session.plate_text directly; use .first()
-        # on the LicensePlate lookup and document that cross-user plate conflicts
-        # are a known edge case (two people share a plate — unlikely in practice).
-        #
-        # WHY UniqueConstraint (not unique_together): unique_together is
-        # deprecated since Django 4.2; the named-constraint form also allows
-        # adding condition/deferrable options later without restructuring.
+        # One canonical plate has one account owner. Automatic parking billing
+        # cannot safely choose between residents, so ambiguity is rejected by the
+        # database instead of being resolved by insertion order.
         constraints = [
             models.UniqueConstraint(
-                fields=["user", "plate_text"],
-                name="licenseplate_user_plate_unique",
+                fields=["plate_text"],
+                name="unique_registered_plate_text",
             ),
         ]
+
+    def save(self, *args, **kwargs):
+        """Canonicalize every normal ORM/admin write before uniqueness is enforced."""
+        self.plate_text = canonicalize_plate(self.plate_text)
+        return super().save(*args, **kwargs)
+
+    def clean(self):
+        """Canonicalize before ModelForm constraint validation reports collisions."""
+        self.plate_text = canonicalize_plate(self.plate_text)
+        return super().clean()
 
     def __str__(self):
         # "ABC123 (Work Truck)" or just "ABC123" if no label.
@@ -305,6 +311,12 @@ class LotSettings(models.Model):
         verbose_name = "lot settings"
         verbose_name_plural = "lot settings"
         constraints = [
+            # A zero/negative rate would make paid parking silently free or
+            # produce nonsensical negative revenue when code bypasses forms.
+            models.CheckConstraint(
+                condition=models.Q(rate__gt=Decimal("0.00")),
+                name="lotsettings_rate_positive",
+            ),
             # billing_unit has model-level choices, but choices are NOT enforced
             # by the database. A bad value (bad migration, direct SQL) would make
             # calculate_charge() silently fall back to per-hour billing — a wrong
@@ -321,7 +333,65 @@ class LotSettings(models.Model):
                 & models.Q(grace_period_minutes__lte=1440),
                 name="lotsettings_grace_period_range",
             ),
+            # The cap has exactly two valid states: disabled with no stale
+            # amount, or enabled with a strictly positive amount.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        daily_cap_enabled=False,
+                        daily_cap_amount__isnull=True,
+                    )
+                    | models.Q(
+                        daily_cap_enabled=True,
+                        daily_cap_amount__isnull=False,
+                        daily_cap_amount__gt=Decimal("0.00"),
+                    )
+                ),
+                name="lotsettings_daily_cap_consistent",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(confidence_threshold__gte=0.0)
+                & models.Q(confidence_threshold__lte=1.0),
+                name="lotsettings_confidence_range",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(image_retention_days__isnull=True)
+                | models.Q(image_retention_days__gte=1),
+                name="lotsettings_retention_positive",
+            ),
         ]
+
+    def clean(self):
+        """Reject unsafe direct model writes before they reach billing services."""
+        super().clean()
+        errors = {}
+        if self.rate is not None and self.rate <= Decimal("0.00"):
+            errors["rate"] = "Rate must be greater than zero."
+        if self.daily_cap_enabled:
+            if (
+                self.daily_cap_amount is None
+                or self.daily_cap_amount <= Decimal("0.00")
+            ):
+                errors["daily_cap_amount"] = (
+                    "Enter a positive daily cap amount when the cap is enabled."
+                )
+        elif self.daily_cap_amount is not None:
+            errors["daily_cap_amount"] = (
+                "Clear the daily cap amount when the cap is disabled."
+            )
+        if not 0.0 <= self.confidence_threshold <= 1.0:
+            errors["confidence_threshold"] = (
+                "Confidence threshold must be between 0 and 1."
+            )
+        if (
+            self.image_retention_days is not None
+            and self.image_retention_days < 1
+        ):
+            errors["image_retention_days"] = (
+                "Image retention must be at least one day."
+            )
+        if errors:
+            raise ValidationError(errors)
 
     def __str__(self):
         return f"Settings for {self.lot.name}"
@@ -744,3 +814,216 @@ class PlateDetectionEvent(models.Model):
 
     def __str__(self):
         return f"{self.event_type} — {self.raw_plate_text} ({self.timestamp})"
+
+
+class RequestRateLimit(models.Model):
+    """
+    A shared fixed-window request counter used by every web worker.
+
+    WHY DATABASE STATE: the production server runs multiple Gunicorn workers, so
+    process-local cache counters can be bypassed by landing on another worker. The
+    database uniqueness constraint makes one bucket authoritative across them all.
+    Raw client identifiers are hashed before storage to avoid retaining IP addresses.
+    """
+
+    scope = models.CharField(max_length=64)
+    identity_hash = models.CharField(max_length=64)
+    window_start = models.BigIntegerField()
+    count = models.PositiveIntegerField(default=1)
+    expires_at = models.DateTimeField(db_index=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["scope", "identity_hash", "window_start"],
+                name="unique_rate_limit_bucket",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.scope}:{self.identity_hash[:12]} ({self.count})"
+
+
+class KioskDeviceCapability(models.Model):
+    """
+    Database-backed authorization for one browser, lot, and lane direction.
+
+    WHY DATABASE STATE: a Django session alone cannot atomically consume a nonce
+    across concurrent requests. Locking this row makes one request authoritative.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    session_key = models.CharField(max_length=40, unique=True)
+    token_fingerprint = models.CharField(max_length=64)
+    lot = models.ForeignKey(
+        ParkingLot,
+        on_delete=models.CASCADE,
+        related_name="kiosk_capabilities",
+    )
+    event_type = models.CharField(
+        max_length=10,
+        choices=PlateDetectionEvent.EVENT_TYPE_CHOICES,
+    )
+    nonce_hash = models.CharField(max_length=64)
+    expires_at = models.DateTimeField(db_index=True)
+
+    def __str__(self):
+        return f"{self.lot.name}:{self.event_type} ({self.id})"
+
+
+class KioskImageReplayDigest(models.Model):
+    """Remember every recent image for one kiosk so alternating replays fail."""
+
+    capability = models.ForeignKey(
+        KioskDeviceCapability,
+        on_delete=models.CASCADE,
+        related_name="replay_digests",
+    )
+    digest = models.CharField(max_length=64)
+    seen_at = models.DateTimeField(db_index=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["capability", "digest"],
+                name="unique_kiosk_image_digest",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.capability_id}:{self.digest[:12]}"
+
+
+class Wallet(models.Model):
+    """
+    A prepaid balance attached to a user account (the China auto-pay model).
+
+    WHY THIS EXISTS:
+      When a registered plate exits the lot, the parking charge is deducted from
+      the owner's wallet automatically — no cashier, no per-visit payment. This
+      mirrors how Chinese LPR lots link a plate to a WeChat/Alipay balance.
+
+    BALANCE AS A CACHED TOTAL:
+      `balance` is a denormalized running total. The authoritative record of every
+      credit and debit is the immutable WalletTransaction ledger below. `balance`
+      must always equal SUM(transactions.amount); every mutation writes both in one
+      atomic, row-locked step (see apps/parking/wallet.py). A test reconciles them.
+
+    NEGATIVE BALANCES ARE ALLOWED (by product decision):
+      An exit is never blocked for insufficient funds — the barrier must not strand
+      a car. A short account simply goes negative (the user owes), and staff see it
+      in the arrears view. Hence there is deliberately NO MinValueValidator here.
+    """
+
+    # OneToOne: each user has exactly one wallet. related_name='wallet' enables
+    # user.wallet. CASCADE: deleting the user removes their wallet + ledger.
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="wallet",
+        help_text="The account this prepaid balance belongs to.",
+    )
+
+    # Decimal, never float — the cardinal money rule. max_digits=10 comfortably
+    # covers realistic balances (and negative debt) to the cent.
+    balance = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        help_text="Current prepaid balance in dollars. May be negative (amount owed).",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "wallet"
+        verbose_name_plural = "wallets"
+
+    def __str__(self):
+        return f"Wallet({self.user}: {self.balance})"
+
+
+class WalletTransaction(models.Model):
+    """
+    One immutable, signed entry in a wallet's ledger — the money audit trail.
+
+    WHY A LEDGER (not just a balance field):
+      Money needs an audit trail. Every top-up and every parking deduction is
+      recorded as its own row and NEVER updated or deleted. The wallet balance is
+      reconstructable at any time by summing `amount`, so drift between the cached
+      balance and reality is detectable. Users also see this as their history.
+
+    SIGN CONVENTION:
+      amount > 0  → credit (money added: a top-up)
+      amount < 0  → debit  (money removed: a parking charge)
+      This keeps SUM(amount) == balance trivially true regardless of kind.
+    """
+
+    class Kind(models.TextChoices):
+        # A prepaid top-up (credit). Reference holds the payment placeholder id.
+        TOPUP = "topup", "Top-up"
+        # An automatic parking deduction (debit) linked to a completed session.
+        CHARGE = "charge", "Parking charge"
+        # A manual staff correction (credit or debit). Reserved for admin use.
+        ADJUSTMENT = "adjustment", "Adjustment"
+
+    wallet = models.ForeignKey(
+        Wallet,
+        on_delete=models.CASCADE,
+        related_name="transactions",
+        help_text="The wallet this ledger entry belongs to.",
+    )
+
+    # Signed amount (see class docstring). This is the single source of truth for
+    # how the balance moved; storing the sign (not an absolute + a direction flag)
+    # makes the SUM(amount) == balance invariant impossible to get wrong.
+    amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        help_text="Signed dollar amount: positive = credit, negative = debit.",
+    )
+
+    kind = models.CharField(
+        max_length=20,
+        choices=Kind.choices,
+        help_text="What produced this ledger entry.",
+    )
+
+    # SET_NULL (not CASCADE): the ledger must survive even if a session record is
+    # later removed — an audit trail that deletes itself is not an audit trail.
+    session = models.ForeignKey(
+        ParkingSession,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="wallet_transactions",
+        help_text="The parking session this charge settled, if any.",
+    )
+
+    # Human-readable note (e.g. plate token for a charge). Never store raw plate
+    # text that could widen PII exposure beyond what the session already holds.
+    description = models.CharField(max_length=200, blank=True, default="")
+
+    # External payment reference from the (placeholder) gateway for top-ups.
+    reference = models.CharField(max_length=100, blank=True, default="")
+
+    # Ledger rows are insert-only: created once, never updated. Hence only a
+    # created_at timestamp (no updated_at) — an update would corrupt the audit.
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "wallet transaction"
+        verbose_name_plural = "wallet transactions"
+        # Newest first: the history view and admin both read most-recent-first.
+        ordering = ["-created_at", "-pk"]
+        indexes = [
+            # The history view lists one wallet's entries newest-first.
+            models.Index(
+                fields=["wallet", "-created_at"],
+                name="wallet_txn_wallet_time_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.kind} {self.amount} (wallet {self.wallet_id})"

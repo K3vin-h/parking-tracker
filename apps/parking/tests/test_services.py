@@ -356,16 +356,15 @@ class TestHandleEntry:
         event2 = PlateDetectionEvent.objects.get(session=session2)
         assert event2.bounding_box == []  # wrong length → empty
 
-    def test_links_lowest_pk_on_multi_user_plate(
+    def test_rejects_duplicate_multi_user_plate(
         self, parking_lot, lot_settings, license_plate, user
     ):
-        """When two users register the same plate, link to the lowest-pk one."""
-        other = User.objects.create_user(username="other", password="x")
-        LicensePlate.objects.create(user=other, plate_text="ABC123")  # higher pk
+        """Ambiguous cross-account ownership is rejected before session matching."""
+        from django.db import IntegrityError
 
-        session = handle_entry("ABC123", 0.9, [], PLATE_IMAGE, parking_lot)
-        assert session.license_plate == license_plate  # the lower-pk registration
-        assert session.user == user
+        other = User.objects.create_user(username="other", password="x")
+        with pytest.raises(IntegrityError):
+            LicensePlate.objects.create(user=other, plate_text="ABC123")
 
 
 # ── handle_exit ──────────────────────────────────────────────────────────────

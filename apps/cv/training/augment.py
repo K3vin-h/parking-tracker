@@ -46,13 +46,11 @@ class DetectorAugment:
             self._transform = v2.Compose([
                 v2.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.3, hue=0.05),
                 v2.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0)),
-                # Normalize before RandomGrayscale: ImageNet mean/std applied to
-                # consistent 3-ch RGB. When grayscale fires, all three channels
-                # hold the same luma value — a valid normalized input for 3-ch
-                # backbones. Normalizing after grayscale would apply different
-                # per-channel offsets to three identical values (wrong statistics).
-                normalize,
+                # Convert source RGB luminance before per-channel normalization;
+                # doing this after normalization would weight already shifted
+                # channels and no longer represent the original grayscale image.
                 v2.RandomGrayscale(p=0.1),
+                normalize,
             ])
         else:
             self._transform = normalize
@@ -110,6 +108,7 @@ class RecognizerAugment:
     _STD = [0.5]
 
     def __init__(self, train: bool = True) -> None:
+        self._train = train
         normalize = v2.Normalize(mean=self._MEAN, std=self._STD)
 
         if train:
