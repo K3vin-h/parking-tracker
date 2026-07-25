@@ -15,6 +15,11 @@ synthetic training data and real parking-lot camera footage.
 import torch
 from torchvision.transforms import v2
 
+# Checkpoints carrying this marker were trained with the evaluation
+# normalizers below. Unversioned files are ambiguous and inference rejects
+# them rather than guessing an input distribution that could corrupt scans.
+NORMALIZED_PREPROCESSING_VERSION = "normalized-v1"
+
 
 class DetectorAugment:
     """

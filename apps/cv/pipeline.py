@@ -32,7 +32,11 @@ from apps.cv.preprocessing import (
     resize_for_detector,
     to_tensor,
 )
-from apps.cv.training.augment import DetectorAugment, RecognizerAugment
+from apps.cv.training.augment import (
+    NORMALIZED_PREPROCESSING_VERSION,
+    DetectorAugment,
+    RecognizerAugment,
+)
 from apps.cv.training.dataset import BLANK_IDX
 from apps.cv.utils.device import get_device
 
@@ -161,12 +165,20 @@ class PlateRecognitionPipeline:
         # (with internal paths) would crash the first upload request.  The full
         # error is logged server-side; callers get a clean, actionable message.
         self.detector = PlateDetectorCNN()
-        self._load_weights(self.detector, detector_path, model_name="detector")
+        self._load_weights(
+            self.detector,
+            detector_path,
+            model_name="detector",
+        )
         self.detector.to(self.device)
         self.detector.eval()
 
         self.recognizer = PlateRecognizerCRNN()
-        self._load_weights(self.recognizer, recognizer_path, model_name="recognizer")
+        self._load_weights(
+            self.recognizer,
+            recognizer_path,
+            model_name="recognizer",
+        )
         self.recognizer.to(self.device)
         self.recognizer.eval()
 
@@ -176,17 +188,37 @@ class PlateRecognitionPipeline:
         self, model: torch.nn.Module, path: str, model_name: str
     ) -> None:
         """
-        Load a state dict into `model`, converting corruption / mismatch errors
-        into clean RuntimeErrors.
+        Load versioned model weights that declare their preprocessing contract.
 
         WHY a helper: both models need identical guard logic, and keeping the
         except clause in one place ensures the no-path-leak policy (full path
         logged internally, generic message raised) stays consistent.
         torch.load fails on corrupt/truncated files; load_state_dict fails on
         architecture mismatches — both must be guarded.
+
+        WHY reject unversioned weights: plain state dicts may have been trained
+        either before or after normalization was introduced. There is no safe
+        way to infer their required input distribution, so failing closed
+        prevents confident misreads and forces an explicit retraining/migration.
         """
         try:
-            state_dict = torch.load(path, map_location=self.device, weights_only=True)
+            checkpoint = torch.load(
+                path,
+                map_location=self.device,
+                weights_only=True,
+            )
+            if not isinstance(checkpoint, dict):
+                raise ValueError("Checkpoint payload is not a state dictionary")
+
+            if (
+                checkpoint.get("preprocessing_version")
+                != NORMALIZED_PREPROCESSING_VERSION
+            ):
+                raise ValueError("Checkpoint preprocessing version is unsupported")
+            state_dict = checkpoint.get("state_dict")
+            if not isinstance(state_dict, dict):
+                raise ValueError("Checkpoint state dictionary is missing")
+
             model.load_state_dict(state_dict)
         except Exception as exc:
             logger.error(
@@ -295,7 +327,7 @@ class PlateRecognitionPipeline:
                 "is_low_confidence": True,
             }
         crop_tensor = prepare_for_recognizer(crop)             # (1, 32, 128) float32
-        crop_tensor = _RECOGNIZER_EVAL_TRANSFORM(crop_tensor)  # zero-centered
+        crop_tensor = _RECOGNIZER_EVAL_TRANSFORM(crop_tensor)
 
         # ── Step 5: recognise text ────────────────────────────────────────
         recog_input = crop_tensor.unsqueeze(0).to(self.device)  # (1, 1, 32, 128)

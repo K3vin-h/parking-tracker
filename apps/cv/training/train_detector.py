@@ -51,7 +51,10 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Subset, random_split
 
 from apps.cv.models.plate_detector import PlateDetectorCNN
-from apps.cv.training.augment import DetectorAugment
+from apps.cv.training.augment import (
+    NORMALIZED_PREPROCESSING_VERSION,
+    DetectorAugment,
+)
 from apps.cv.training.dataset import PlateDetectorDataset
 from apps.cv.training._train_utils import (
     BG_PRIMARY,
@@ -618,15 +621,19 @@ def main() -> None:
             current_lr,
         )
 
-        # Save the best model by validation loss.
-        # WHY save only the state_dict and not the full model: state_dict is
-        # architecture-independent — it contains only the weights.  Loading it
-        # requires reconstructing the model in code, which is explicit about
-        # what class is being loaded and avoids pickle-based class loading.
+        # Save weights plus their preprocessing contract, never the model
+        # object. The explicit marker lets inference accept these normalized
+        # weights while rejecting ambiguous plain state-dict checkpoints.
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_epoch = epoch
-            torch.save(model.state_dict(), output_path)
+            torch.save(
+                {
+                    "preprocessing_version": NORMALIZED_PREPROCESSING_VERSION,
+                    "state_dict": model.state_dict(),
+                },
+                output_path,
+            )
             logger.info(
                 "  ↳ New best (val_loss=%.6f) → saved to %s", best_val_loss, output_path
             )
@@ -636,10 +643,7 @@ def main() -> None:
         best_val_loss,
         output_path,
     )
-    logger.info(
-        "Load with: model.load_state_dict(torch.load(%r, weights_only=True))",
-        str(output_path),
-    )
+    logger.info("Load through PlateRecognitionPipeline: %s", output_path)
 
     # ── Training curve ─────────────────────────────────────────────────────
     # WHY two separate guards: bundling plot-save and viewer-launch in one
