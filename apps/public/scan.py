@@ -33,7 +33,7 @@ from django.views.decorators.csrf import csrf_protect
 from django.views.decorators.http import require_POST
 from django.views.generic import TemplateView
 
-from apps.dashboard.scan_core import ScanOutcome, run_plate_scan
+from apps.dashboard.scan_core import ScanOutcome, resolve_lot, run_plate_scan
 from apps.dashboard.utils import confidence_band
 from apps.parking.models import (
     KioskDeviceCapability,
@@ -289,12 +289,7 @@ def activate_kiosk(request: HttpRequest) -> HttpResponse:
     event_type = (request.POST.get("event_type") or "").strip().lower()
     if event_type not in {"entry", "exit"}:
         return JsonResponse({"error": "Choose an entry or exit lane."}, status=400)
-    lot_name = (request.POST.get("lot") or "").strip()
-    if lot_name:
-        lot = ParkingLot.objects.filter(name=lot_name).first()
-    else:
-        lots = list(ParkingLot.objects.order_by("pk")[:2])
-        lot = lots[0] if len(lots) == 1 else None
+    lot = resolve_lot(request)
     if lot is None:
         return JsonResponse({"error": "Choose a valid parking lot."}, status=400)
 

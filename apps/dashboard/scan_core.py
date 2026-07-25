@@ -162,7 +162,7 @@ def _inspect_uploaded_image(upload_file, declared_extension: str) -> str:
     return detected_extension
 
 
-def _resolve_lot(request: HttpRequest) -> ParkingLot | None:
+def resolve_lot(request: HttpRequest) -> ParkingLot | None:
     """
     Resolve the target ParkingLot from the request.
 
@@ -363,7 +363,7 @@ def run_plate_scan(request: HttpRequest) -> ScanOutcome:
             "error", error="event_type must be 'entry' or 'exit'.", status=400
         )
 
-    lot = _resolve_lot(request)
+    lot = resolve_lot(request)
     if lot is None:
         return ScanOutcome("error", error="Unknown or unspecified lot.", status=400)
     try:
