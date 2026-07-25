@@ -103,6 +103,7 @@
             This kiosk must be activated by an authorized operator.
         </p>
         <form class="kiosk__form"
+              data-kiosk-activation-form
               hx-post="{% url 'public:kiosk_activate' %}"
               hx-swap="none"
               method="post">
@@ -140,6 +141,9 @@
                 Activate kiosk
             </button>
         </form>
+        <div class="kiosk__result"
+             data-kiosk-activation-result
+             aria-live="assertive"></div>
     </div>
     {% endif %}
 </section>

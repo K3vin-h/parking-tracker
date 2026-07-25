@@ -8,6 +8,11 @@
 (() => {
     "use strict";
 
+    const activationForm = document.querySelector("[data-kiosk-activation-form]");
+    const activationResult = document.querySelector(
+        "[data-kiosk-activation-result]",
+    );
+    const activationToken = activationForm?.querySelector('input[name="token"]');
     const panel = document.getElementById("kiosk-panel");
     const uploader = document.querySelector("[data-kiosk-uploader]");
     const form = document.getElementById("kiosk-form");
@@ -23,7 +28,63 @@
     const chooseButtons = document.querySelectorAll("[data-kiosk-choose-file]");
     let previewUrl = null;
 
-    // Activation pages load the same script but do not expose scan controls.
+    /**
+     * Show a safe operator-facing activation failure without trusting response HTML.
+     */
+    function showActivationFailure(status = 0) {
+        if (!activationResult) {
+            return;
+        }
+        const rateLimited = status === 429;
+        const heading = rateLimited
+            ? "Too many activation attempts"
+            : "Activation failed";
+        const detail = rateLimited
+            ? "Wait a few minutes, then try again."
+            : "Check the activation token, lane, and parking lot, then try again.";
+
+        activationResult.innerHTML = `
+            <section class="kiosk-out kiosk-out--error"
+                     role="alert"
+                     aria-labelledby="kiosk-activation-error-heading">
+                <p class="kiosk-out__status"
+                   id="kiosk-activation-error-heading"
+                   data-kiosk-activation-heading
+                   tabindex="-1">${heading}</p>
+                <p class="kiosk-out__detail">${detail}</p>
+            </section>
+        `;
+        activationResult
+            .querySelector("[data-kiosk-activation-heading]")
+            ?.focus();
+    }
+
+    /** Restrict activation lifecycle handling to the activation form. */
+    function isActivationRequest(event) {
+        return (
+            activationForm &&
+            (event.detail?.requestConfig?.elt === activationForm ||
+                event.target === activationForm)
+        );
+    }
+
+    if (activationForm && activationResult) {
+        ["htmx:responseError", "htmx:sendError", "htmx:timeout"].forEach(
+            (name) => {
+                document.body.addEventListener(name, (event) => {
+                    if (!isActivationRequest(event)) {
+                        return;
+                    }
+                    if (activationToken) {
+                        activationToken.value = "";
+                    }
+                    showActivationFailure(event.detail?.xhr?.status || 0);
+                });
+            },
+        );
+    }
+
+    // Activation pages load this script but do not expose scan controls.
     if (
         !panel ||
         !uploader ||
@@ -242,6 +303,8 @@
         const nonceInput = document.getElementById("kiosk-nonce");
         if (nonce && nonceInput) {
             nonceInput.value = nonce;
+            // form.reset() restores defaultValue, so rotate both properties.
+            nonceInput.defaultValue = nonce;
         }
         setControlsDisabled(false);
         if (panel.classList.contains("is-processing")) {

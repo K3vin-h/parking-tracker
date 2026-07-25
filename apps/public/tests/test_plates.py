@@ -82,3 +82,17 @@ class TestPlatesManagement:
         client.force_login(user)
         resp = client.get(reverse("public:plate_delete", args=[plate.pk]))
         assert resp.status_code == 405
+
+    def test_delete_confirmation_uses_csp_allowed_external_script(
+        self, client, user
+    ):
+        """The confirmation must not depend on an inline handler blocked by CSP."""
+        LicensePlate.objects.create(user=user, plate_text="MINE01")
+        client.force_login(user)
+
+        resp = client.get(PLATES_URL)
+        html = resp.content.decode()
+
+        assert "onsubmit=" not in html
+        assert "data-plate-delete" in html
+        assert "/static/js/plates.js" in html

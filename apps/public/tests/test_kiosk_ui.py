@@ -88,3 +88,18 @@ def test_kiosk_shell_exposes_browser_state_hooks():
     assert 'id="kiosk-processing"' in html
     assert 'id="kiosk-result"' in html
     assert 'aria-busy="false"' in html
+
+
+def test_activation_shell_exposes_visible_error_hooks():
+    """Activation failures need an operator-visible target outside scan controls."""
+    html = render_to_string(
+        "public/kiosk.html",
+        {
+            "kiosk_activated": False,
+            "lots": [SimpleNamespace(name="Test Lot")],
+        },
+    )
+
+    assert "data-kiosk-activation-form" in html
+    assert "data-kiosk-activation-result" in html
+    assert 'aria-live="assertive"' in html

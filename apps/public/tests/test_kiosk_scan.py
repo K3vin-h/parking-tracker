@@ -14,6 +14,7 @@ Focus areas unique to the kiosk:
   - the endpoint is rate limited.
 """
 
+import hashlib
 import io
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -28,8 +29,9 @@ from django.contrib.auth import get_user_model
 from django.contrib.sessions.backends.db import SessionStore
 from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.db import close_old_connections, connection
+from django.db import DatabaseError, close_old_connections, connection
 from django.test import Client, RequestFactory
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils import timezone
 from PIL import Image
@@ -38,6 +40,8 @@ from apps.cv.preprocessing import UnsafeImagePathError
 from apps.dashboard.scan_core import ScanOutcome, _processing_path
 from apps.public.scan import _consume_kiosk_request, _public_payload
 from apps.parking.models import (
+    KioskDeviceCapability,
+    KioskImageReplayDigest,
     LicensePlate,
     LotSettings,
     ParkingLot,
@@ -253,6 +257,18 @@ class TestKioskAuthorization:
         assert fingerprint
         assert fingerprint != "test-kiosk-secret"
 
+    def test_activation_db_failure_does_not_orphan_session(self, client, parking_lot):
+        """A capability write failure must not leave a scan-unable browser session."""
+        with patch(
+            "apps.public.scan.KioskDeviceCapability.objects.update_or_create",
+            side_effect=DatabaseError("capability write failed"),
+        ):
+            resp = _activate(client, lot=parking_lot.name)
+
+        assert resp.status_code == 503
+        assert "kiosk_token_fingerprint" not in client.session
+        assert not KioskDeviceCapability.objects.exists()
+
     def test_token_rotation_revokes_existing_activation(
         self,
         client,
@@ -352,6 +368,54 @@ class TestKioskAuthorization:
         assert different_image.status_code == 200
         assert alternating_replay.status_code == 403
 
+    def test_failed_scan_allows_same_image_retry(self, client, lot_settings):
+        """A rejected upload must not blacklist the same photo for the replay window."""
+        _activate(client, event_type="entry", lot=lot_settings.lot.name)
+        image_bytes = _real_image_bytes()
+        with patch(
+            "apps.public.scan.run_plate_scan",
+            side_effect=[
+                ScanOutcome(
+                    "error",
+                    error="Image could not be decoded safely.",
+                    status=422,
+                ),
+                ScanOutcome(
+                    "entry",
+                    event_type="entry",
+                    result=_result(),
+                    session=SimpleNamespace(
+                        user_id=None,
+                        entry_time=timezone.now(),
+                    ),
+                ),
+            ],
+        ):
+            failed = client.post(
+                SCAN_URL,
+                {
+                    "event_type": "entry",
+                    "lot": lot_settings.lot.name,
+                    "kiosk_nonce": client.session["kiosk_scan_nonce"],
+                    "image": _image(content=image_bytes),
+                },
+            )
+            retry = client.post(
+                SCAN_URL,
+                {
+                    "event_type": "entry",
+                    "lot": lot_settings.lot.name,
+                    "kiosk_nonce": client.session["kiosk_scan_nonce"],
+                    "image": _image(content=image_bytes),
+                },
+            )
+
+        assert failed.status_code == 422
+        assert retry.status_code == 200
+        assert retry.json()["outcome"] == "entry"
+        digest = hashlib.sha256(image_bytes).hexdigest()
+        assert KioskImageReplayDigest.objects.filter(digest=digest).count() == 1
+
     def test_activation_requires_csrf(self, settings):
         """A remote site must not be able to activate a browser through CSRF."""
         csrf_client = Client(enforce_csrf_checks=True)
@@ -381,6 +445,23 @@ class TestKioskAccess:
 
     def test_get_not_allowed(self, client):
         assert client.get(SCAN_URL).status_code == 405
+
+    def test_activated_shell_loads_capability_once(self, client, parking_lot):
+        """The shell must not pay for a duplicate capability lookup on every refresh."""
+        _activate(client, lot=parking_lot.name)
+        with CaptureQueriesContext(connection) as captured:
+            response = client.get("/")
+
+        capability_reads = [
+            query["sql"]
+            for query in captured.captured_queries
+            if "parking_kioskdevicecapability" in query["sql"].lower()
+            and query["sql"].lstrip().upper().startswith("SELECT")
+            and "FOR UPDATE" not in query["sql"].upper()
+        ]
+        assert response.status_code == 200
+        assert response.context["kiosk_activated"] is True
+        assert len(capability_reads) == 1
 
 
 @pytest.mark.django_db(transaction=True)
