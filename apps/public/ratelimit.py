@@ -29,8 +29,9 @@ def _client_ip(request) -> str:
     """
     Resolve a client address without accepting spoofed forwarding headers.
 
-    A trusted reverse proxy is responsible for replacing X-Forwarded-For. For all
-    other direct peers, REMOTE_ADDR remains authoritative.
+    TRUSTED_PROXY_IPS peers must REPLACE X-Forwarded-For with exactly one client
+    address. Multi-hop / appended chains are rejected and fall back to the direct
+    peer so a client-forged leading hop cannot become the rate-limit identity.
     """
     direct_peer = request.META.get("REMOTE_ADDR", "unknown")
     if direct_peer not in settings.TRUSTED_PROXY_IPS:
@@ -38,7 +39,16 @@ def _client_ip(request) -> str:
 
     forwarded = request.META.get("HTTP_X_FORWARDED_FOR", "")
     addresses = [value.strip() for value in forwarded.split(",") if value.strip()]
-    return addresses[-1] if addresses else direct_peer
+    if len(addresses) == 1:
+        return addresses[0]
+    if addresses:
+        logger.warning(
+            "Ignoring multi-value X-Forwarded-For from trusted proxy %s "
+            "(%d hops); configure the proxy to replace the header",
+            direct_peer,
+            len(addresses),
+        )
+    return direct_peer
 
 
 def _identity_hash(identity: str) -> str:
