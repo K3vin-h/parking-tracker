@@ -47,6 +47,8 @@ from apps.parking.models import (
     ParkingSession,
     PlateDetectionEvent,
 )
+from apps.parking.normalization import canonicalize_plate
+from apps.parking.wallet import debit_wallet_for_session
 
 logger = logging.getLogger(__name__)
 
@@ -157,7 +159,7 @@ def normalize_plate(raw_text: str) -> str:
 
     # str.split() with no args splits on ANY run of whitespace (spaces, tabs,
     # newlines) and drops empties; rejoining with '' strips all of it.
-    normalized = "".join(raw_text.split()).upper()
+    normalized = canonicalize_plate(raw_text)
     if not normalized:
         logger.warning("normalize_plate received whitespace-only input")
     return normalized
@@ -255,24 +257,13 @@ def _match_registered_plate(normalized_plate: str) -> LicensePlate | None:
     """
     Find a registered LicensePlate for a normalized plate string.
 
-    WHY order_by('pk').first(): a plate string is unique per user, but the SAME
-    string can be registered by two different users (the model only enforces
-    uniqueness within a user). For a detection we have no user yet, so we link to
-    the lowest-pk registration — an explicit, stable tie-break (a bare .first()
-    would return DB-storage order, which is not guaranteed stable). A collision
-    is logged so a wrong-user link is auditable rather than invisible.
-    Returns the LicensePlate or None (guest).
+    Canonical plate ownership is globally unique, so a successful lookup has one
+    unambiguous account owner. Returns the LicensePlate or None for a guest.
     """
-    matches = list(
-        LicensePlate.objects.filter(plate_text=normalized_plate).order_by("pk")[:2]
-    )
-    if len(matches) > 1:
-        logger.warning(
-            "Plate hash %s matches multiple registrations; linking to lowest pk %s",
-            _plate_log_token(normalized_plate),
-            matches[0].pk,
-        )
-    return matches[0] if matches else None
+    try:
+        return LicensePlate.objects.get(plate_text=normalized_plate)
+    except LicensePlate.DoesNotExist:
+        return None
 
 
 @transaction.atomic
@@ -508,6 +499,16 @@ def _complete_session_for_exit(
             "charge_amount",
         ]
     )
+
+    # China auto-pay: a registered plate (session.user set at entry/correction) is
+    # billed directly to the owner's prepaid wallet. Guests have no wallet and pay
+    # the displayed amount at the kiosk instead. This runs inside handle_exit's /
+    # correct_plate's atomic block, so the session completion and the wallet debit
+    # commit as one unit — a charge can never be recorded without moving the
+    # balance. debit_wallet_for_session is a no-op for a $0.00 (grace) charge.
+    if session.user_id is not None:
+        debit_wallet_for_session(session, charge)
+
     return charge
 
 
@@ -713,9 +714,7 @@ def correct_plate(
             has_duplicate_warning=voided > 0,
         )
         event.session = session
-        event.save(
-            update_fields=["manually_corrected", "corrected_plate", "session"]
-        )
+        event.save(update_fields=["manually_corrected", "corrected_plate", "session"])
         logger.info(
             "Corrected sessionless entry event %s opened session %s for "
             "plate_hash=%s in lot %s (duplicate_voided=%d)",

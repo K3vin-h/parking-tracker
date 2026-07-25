@@ -1,0 +1,33 @@
+{% extends "public/public_base.html" %}
+
+{% block title %}Create an account — Parking Tracker{% endblock %}
+
+{% block content %}
+<section class="portal-narrow" aria-labelledby="signup-heading">
+    <div class="portal-card">
+        <h1 id="signup-heading">Create your account</h1>
+        <p class="portal-lead">Register to link your plates and pay parking automatically.</p>
+
+        {% if form.non_field_errors %}
+        <div class="flash flash--error" role="alert">
+            {% for error in form.non_field_errors %}<span>{{ error }}</span>{% endfor %}
+        </div>
+        {% endif %}
+
+        <form method="post" action="{% url 'public:signup' %}" novalidate>
+            {% csrf_token %}
+            {% for field in form %}
+            <div class="form-group">
+                <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+                {{ field }}
+                {% if field.help_text %}<p class="form-help">{{ field.help_text }}</p>{% endif %}
+                {% for error in field.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
+            </div>
+            {% endfor %}
+            <button class="btn btn--primary btn--full" type="submit">Create account</button>
+        </form>
+
+        <p class="portal-alt">Already have an account? <a href="{% url 'login' %}">Log in</a></p>
+    </div>
+</section>
+{% endblock %}

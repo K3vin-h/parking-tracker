@@ -1,0 +1,45 @@
+{% extends "public/public_base.html" %}
+
+{% block title %}Wallet — Parking Tracker{% endblock %}
+
+{% block content %}
+<section class="portal" aria-labelledby="wallet-heading">
+    <h1 id="wallet-heading" class="portal-title">Wallet</h1>
+
+    <div class="portal-card wallet-balance-card">
+        <p class="wallet-balance__label">Current balance</p>
+        <p class="wallet-balance__amount mono {% if wallet.balance < 0 %}is-negative{% endif %}">
+            ${{ wallet.balance }}
+        </p>
+        {% if wallet.balance < 0 %}
+        <p class="wallet-balance__note">Your balance is negative — you owe this amount.</p>
+        {% endif %}
+        <a class="btn btn--primary" href="{% url 'public:topup' %}">Add funds</a>
+    </div>
+
+    <div class="portal-card">
+        <h2 class="portal-subtitle">Transaction history</h2>
+        {% if transactions %}
+        <table class="wallet-table">
+            <thead>
+                <tr><th>Date</th><th>Type</th><th>Details</th><th class="wallet-table__amount">Amount</th></tr>
+            </thead>
+            <tbody>
+                {% for txn in transactions %}
+                <tr>
+                    <td class="mono">{{ txn.created_at|date:"Y-m-d H:i" }}</td>
+                    <td>{{ txn.get_kind_display }}</td>
+                    <td>{{ txn.description }}</td>
+                    <td class="wallet-table__amount mono {% if txn.amount < 0 %}is-debit{% else %}is-credit{% endif %}">
+                        {% if txn.amount < 0 %}-${{ txn.amount|stringformat:".2f"|cut:"-" }}{% else %}+${{ txn.amount }}{% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p class="portal-empty">No transactions yet.</p>
+        {% endif %}
+    </div>
+</section>
+{% endblock %}

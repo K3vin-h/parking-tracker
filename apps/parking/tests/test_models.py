@@ -17,10 +17,13 @@ TESTING PHILOSOPHY FOR MODELS:
     5. __str__ output (shown in admin, logs, error messages)
 """
 
+from datetime import timedelta
 from decimal import Decimal
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError
+from django.db import IntegrityError
 from django.utils import timezone
 
 from apps.parking.models import (
@@ -133,6 +136,13 @@ class TestLicensePlate:
         plate = LicensePlate.objects.create(user=user, plate_text='NOLBL')
         assert plate.label == ''
 
+    def test_plate_is_canonicalized_at_model_boundary(self, user):
+        """Admin/direct ORM writes must match the canonical CV lookup key."""
+        plate = LicensePlate.objects.create(user=user, plate_text="  abc 123\t")
+
+        plate.refresh_from_db()
+        assert plate.plate_text == "ABC123"
+
     def test_plate_unique_per_user(self, user):
         """
         The same plate text cannot be registered twice for the same user.
@@ -143,6 +153,25 @@ class TestLicensePlate:
         LicensePlate.objects.create(user=user, plate_text='DUP123')
         with pytest.raises(IntegrityError):
             LicensePlate.objects.create(user=user, plate_text='DUP123')
+
+    def test_plate_is_unique_across_users(self, user):
+        """One canonical plate cannot silently auto-bill two account owners."""
+        from django.db import IntegrityError
+
+        other = User.objects.create_user(username="other-owner", password="x")
+        LicensePlate.objects.create(user=user, plate_text="SHARED1")
+
+        with pytest.raises(IntegrityError):
+            LicensePlate.objects.create(user=other, plate_text=" shared 1 ")
+
+    def test_full_clean_reports_canonical_plate_collision(self, user):
+        """ModelForms must show a validation error instead of a save-time 500."""
+        LicensePlate.objects.create(user=user, plate_text="ABC123")
+        other = User.objects.create_user(username="form-owner", password="x")
+        candidate = LicensePlate(user=other, plate_text=" abc 123 ")
+
+        with pytest.raises(ValidationError):
+            candidate.full_clean()
 
 
 # ── ParkingLot tests ──────────────────────────────────────────────────────────
@@ -223,6 +252,57 @@ class TestLotSettings:
     def test_lot_settings_str(self, lot_settings, parking_lot):
         """__str__ describes which lot the settings belong to."""
         assert str(lot_settings) == f'Settings for {parking_lot.name}'
+
+    @pytest.mark.parametrize(
+        ("field_values", "error_field"),
+        [
+            ({"rate": Decimal("0.00")}, "rate"),
+            (
+                {"daily_cap_enabled": True, "daily_cap_amount": None},
+                "daily_cap_amount",
+            ),
+            (
+                {
+                    "daily_cap_enabled": False,
+                    "daily_cap_amount": Decimal("25.00"),
+                },
+                "daily_cap_amount",
+            ),
+            ({"confidence_threshold": 1.01}, "confidence_threshold"),
+            ({"image_retention_days": 0}, "image_retention_days"),
+        ],
+    )
+    def test_full_clean_rejects_unsafe_settings(
+        self,
+        parking_lot,
+        field_values,
+        error_field,
+    ):
+        """Direct model validation must preserve billing and retention invariants."""
+        settings_obj = LotSettings(lot=parking_lot, **field_values)
+
+        with pytest.raises(ValidationError) as exc_info:
+            settings_obj.full_clean()
+
+        assert error_field in exc_info.value.message_dict
+
+    @pytest.mark.parametrize(
+        "field_values",
+        [
+            {"rate": Decimal("0.00")},
+            {"daily_cap_enabled": True, "daily_cap_amount": None},
+            {
+                "daily_cap_enabled": False,
+                "daily_cap_amount": Decimal("25.00"),
+            },
+            {"confidence_threshold": 1.01},
+            {"image_retention_days": 0},
+        ],
+    )
+    def test_database_rejects_unsafe_settings(self, parking_lot, field_values):
+        """Bulk/direct writes cannot bypass settings that affect system behavior."""
+        with pytest.raises(IntegrityError):
+            LotSettings.objects.create(lot=parking_lot, **field_values)
 
 
 # ── ParkingSession tests ──────────────────────────────────────────────────────
@@ -312,8 +392,10 @@ class TestParkingSession:
 
     def test_completed_session_has_charge(self, parking_lot):
         """A completed session can store a charge amount and exit time."""
-        entry = timezone.now()
         exit_time = timezone.now()
+        # Use an explicit interval so fast clocks cannot produce equal timestamps
+        # and intermittently violate the database's exit-after-entry invariant.
+        entry = exit_time - timedelta(hours=1)
         session = ParkingSession.objects.create(
             plate_text='COMP123',
             lot=parking_lot,

@@ -50,9 +50,10 @@ if str(REPO_ROOT) not in sys.path:
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset, random_split
 
 from apps.cv.models.recognizer import PlateRecognizerCRNN
+from apps.cv.training.augment import RecognizerAugment
 from apps.cv.training.dataset import (
     IDX_TO_CHAR,
     PlateRecognizerDataset,
@@ -483,6 +484,35 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _build_datasets(data_dir: Path, seed: int) -> tuple[Subset, Subset]:
+    """
+    Build a reproducible split with stochastic transforms only on training.
+
+    WHY separate dataset objects: both Subsets would otherwise share one
+    transform, causing perspective/blur augmentation to contaminate validation
+    accuracy and checkpoint selection.
+    """
+    index_source = PlateRecognizerDataset(data_dir)
+    rng = torch.Generator().manual_seed(seed)
+    train_indices, val_indices = random_split(
+        range(len(index_source)),
+        [0.8, 0.2],
+        generator=rng,
+    )
+    train_dataset = PlateRecognizerDataset(
+        data_dir,
+        transform=RecognizerAugment(train=True),
+    )
+    val_dataset = PlateRecognizerDataset(
+        data_dir,
+        transform=RecognizerAugment(train=False),
+    )
+    return (
+        Subset(train_dataset, train_indices.indices),
+        Subset(val_dataset, val_indices.indices),
+    )
+
+
 def main() -> None:
     args = _parse_args()
 
@@ -495,11 +525,8 @@ def main() -> None:
         logger.info("MPS device detected — CTCLoss will run on CPU (MPS limitation)")
 
     # ── Data ───────────────────────────────────────────────────────────────
-    dataset = PlateRecognizerDataset(args.data_dir)
-    logger.info("Dataset size: %d samples", len(dataset))
-
-    rng = torch.Generator().manual_seed(args.seed)
-    train_set, val_set = random_split(dataset, [0.8, 0.2], generator=rng)
+    train_set, val_set = _build_datasets(args.data_dir, args.seed)
+    logger.info("Dataset size: %d samples", len(train_set) + len(val_set))
     logger.info("Train: %d  |  Val: %d", len(train_set), len(val_set))
 
     train_loader = DataLoader(

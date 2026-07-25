@@ -11,7 +11,6 @@
 </head>
 <body hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'>
 {% url "dashboard:dashboard" as dashboard_url %}
-{% url "dashboard:upload" as upload_url %}
 {% url "dashboard:log" as log_url %}
 {% url "dashboard:errors" as errors_url %}
 {% url "dashboard:revenue" as revenue_url %}
@@ -32,10 +31,6 @@
             <a class="nav-link {% if active_page == 'dashboard' %}is-active{% endif %}" href="{{ dashboard_url|default:'/' }}">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="9"></rect><rect x="14" y="3" width="7" height="5"></rect><rect x="14" y="12" width="7" height="9"></rect><rect x="3" y="16" width="7" height="5"></rect></svg>
                 <span>Dashboard</span>
-            </a>
-            <a class="nav-link {% if active_page == 'upload' %}is-active{% endif %}" href="{{ upload_url|default:'/upload/' }}">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><path d="m17 8-5-5-5 5"></path><path d="M12 3v12"></path></svg>
-                <span>Upload</span>
             </a>
             <a class="nav-link {% if active_page == 'log' %}is-active{% endif %}" href="{{ log_url|default:'/log/' }}">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13"></path><path d="M3 6h.01M3 12h.01M3 18h.01"></path></svg>
@@ -74,6 +69,7 @@
                 <h1>{% block page_title %}Dashboard{% endblock %}</h1>
             </div>
             <div class="topbar__account">
+                <a class="btn btn--secondary btn--compact" href="/">Open kiosk</a>
                 <span class="topbar__identity mono">
                     {% if user %}{{ user.email|default:user.username }}{% else %}Operator{% endif %}
                 </span>
