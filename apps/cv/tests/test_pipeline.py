@@ -169,6 +169,43 @@ class TestPlateRecognitionPipelineProcess:
         result = _run_process(pipeline, _VALID_BBOX, torch.zeros(16, 1, 37))
         assert set(result.keys()) == {"plate_text", "confidence", "bounding_box", "is_low_confidence"}
 
+    def test_detector_receives_training_normalized_input(self) -> None:
+        """
+        Detector inference must use the ImageNet normalization used in training.
+
+        A black RGB pixel starts at 0.0 after [0, 255] scaling, so ImageNet
+        normalization must produce -mean/std for each channel. This catches
+        train/serve skew where production accidentally sends raw [0, 1] data.
+        """
+        pipeline = _make_pipeline()
+
+        _run_process(pipeline, _VALID_BBOX, torch.zeros(16, 1, 37))
+
+        detector_input = pipeline.detector.predict.call_args.args[0]
+        expected_pixel = torch.tensor([
+            -0.485 / 0.229,
+            -0.456 / 0.224,
+            -0.406 / 0.225,
+        ])
+        torch.testing.assert_close(detector_input[0, :, 0, 0], expected_pixel)
+
+    def test_recognizer_receives_training_normalized_input(self) -> None:
+        """
+        Recognizer inference must use the zero-centered training normalization.
+
+        A black grayscale pixel starts at 0.0, and (0.0 - 0.5) / 0.5 is -1.0.
+        This protects production recognition from diverging from validation.
+        """
+        pipeline = _make_pipeline()
+
+        _run_process(pipeline, _VALID_BBOX, torch.zeros(16, 1, 37))
+
+        recognizer_input = pipeline.recognizer.predict.call_args.args[0]
+        torch.testing.assert_close(
+            recognizer_input,
+            torch.full_like(recognizer_input, -1.0),
+        )
+
     def test_plate_text_matches_model_output(self) -> None:
         """plate_text is taken from decode_predictions()[0]."""
         pipeline = _make_pipeline()
