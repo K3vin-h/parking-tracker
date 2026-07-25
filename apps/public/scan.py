@@ -24,7 +24,7 @@ from datetime import timedelta
 from functools import wraps
 
 from django.conf import settings
-from django.db import transaction
+from django.db import DatabaseError, transaction
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import render
 from django.utils import timezone
@@ -54,10 +54,9 @@ class KioskView(TemplateView):
         """Expose only the activation choices or the server-bound kiosk scope."""
         context = super().get_context_data(**kwargs)
         context["lots"] = list(ParkingLot.objects.order_by("name"))
-        activated = _kiosk_session_is_valid(self.request)
-        context["kiosk_activated"] = activated
-        if activated:
-            capability = _valid_capability(self.request)
+        capability = _valid_capability(self.request)
+        context["kiosk_activated"] = capability is not None
+        if capability is not None:
             context["kiosk_lot"] = capability.lot
             context["kiosk_event_type"] = capability.event_type
             context["kiosk_scan_nonce"] = _issue_kiosk_nonce(self.request)
@@ -131,8 +130,14 @@ def _issue_kiosk_nonce(request: HttpRequest) -> str:
     return nonce
 
 
-def _consume_kiosk_request(request: HttpRequest) -> str | None:
-    """Atomically validate scope/nonce and return the next single-use nonce."""
+def _consume_kiosk_request(request: HttpRequest) -> tuple[str, str] | None:
+    """
+    Atomically validate scope/nonce and return (next_nonce, image_digest).
+
+    The image digest is recorded here so concurrent identical uploads lose the
+    race under the same row lock. Callers must forget the digest when the scan
+    fails before a durable outcome, so the lane can retry the same photo.
+    """
     submitted_event_type = (request.POST.get("event_type") or "").strip().lower()
     submitted_lot = (request.POST.get("lot") or "").strip()
     submitted_nonce = request.POST.get("kiosk_nonce", "")
@@ -191,7 +196,32 @@ def _consume_kiosk_request(request: HttpRequest) -> str | None:
                 seen_at=now,
             )
     request.session["kiosk_scan_nonce"] = next_nonce
-    return next_nonce
+    return next_nonce, image_digest
+
+
+def _forget_image_digest(request: HttpRequest, image_digest: str) -> None:
+    """Drop a digest recorded for a scan that never produced a durable outcome."""
+    if not image_digest:
+        return
+    session_key = request.session.session_key
+    if not session_key:
+        return
+    try:
+        with transaction.atomic():
+            capability = (
+                KioskDeviceCapability.objects.select_for_update()
+                .filter(session_key=session_key)
+                .first()
+            )
+            if capability is None:
+                return
+            capability.replay_digests.filter(digest=image_digest).delete()
+    except DatabaseError:
+        # A missed release self-heals via the replay-window purge; do not mask
+        # the original scan error response with a secondary DB failure.
+        logger.exception(
+            "Could not release kiosk image replay digest after a failed scan"
+        )
 
 
 def _attach_nonce(response: HttpResponse, nonce: str) -> HttpResponse:
@@ -238,27 +268,47 @@ def activate_kiosk(request: HttpRequest) -> HttpResponse:
     if lot is None:
         return JsonResponse({"error": "Choose a valid parking lot."}, status=400)
 
-    request.session.set_expiry(settings.KIOSK_SESSION_SECONDS)
-    request.session.cycle_key()
-    request.session["kiosk_token_fingerprint"] = _kiosk_token_fingerprint(
-        configured_token
-    )
-    request.session.save()
-    expires_at = timezone.now() + timedelta(seconds=settings.KIOSK_SESSION_SECONDS)
     initial_nonce = secrets.token_urlsafe(32)
-    request.session["kiosk_scan_nonce"] = initial_nonce
-    KioskDeviceCapability.objects.filter(expires_at__lte=timezone.now()).delete()
-    capability, _ = KioskDeviceCapability.objects.update_or_create(
-        session_key=request.session.session_key,
-        defaults={
-            "token_fingerprint": _kiosk_token_fingerprint(configured_token),
-            "lot": lot,
-            "event_type": event_type,
-            "nonce_hash": _nonce_hash(initial_nonce),
-            "expires_at": expires_at,
-        },
-    )
-    capability.replay_digests.all().delete()
+    expires_at = timezone.now() + timedelta(seconds=settings.KIOSK_SESSION_SECONDS)
+    try:
+        # Session + capability must commit together. On failure, flush the
+        # in-memory session so SessionMiddleware cannot re-persist a half-baked
+        # activation after the atomic block rolls back.
+        with transaction.atomic():
+            request.session.set_expiry(settings.KIOSK_SESSION_SECONDS)
+            request.session.cycle_key()
+            request.session["kiosk_token_fingerprint"] = _kiosk_token_fingerprint(
+                configured_token
+            )
+            request.session["kiosk_scan_nonce"] = initial_nonce
+            request.session.save()
+            KioskDeviceCapability.objects.filter(
+                expires_at__lte=timezone.now()
+            ).delete()
+            capability, _ = KioskDeviceCapability.objects.update_or_create(
+                session_key=request.session.session_key,
+                defaults={
+                    "token_fingerprint": _kiosk_token_fingerprint(configured_token),
+                    "lot": lot,
+                    "event_type": event_type,
+                    "nonce_hash": _nonce_hash(initial_nonce),
+                    "expires_at": expires_at,
+                },
+            )
+            capability.replay_digests.all().delete()
+    except DatabaseError:
+        logger.exception("Kiosk activation failed while writing device capability")
+        try:
+            request.session.flush()
+        except DatabaseError:
+            logger.exception(
+                "Could not flush kiosk session after activation write failure"
+            )
+        return JsonResponse(
+            {"error": "Kiosk activation is temporarily unavailable."},
+            status=503,
+        )
+
     response = HttpResponse(status=204)
     response["HX-Refresh"] = "true"
     return response
@@ -336,26 +386,21 @@ def kiosk_scan(request: HttpRequest):
     errors (bad image, wrong type) render as HTML 200 for HTMX (which does not swap
     4xx by default) while JSON clients keep the real status code.
     """
-    next_nonce = _consume_kiosk_request(request)
-    if next_nonce is None:
+    next_nonce_and_digest = _consume_kiosk_request(request)
+    if next_nonce_and_digest is None:
         logger.warning("Rejected kiosk scan with invalid scope or nonce")
         return JsonResponse({"error": "Invalid kiosk request."}, status=403)
+    next_nonce, image_digest = next_nonce_and_digest
 
     outcome = run_plate_scan(request)
-
     if outcome.outcome == "error":
-        payload = _public_payload(outcome)
-        if _is_htmx(request):
-            response = render(
-                request, "public/kiosk_result.html", {"result": payload}, status=200
-            )
-        else:
-            response = JsonResponse(payload, status=outcome.status)
-        return _attach_nonce(response, next_nonce)
+        # Release the provisional replay mark so the driver can retry this photo.
+        _forget_image_digest(request, image_digest)
 
     payload = _public_payload(outcome)
     if _is_htmx(request):
-        # Unreadable entry uses HTTP 422 for JSON but must render (200) for HTMX.
+        # Expected client errors and unreadable entry must render (200) for HTMX,
+        # which does not swap 4xx responses by default.
         response = render(
             request, "public/kiosk_result.html", {"result": payload}, status=200
         )

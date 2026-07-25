@@ -1,4 +1,5 @@
 {% extends "public/public_base.html" %}
+{% load static %}
 
 {% block title %}My Plates — Parking Tracker{% endblock %}
 
@@ -31,9 +32,10 @@
             <li class="plate-list__item">
                 <span class="plate-list__text mono">{{ plate.plate_text }}</span>
                 {% if plate.label %}<span class="plate-list__label">{{ plate.label }}</span>{% endif %}
-                <form class="plate-list__delete" method="post"
-                      action="{% url 'public:plate_delete' plate.pk %}"
-                      onsubmit="return confirm('Remove {{ plate.plate_text }}?');">
+                <form class="plate-list__delete"
+                      data-plate-delete
+                      method="post"
+                      action="{% url 'public:plate_delete' plate.pk %}">
                     {% csrf_token %}
                     <button class="btn btn--secondary btn--compact" type="submit">Remove</button>
                 </form>
@@ -45,4 +47,8 @@
         {% endif %}
     </div>
 </section>
+{% endblock %}
+
+{% block extra_js %}
+<script src="{% static 'js/plates.js' %}" defer></script>
 {% endblock %}

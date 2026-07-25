@@ -34,6 +34,7 @@ function element(overrides = {}) {
         hidden: false,
         disabled: false,
         value: "",
+        defaultValue: "",
         files: [],
         innerHTML: "",
         classList: classList(),
@@ -60,7 +61,7 @@ function element(overrides = {}) {
     };
 }
 
-function loadKioskScript({ resultMode = null } = {}) {
+function loadKioskScript({ resultMode = null, activation = false } = {}) {
     const bodyListeners = new Map();
     const documentListeners = new Map();
     const heading = element({
@@ -82,10 +83,17 @@ function loadKioskScript({ resultMode = null } = {}) {
             return null;
         },
     });
+    const nonce = element({
+        value: "server-rendered-nonce",
+        defaultValue: "server-rendered-nonce",
+    });
     const controls = [element(), element()];
     const form = element({
         querySelectorAll() {
             return controls;
+        },
+        reset() {
+            nonce.value = nonce.defaultValue;
         },
     });
     const panel = element();
@@ -98,8 +106,29 @@ function loadKioskScript({ resultMode = null } = {}) {
     const chooseButtons = [element()];
     const submitButton = element({ hidden: true });
     const changeButton = element({ hidden: true });
-    const nonce = element();
     const uploader = element();
+    const activationHeading = element({
+        focus() {
+            activationHeading.focused = true;
+        },
+    });
+    const activationResult = element({
+        querySelector(selector) {
+            return selector === "[data-kiosk-activation-heading]"
+                ? activationHeading
+                : null;
+        },
+    });
+    const activationToken = element({ value: "shared-secret-token" });
+    const activationForm = activation
+        ? element({
+              querySelector(selector) {
+                  return selector === 'input[name="token"]'
+                      ? activationToken
+                      : null;
+              },
+          })
+        : null;
 
     const selectors = new Map([
         ["[data-dropzone]", dropzone],
@@ -108,6 +137,8 @@ function loadKioskScript({ resultMode = null } = {}) {
         ["[data-kiosk-review-copy]", reviewCopy],
         ["[data-kiosk-submit]", submitButton],
         ["[data-kiosk-uploader]", uploader],
+        ["[data-kiosk-activation-form]", activationForm],
+        ["[data-kiosk-activation-result]", activation ? activationResult : null],
     ]);
     const ids = new Map([
         ["kiosk-panel", panel],
@@ -128,12 +159,27 @@ function loadKioskScript({ resultMode = null } = {}) {
             documentListeners.set(name, listener);
         },
         querySelector(selector) {
+            if (
+                activation &&
+                ![
+                    "[data-kiosk-activation-form]",
+                    "[data-kiosk-activation-result]",
+                ].includes(selector)
+            ) {
+                return null;
+            }
             return selectors.get(selector) || null;
         },
         querySelectorAll(selector) {
+            if (activation) {
+                return [];
+            }
             return selector === "[data-kiosk-choose-file]" ? chooseButtons : [];
         },
         getElementById(id) {
+            if (activation) {
+                return null;
+            }
             return ids.get(id) || null;
         },
     };
@@ -166,6 +212,11 @@ function loadKioskScript({ resultMode = null } = {}) {
         processing,
         result,
         heading,
+        nonce,
+        activationForm,
+        activationToken,
+        activationResult,
+        activationHeading,
     };
 }
 
@@ -214,4 +265,56 @@ test("responseError restores a safe recovery state without echoing server HTML",
     assert.equal(fixture.panel.classList.contains("is-recovery"), true);
     assert.match(fixture.result.innerHTML, /could not process the scan/i);
     assert.doesNotMatch(fixture.result.innerHTML, /unsafe server response/i);
+});
+
+test("rotated nonce survives resetting for the next vehicle", () => {
+    const fixture = loadKioskScript();
+    const afterRequest = fixture.bodyListeners.get("htmx:afterRequest");
+    const click = fixture.documentListeners.get("click");
+
+    afterRequest({
+        detail: {
+            requestConfig: { elt: fixture.form },
+            xhr: {
+                status: 200,
+                getResponseHeader(name) {
+                    return name === "X-Kiosk-Nonce" ? "rotated-nonce" : null;
+                },
+            },
+        },
+    });
+    click({
+        target: {
+            closest(selector) {
+                return selector === "[data-kiosk-reset]" ? {} : null;
+            },
+        },
+    });
+
+    assert.equal(fixture.nonce.value, "rotated-nonce");
+    assert.equal(fixture.nonce.defaultValue, "rotated-nonce");
+});
+
+test("activation errors are visible without echoing the server response", () => {
+    const fixture = loadKioskScript({ activation: true });
+    const listener = fixture.bodyListeners.get("htmx:responseError");
+
+    assert.equal(typeof listener, "function");
+    listener({
+        detail: {
+            requestConfig: { elt: fixture.activationForm },
+            xhr: {
+                status: 403,
+                responseText: "<script>unsafe activation response</script>",
+            },
+        },
+    });
+
+    assert.match(fixture.activationResult.innerHTML, /activation failed/i);
+    assert.doesNotMatch(
+        fixture.activationResult.innerHTML,
+        /unsafe activation response/i,
+    );
+    assert.equal(fixture.activationToken.value, "");
+    assert.equal(fixture.activationHeading.focused, true);
 });
