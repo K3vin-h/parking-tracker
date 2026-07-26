@@ -14,10 +14,10 @@ __pycache__/
 *.pyo
 
 # ── Trained model weights ─────────────────────────────────────────────────────
-# PyTorch .pth files are large binary files (100MB+).
-# Training happens on the host machine; weights are NOT stored in git.
-# The weights/ directory exists in git via .gitkeep files.
-apps/cv/weights/*.pth
+# Training outputs include model checkpoints and generated diagnostic plots.
+# They stay on the host; only the directory placeholder is tracked.
+apps/cv/weights/*
+!apps/cv/weights/.gitkeep
 
 # ── Django collected static / uploaded media ──────────────────────────────────
 # 'static/' is SOURCE (CSS, JS) — committed to git.
