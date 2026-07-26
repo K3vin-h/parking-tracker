@@ -39,7 +39,7 @@ The system is organized into four Django apps with clear ownership boundaries:
 | `apps.accounts` | Custom `User(AbstractUser)` — no extra fields |
 | `apps.parking` | Models, admin, `setup_defaults`, session/billing services |
 | `apps.cv` | Preprocessing, custom models, synthetic data, training scripts, and inference pipeline |
-| `apps.dashboard` | Staff-only pages, upload/dashboard APIs, settings form, HTMX partials, and revenue analytics |
+| `apps.dashboard` | Staff-only pages and support APIs, settings form, HTMX partials, private event images, and revenue analytics |
 
 **Request flow for an uploaded plate image:**
 
@@ -73,9 +73,30 @@ Copy the example env file and fill in values:
 cp .env.example .env
 ```
 
-Required variables: `SECRET_KEY`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, and
-`DEBUG`. Compose maps the three `DB_*` values to PostgreSQL's internal
-`POSTGRES_*` variables, so configure the `DB_*` names shown in `.env.example`.
+Required variables: `SECRET_KEY`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`,
+`DEBUG`, and `KIOSK_ACTIVATION_TOKEN`. Compose maps the three `DB_*` values to
+PostgreSQL's internal `POSTGRES_*` variables, so configure the `DB_*` names
+shown in `.env.example`.
+
+Generate a kiosk activation token instead of inventing or reusing a password:
+
+```bash
+openssl rand -hex 32
+```
+
+Paste the generated value into `.env` using the placeholder below. Never add
+the real token or account credentials to tracked documentation or source code.
+
+```dotenv
+KIOSK_ACTIVATION_TOKEN=<paste-generated-token>
+```
+
+If `.env` changes after the services are running, recreate the web container
+so Django receives the new values:
+
+```bash
+docker compose up -d --force-recreate web
+```
 
 ### 2. Start services
 
@@ -98,13 +119,35 @@ This creates the default `ParkingLot` and `LotSettings` records. **Required befo
 docker-compose exec web python manage.py setup_defaults
 ```
 
-### 5. Create a staff user
+### 5. Create accounts
+
+Residents create their own unprivileged account at
+`http://localhost:8000/register/`. Self-registration always creates an account
+with `is_staff=False` and `is_superuser=False`.
+
+Create the initial administrator interactively. This account can use both the
+operator dashboard and Django Admin:
 
 ```bash
 docker-compose exec web python manage.py createsuperuser
 ```
 
-Log in at `http://localhost:8000/login/` with that account.
+To give an existing, deliberately selected resident account operator access,
+set only its `is_staff` flag. Replace `<username>` with the exact account name:
+
+```bash
+docker-compose exec web python manage.py shell -c "from django.contrib.auth import get_user_model; user = get_user_model().objects.get(username='<username>'); user.is_staff = True; user.save(update_fields=['is_staff'])"
+```
+
+Reset a forgotten password without exposing it in shell history or
+documentation:
+
+```bash
+docker-compose exec web python manage.py changepassword <username>
+```
+
+All account types sign in at `http://localhost:8000/login/`. Staff and
+superusers are sent to `/staff/`; residents are sent to `/wallet/`.
 
 ### 6. Run the test suite
 
@@ -160,7 +203,7 @@ Built on Django's `AbstractUser`. Controls who can access the dashboard or admin
 | `password` | Stored as a hashed password, never plain text |
 | `first_name` | Optional display name |
 | `last_name` | Optional display name |
-| `is_staff` | `True` grants access to the operator dashboard and Django admin |
+| `is_staff` | `True` grants operator-dashboard access and permits Django Admin login; model actions still require explicit permissions |
 | `is_active` | `False` disables the account without deleting it |
 | `is_superuser` | `True` bypasses all permission checks in the admin |
 | `date_joined` | Auto-set timestamp when the account was created |
@@ -645,17 +688,29 @@ Django 5.1 backend with server-rendered templates, HTMX for targeted live update
 
 ### Pages
 
-| Page | URL | Main features |
-|------|-----|---------------|
-| Login | `/login/` | Dark-themed authentication form with validation feedback |
-| Dashboard | `/` | Live summary cards, active sessions, running charges, today's revenue and traffic, 10-second polling |
-| Upload | `/upload/` | Entry/exit selection, lot selection, drag/drop JPEG or PNG, HTMX result swaps, plate bounding-box canvas overlay |
-| Session Log | `/log/` | Plate/status/lot/entry-date filters, All/Registered/Guest tabs, running charge values, 25-row pagination |
-| Error Queue | `/errors/` | Paginated low-confidence or unmatched events, private thumbnails, inline plate correction |
-| Revenue | `/revenue/` | 7/30/90-day and custom date ranges, summary cards, daily revenue chart, lot and hour breakdowns |
-| Settings | `/settings/` | Per-lot rate, billing unit, grace period, daily cap, image retention, and confidence threshold |
+| Audience | Page | URL | Main features |
+|----------|------|-----|---------------|
+| Public | Gate kiosk | `/` | Token activation, entry/exit lane selection, and plate-image scanning |
+| Public | Resident registration | `/register/` | Creates an unprivileged resident account |
+| Public | Login | `/login/` | Shared sign-in with role-based post-login routing |
+| Resident | Plates | `/plates/` | Add and remove registered licence plates |
+| Resident | Wallet | `/wallet/` | View balance and wallet ledger activity |
+| Resident | Wallet top-up | `/wallet/topup/` | Add funds through the configured payment connector |
+| Staff | Dashboard | `/staff/` | Live summary cards, active sessions, running charges, revenue, and traffic |
+| Staff | Session log | `/staff/log/` | Plate/status/lot/date filters, session tabs, charges, and pagination |
+| Staff | Error queue | `/staff/errors/` | Review private thumbnails and correct low-confidence or unmatched events |
+| Staff | Revenue | `/staff/revenue/` | Date ranges, summary cards, daily charts, and lot/hour breakdowns |
+| Staff | Settings | `/staff/settings/` | Configure rates, billing units, grace periods, caps, retention, and confidence |
+| Administrator | Django Admin | `/admin/` | Manage users and registered database models subject to Django permissions |
 
-Every operator page and supporting API endpoint requires an authenticated staff account. The login and Django authentication routes remain public.
+The kiosk owns `/`; there is no standalone `/upload/` page. Every operator
+page and supporting `/staff/api/` endpoint requires an authenticated account
+with `is_staff=True`. The login and Django authentication routes remain public.
+
+Staff and superusers see the same operator pages under `/staff/`. A superuser
+also bypasses Django's model permission checks in `/admin/`; an ordinary staff
+account can enter Django Admin only for models covered by permissions explicitly
+granted to that account.
 
 **Confidence indicator bands** are fixed across all pages:
 - Green: ≥ 80%
@@ -684,18 +739,25 @@ These screenshots show the current operator flow and the proof assets captured f
 
 ### API Endpoints
 
-All endpoints are staff-only. The upload endpoint runs the full CV pipeline and creates the session/event records. The image endpoint streams plate images privately; they are never served via a public media URL.
+Kiosk endpoints are capability-protected and rate-limited. Dashboard endpoints
+are staff-only. The scan endpoint runs the full CV pipeline and creates the
+session/event records. The image endpoint streams plate images privately; they
+are never served via a public media URL.
 
 | Method | URL | Purpose |
 |--------|-----|---------|
-| POST | `/api/upload/` | Validate a JPEG/PNG, run CV, and create an entry/exit event |
-| GET | `/api/sessions/` | Return the filtered, paginated HTMX session table |
-| GET | `/api/dashboard-stats/` | Return the live dashboard region polled every 10 seconds |
-| PATCH | `/api/events/<id>/correct/` | Correct a queued plate and reconcile its session |
-| GET | `/api/revenue-data/` | Return exact-money summary, daily, lot, and hourly chart data |
-| GET | `/api/events/<id>/image/` | Stream a detection image privately to authenticated staff |
+| POST | `/kiosk/activate/` | Exchange the environment token and lane scope for a revocable browser capability |
+| POST | `/kiosk/scan/` | Validate a plate image, consume a kiosk nonce, run CV, and create an entry/exit event |
+| GET | `/staff/api/sessions/` | Return the filtered, paginated HTMX session table |
+| GET | `/staff/api/dashboard-stats/` | Return the live dashboard region polled every 10 seconds |
+| PATCH | `/staff/api/events/<id>/correct/` | Correct a queued plate and reconcile its session |
+| GET | `/staff/api/revenue-data/` | Return exact-money summary, daily, lot, and hourly chart data |
+| GET | `/staff/api/events/<id>/image/` | Stream a detection image privately to authenticated staff |
 
-The dashboard API module is split across four files for clarity: `api.py` (upload + shared `staff_required` decorator), `partials_api.py` (sessions/stats/correct), `revenue_api.py`, and `image_api.py`.
+The dashboard API module is split across four files for clarity: `api.py`
+(shared `staff_required` decorator), `partials_api.py`
+(sessions/stats/correct), `revenue_api.py`, and `image_api.py`. Public kiosk
+activation and scanning live in `apps/public/scan.py`.
 
 ### Scheduled Maintenance
 
