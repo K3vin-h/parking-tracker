@@ -721,21 +721,9 @@ Authorization uses one global `is_staff` operator role. There is no per-lot tena
 
 ### Screenshots
 
-These screenshots show the current operator flow and the proof assets captured for the dashboard:
-
-![Login screen](artifacts/dashboard-proof/01-login.png)
-
-![Entry detection result](artifacts/dashboard-proof/02-entry-detected.png)
-
-![Dashboard with active session](artifacts/dashboard-proof/03-dashboard-active.png)
-
-![Exit completion result](artifacts/dashboard-proof/04-exit-completed.png)
-
-![Session log](artifacts/dashboard-proof/05-session-log.png)
-
-![Error queue review](artifacts/dashboard-proof/06-error-queue.png)
-
-![Revenue view](artifacts/dashboard-proof/07-revenue.png)
+Dashboard proof screenshots are generated locally under
+`artifacts/dashboard-proof/`. They are intentionally gitignored and are not
+embedded here so the README does not contain links to untracked artifacts.
 
 ### API Endpoints
 
