@@ -59,6 +59,7 @@ graphify-out/
 
 # ── Local documentation (not pushed) ───────────────────────────────────────────
 docs/
+artifacts/dashboard-proof/
 
 # ── AI agent instructions (local only) ───────────────────────────────────────
 AGENTS.md
