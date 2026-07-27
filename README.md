@@ -402,9 +402,7 @@ The flattened features are compressed `2048 → 256 → 4`. A sigmoid at the out
 
 Trained with `SmoothL1Loss` (Huber loss) + Adam optimizer + `ReduceLROnPlateau` learning rate scheduler. Target: **>0.7 IoU** on synthetic validation data after 50 epochs.
 
-**Actual result:** the full 50-epoch run completed (best epoch 48, val loss 0.0011), but validation IoU peaked at **~0.43** — the >0.7 target was **not met**. No training log survives on disk for this run; the curve below is the only record.
-
-![Plate detector training curves](apps/cv/weights/detector_training.png)
+**Actual result:** the full 50-epoch run completed (best epoch 48, val loss 0.0011), but validation IoU peaked at **~0.43** — the >0.7 target was **not met**. No training log or curve survives in the repository for this run.
 
 ---
 
@@ -437,8 +435,6 @@ The BiLSTM (`hidden=256, layers=2`) processes all 16 time-steps in both directio
 **Actual result:** the recorded run (`data/recognizer_train.log`, 5000 synthetic samples, 6,688,741 parameters, device cpu) was **interrupted at epoch 24 of the planned 100** — the log ends mid-table with no completion message, and `apps/cv/weights/recognizer.pth` holds the epoch-24 checkpoint. Epoch 24 (best) reached val_loss 0.1531, **97.6% character accuracy**, and **86.0% full-plate accuracy** (best plate accuracy was 86.1% at epoch 23) — both targets were already met at epoch 24, well short of the full 100-epoch plan.
 
 Weights live in `apps/cv/weights/` (gitignored). Load with `torch.load(..., weights_only=True)`.
-
-![Plate recognizer training curves](apps/cv/weights/recognizer_training.png)
 
 ---
 
@@ -727,21 +723,9 @@ Authorization uses one global `is_staff` operator role. There is no per-lot tena
 
 ### Screenshots
 
-These screenshots show the current operator flow and the proof assets captured for the dashboard:
-
-![Login screen](artifacts/dashboard-proof/01-login.png)
-
-![Entry detection result](artifacts/dashboard-proof/02-entry-detected.png)
-
-![Dashboard with active session](artifacts/dashboard-proof/03-dashboard-active.png)
-
-![Exit completion result](artifacts/dashboard-proof/04-exit-completed.png)
-
-![Session log](artifacts/dashboard-proof/05-session-log.png)
-
-![Error queue review](artifacts/dashboard-proof/06-error-queue.png)
-
-![Revenue view](artifacts/dashboard-proof/07-revenue.png)
+Dashboard proof screenshots are generated locally under
+`artifacts/dashboard-proof/`. They are intentionally gitignored and are not
+embedded here so the README does not contain links to untracked artifacts.
 
 ### API Endpoints
 

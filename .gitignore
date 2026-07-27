@@ -15,13 +15,10 @@ __pycache__/
 *.pyo
 
 # ── Trained model weights ─────────────────────────────────────────────────────
-# PyTorch .pth files are large binary files (100MB+).
-# Training happens on the host machine; weights are NOT stored in git.
-# The weights/ directory exists in git via .gitkeep files.
-apps/cv/weights/*.pth
-# Backup copies made before overwriting weights during retraining — same
-# reasoning as *.pth above (large, host-local, not reproducible in git).
-apps/cv/weights/*.pth.bak
+# Training outputs include model checkpoints and generated diagnostic plots.
+# They stay on the host; only the directory placeholder is tracked.
+apps/cv/weights/*
+!apps/cv/weights/.gitkeep
 
 # ── Django collected static / uploaded media ──────────────────────────────────
 # 'static/' is SOURCE (CSS, JS) — committed to git.
@@ -60,20 +57,9 @@ Thumbs.db
 # ── Analysis artifacts ────────────────────────────────────────────────────────
 graphify-out/
 
-# ── Reviewed documentation proof ──────────────────────────────────────────────
-# Proof runs may contain real plates, timestamps, charges, or operator details.
-# Ignore new captures by default and allowlist only sanitized README assets.
-artifacts/dashboard-proof/*
-!artifacts/dashboard-proof/01-login.png
-!artifacts/dashboard-proof/02-entry-detected.png
-!artifacts/dashboard-proof/03-dashboard-active.png
-!artifacts/dashboard-proof/04-exit-completed.png
-!artifacts/dashboard-proof/05-session-log.png
-!artifacts/dashboard-proof/06-error-queue.png
-!artifacts/dashboard-proof/07-revenue.png
-
 # ── Local documentation (not pushed) ───────────────────────────────────────────
 docs/
+artifacts/dashboard-proof/
 
 # ── AI agent instructions (local only) ───────────────────────────────────────
 AGENTS.md
