@@ -1,8 +1,30 @@
 # Parking Lot Tracker
 
-A parking lot management system that uses computer vision to read license plates from cars entering and exiting. It calculates parking duration and issues charges automatically — with no external CV APIs. All models are custom-trained on synthetic data.
+A parking lot management system modeled on **Chinese self-service LPR parking**.
+A public, unmanned **gate kiosk** lets a driver upload a plate photo (standing
+in for the camera); a from-scratch computer vision pipeline (PyTorch +
+OpenCV — no external CV APIs, all models custom-trained on synthetic data)
+reads the plate, opens/closes a parking session, and computes the charge.
+**Registered plates auto-bill the owner's prepaid wallet**; guests see the
+amount due at the kiosk. Anyone can self-register, link plates, and top up a
+wallet through a placeholder payment seam. Staff are reduced to
+configuration + oversight, nested under `/staff/`.
 
-**Stack:** Django 5.1 · PostgreSQL 16 · PyTorch · OpenCV · HTMX · Chart.js · Docker
+**Stack:** Django 5.1 · PostgreSQL 16 · PyTorch · OpenCV · HTMX · Chart.js · Docker — no Node.js, no frontend framework.
+
+> **CV model status:** neither the plate detector nor the recognizer is fully
+> fine-tuned yet — both are expected to get more accurate with additional
+> training. See [CV Model Status](#cv-model-status) before trusting the
+> reported accuracy numbers.
+
+**Feature overview:**
+
+- Public unmanned gate kiosk (`/`) — plate-photo upload standing in for a camera, entry/exit detection, privacy-reduced response
+- Resident self-service portal — signup, plate linking (`/plates/`), wallet balance/history (`/wallet/`), top-up (`/wallet/topup/`)
+- Prepaid wallet with an immutable, signed ledger — `Wallet.balance == SUM(WalletTransaction.amount)`, auto-deducted on a registered plate's exit
+- Placeholder payment gateway seam (`apps/parking/payments.py`) — fails closed, ready for a real provider
+- Staff oversight dashboard (`/staff/`) — session log, low-confidence error queue with manual correction, revenue analytics, per-lot billing settings
+- Per-IP rate limiting on public kiosk and wallet endpoints; private image retention + cleanup
 
 ## Table of Contents
 
@@ -14,6 +36,7 @@ A parking lot management system that uses computer vision to read license plates
   - [Plate Detector CNN](#plate-detector-cnn)
   - [Plate Recognizer CRNN](#plate-recognizer-crnn)
   - [Plate Recognition Pipeline](#plate-recognition-pipeline)
+- [CV Model Status](#cv-model-status)
 - [Synthetic Training Data](#synthetic-training-data)
   - [Data Generation](#data-generation)
   - [Dataset Classes](#dataset-classes)
@@ -32,28 +55,45 @@ A parking lot management system that uses computer vision to read license plates
 
 ## Architecture Overview
 
-The system is organized into four Django apps with clear ownership boundaries:
+The system is modeled on **Chinese self-service LPR parking**: a public,
+unmanned gate kiosk lets a driver upload a plate photo (standing in for the
+in-lane camera), a from-scratch CV pipeline reads the plate and opens/closes a
+session, and a **registered plate auto-bills its owner's prepaid wallet** — no
+cashier, no per-visit payment. Guests without a registered plate just see the
+amount due at the kiosk. Anyone can self-register an account, link plates, and
+top up a wallet through a placeholder payment seam. Staff are reduced to
+configuration + oversight, nested under `/staff/`.
+
+The system is organized into five Django apps with clear ownership boundaries:
 
 | App | Owns |
 |-----|------|
 | `apps.accounts` | Custom `User(AbstractUser)` — no extra fields |
-| `apps.parking` | Models, admin, `setup_defaults`, session/billing services |
+| `apps.parking` | Models (incl. `Wallet`/`WalletTransaction`), admin, `setup_defaults`, session/billing services, wallet money ops (`wallet.py`), placeholder payment seam (`payments.py`) |
 | `apps.cv` | Preprocessing, custom models, synthetic data, training scripts, and inference pipeline |
-| `apps.dashboard` | Staff-only pages and support APIs, settings form, HTMX partials, private event images, and revenue analytics |
+| `apps.dashboard` | **Staff-only** pages and support APIs (nested under `/staff/`), settings form, HTMX partials, private event images, and revenue analytics; also owns `scan_core.run_plate_scan`, the shared image→CV→session core reused by the public kiosk |
+| `apps.public` | **Public** (site root): the unmanned gate kiosk, resident signup, plate management, wallet + top-up/history, and the per-IP rate limiter |
 
-**Request flow for an uploaded plate image:**
+**Request flow for a kiosk plate scan:**
 
 ```
-Upload (JPEG/PNG)
+Driver uploads plate photo at the kiosk ("/")
   └─ validate (MIME + Pillow + dimensions + 10 MB cap)
-       └─ PlateRecognitionPipeline.process()
-            ├─ load_image() → bgr_to_rgb() → resize_for_detector(640×480) → normalize → to_tensor()
-            ├─ PlateDetectorCNN → bbox [cx, cy, w, h]
-            ├─ crop_plate_region() → prepare_for_recognizer(128×32 gray)
-            └─ PlateRecognizerCRNN → greedy CTC decode → plate_text + confidence
-                 └─ handle_entry() or handle_exit()  (services.py)
-                      └─ ParkingSession + PlateDetectionEvent  (DB)
+       └─ scan_core.run_plate_scan()
+            └─ PlateRecognitionPipeline.process()
+                 ├─ load_image() → bgr_to_rgb() → resize_for_detector(640×480) → normalize → to_tensor()
+                 ├─ PlateDetectorCNN → bbox [cx, cy, w, h]
+                 ├─ crop_plate_region() → prepare_for_recognizer(128×32 gray)
+                 └─ PlateRecognizerCRNN → greedy CTC decode → plate_text + confidence
+                      └─ handle_entry() or handle_exit()  (services.py)
+                           ├─ ParkingSession + PlateDetectionEvent  (DB)
+                           └─ registered plate on exit → wallet.py debits the owner's
+                              Wallet automatically; guest plates just report the charge
 ```
+
+The public kiosk response is privacy-reduced: it returns only plate text,
+status, and charge — never the image URL, event id, owner identity, or wallet
+balance.
 
 ---
 
@@ -104,6 +144,9 @@ docker compose up -d --force-recreate web
 # Development mode — Django runserver with live code mount
 docker-compose up --build
 ```
+
+For a production-shaped run (Gunicorn, no dev source bind mount, port bound to
+host loopback only) see [Docker → Production](#production).
 
 ### 3. Run migrations
 
@@ -297,6 +340,40 @@ The CV audit log — records every entry and exit event from the CV pipeline.
 | `corrected_plate` | The manually corrected plate text |
 | `bounding_box` | Plate bounding box as a JSON array `[x, y, w, h]` |
 | `timestamp` | Time the event was created |
+
+---
+
+### Wallet
+
+A prepaid balance attached to a user account — the China auto-pay model. When a registered plate exits, the parking charge is deducted automatically; no cashier, no per-visit payment.
+
+| Field | Description |
+| :--- | :--- |
+| `user` | The account this wallet belongs to (one wallet per user) |
+| `balance` | Cached running total in dollars; must always equal `SUM(WalletTransaction.amount)` |
+| `created_at` / `updated_at` | Auto-managed timestamps |
+
+`balance` is deliberately allowed to go **negative** — an exit is never blocked for insufficient funds, because the barrier must not strand a car. A short account simply owes money, visible to staff. There is no `MinValueValidator` on `balance` by product decision.
+
+---
+
+### WalletTransaction
+
+One immutable, signed ledger entry — the money audit trail. Rows are insert-only: created once, never updated or deleted.
+
+| Field | Description |
+| :--- | :--- |
+| `wallet` | The wallet this entry belongs to (`PROTECT` — deleting a wallet can never erase its ledger) |
+| `amount` | Signed dollars: positive = credit (top-up), negative = debit (parking charge) |
+| `kind` | `topup`, `charge`, or `adjustment` |
+| `session` | The `ParkingSession` this charge settled, if any (`SET_NULL` — the ledger outlives the session record) |
+| `description` | Human-readable note (never raw plate text, to limit PII exposure) |
+| `reference` | External payment-provider confirmation id, for top-ups |
+| `created_at` | Insert timestamp (no `updated_at` — rows never change) |
+
+`SUM(amount) == balance` is the money invariant; every credit/debit is written atomically with the balance update under `select_for_update()` (`apps/parking/wallet.py`), and a test reconciles the two. A unique constraint on non-blank `reference` values makes a provider's retried top-up confirmation idempotent — the same confirmation can authorize exactly one credit.
+
+**Payment gateway seam** (`apps/parking/payments.py`) — `PaymentConnector` is a placeholder `Protocol` for a future real provider (Stripe/WeChat Pay/Alipay). It holds no secrets and **fails closed**: the top-up page stays available, but no spendable credit is created until a real connector verifies a provider response.
 
 ---
 
@@ -507,6 +584,45 @@ The detector sees a letterboxed 640×480 canvas — the original photo is shrunk
 `get_pipeline()` returns a module-level singleton — the first call creates the pipeline and every later call reuses it, so all Django requests in the process share one loaded copy of the models. Creation is guarded by double-checked locking so two simultaneous first requests can't each load the models concurrently.
 
 The singleton is created lazily on the first request rather than at Django startup. Startup code also runs during management commands like `migrate` and `collectstatic`, where the weight files may not exist and inference is never needed — eager loading would crash migrations in CI just because the models hadn't been trained yet.
+
+---
+
+## CV Model Status
+
+**Neither CV model is fully fine-tuned yet, and both are expected to get more
+accurate with additional training cycles.** This section states current
+results plainly, including where targets were missed, so the numbers aren't
+read as more finished than they are.
+
+| Model | Run | Result | Target | Status |
+| :--- | :--- | :--- | :--- | :--- |
+| `PlateDetectorCNN` | 50/50 epochs, best epoch 48, val loss 0.0011 | **~0.43 IoU** | >0.70 IoU | **Not met** — the current accuracy bottleneck |
+| `PlateRecognizerCRNN` | Stopped at **epoch 36 of a planned 100** | val loss 0.094675, **98.59% char accuracy, 91.50% full-plate accuracy** | >90% char / >80% full-plate | Met — but undertrained by design of the run, not converged-and-final |
+
+A loose detector box directly degrades the recognizer downstream — a crop
+that clips characters or includes surrounding car body is a worse input than
+a tight one, regardless of how well the recognizer itself performs.
+
+**Both models were trained and validated exclusively on self-generated
+synthetic data and have never been evaluated against real photographs.**
+The numbers above describe in-distribution synthetic performance, not
+real-world accuracy, and should not be read as a benchmark for how the
+system performs on an actual parking lot.
+
+**Known domain-gap limitations:**
+
+- A single plate font and only 5 fixed plate formats (US + Canadian) are rendered — no font or format diversity.
+- Only 11 background photos are reused across the entire synthetic detector set.
+- Detector augmentation has no perspective warp — only flat rotation within ±15° — and no directional motion blur.
+- The detector regresses exactly one box per image with no objectness score: it cannot express "no plate present" and cannot handle multiple plates in frame.
+- Detector inference letterboxes non-4:3 source images with black padding bars that never appeared during training.
+
+These are expected consequences of an intentionally from-scratch,
+synthetic-data-only CV stack, not signs of a broken pipeline. The clear paths
+to improvement are: more training epochs (especially the detector, which
+completed its full run and still fell short), richer augmentation
+(perspective warp, motion blur, wider scale range, negative/no-plate
+samples), and eventually fine-tuning on real labeled plate photographs.
 
 ---
 
@@ -826,12 +942,23 @@ The production override also runs `collectstatic` at startup via `entrypoint.sh`
 
 | Area | Protection |
 | :--- | :--- |
-| **Access control** | Every operator page and dashboard API requires an authenticated staff account (`is_staff = True`). Login and Django auth routes remain public. |
-| **Image uploads** | Declared MIME type, Pillow structure, and format checks run before any CV decode. Uploads are capped at 10 MB (compressed) and 12 MP (pre-decode). Files are saved under randomized names in private storage. |
-| **Plate images** | Never served via public `MEDIA_URL`. Only accessible through the authenticated `GET /api/events/<id>/image/` endpoint, which validates the stored path (must start with `plates/`, no `..`, extension allowlist) and sets `Cache-Control: private, no-store` on every response. The reverse proxy or object-storage bucket must also keep the backing media directory private. |
-| **State-changing endpoints** | CSRF protection on all forms and PATCH endpoints. `correct_event` additionally uses `select_for_update()` inside `transaction.atomic()` to prevent concurrent double-correction. |
+| **Access control** | Every operator page and `/staff/api/` endpoint requires an authenticated staff account (`is_staff = True`). Public kiosk, registration, plate, and wallet routes are the only unauthenticated surface. Login and Django auth routes remain public. |
+| **Image uploads** | Declared MIME type, Pillow structure, and format checks run before any CV decode (`scan_core.run_plate_scan`, shared by the kiosk and formerly by staff upload). Uploads are capped at 10 MB (compressed) and 12 MP (pre-decode). Files are saved under randomized names in private storage. |
+| **Plate images** | Never served via public `MEDIA_URL`, and never returned by the public kiosk response at all. Only accessible through the authenticated `GET /staff/api/events/<id>/image/` endpoint, which validates the stored path (must start with `plates/`, no `..`, extension allowlist) and sets `Cache-Control: private, no-store` on every response. The reverse proxy or object-storage bucket must also keep the backing media directory private. |
+| **Kiosk activation** | `POST /kiosk/activate/` exchanges the server-held `KIOSK_ACTIVATION_TOKEN` and a lane scope for a short-lived, revocable browser capability; the scan endpoint requires that capability plus a single-use nonce rather than trusting the token directly on every request. |
+| **Public rate limiting** | Cache-based per-IP limiter (`apps/public/ratelimit.py`) applied to kiosk activation, kiosk scanning, wallet top-up, login, and password reset — bounding both credential-guessing and plate-scan abuse. |
+| **State-changing endpoints** | CSRF protection on all forms and PATCH endpoints. `correct_event` additionally uses `select_for_update()` inside `transaction.atomic()` to prevent concurrent double-correction. Wallet debits/credits are similarly atomic and row-locked (`apps/parking/wallet.py`), with `Wallet.balance == SUM(WalletTransaction.amount)` as an invariant. |
 | **Injection** | Parameterized Django ORM throughout — no raw SQL. Revenue date inputs parsed with `date.fromisoformat()` (raises `ValueError` on bad input → HTTP 400). Lot IDs cast to `int()` before ORM lookup. |
 | **Secrets** | All secrets via environment variables or a host `.env` file. `.dockerignore` excludes `.env` from the image build so secrets are never baked in. |
 | **Content Security Policy** | A production CSP header is enforced via `django-csp` with `script-src 'self'` and no `unsafe-eval` or `unsafe-inline`. HTMX's `allowEval` and `allowScriptTags` options are disabled to align with this policy. |
 | **HTTPS / transport** | HSTS, secure cookies, and SSL redirect are enabled in the production settings. |
 | **Production deployment** | Gunicorn runs behind a reverse proxy. Port 8000 is bound to host loopback only (`127.0.0.1`). The dev source bind mount is dropped in the production Compose override. A startup guard in `entrypoint.sh` aborts the container if `/app/.env` is present in a non-debug run, detecting a silently failed bind-mount drop. |
+
+**Known product tradeoff:** the kiosk accepts an uploaded photo of any plate
+rather than reading a live camera feed, so anyone at the kiosk can upload a
+photo of any plate and open/close a session and bill that plate's registered
+wallet. This mirrors a real ANPR gate, which reads whatever plate is
+physically present in the lane; the activation-capability requirement and
+per-IP rate limiting blunt casual abuse but do not eliminate it. Tighten with
+device- or gate-level authentication if the kiosk is exposed beyond a
+controlled, physically-gated lane.
