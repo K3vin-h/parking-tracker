@@ -1,6 +1,7 @@
 """Behavioral tests for the shared public-endpoint rate limiter."""
 
 from datetime import timedelta
+from types import SimpleNamespace
 
 import pytest
 from django.core.cache import cache
@@ -14,10 +15,15 @@ from apps.public.ratelimit import rate_limit
 
 
 @pytest.fixture(autouse=True)
-def clear_legacy_cache():
-    """Keep the pre-remediation cache limiter from leaking between red tests."""
+def isolate_rate_limit_state(monkeypatch):
+    """Keep limiter tests isolated from caches and real window-boundary timing."""
+    # A suite crossing a fixed-window boundary between requests legitimately starts
+    # a new bucket, so pin the bucket clock to keep request-count assertions stable.
+    clock = SimpleNamespace(now=1_000_000.0)
+    limiter_time = SimpleNamespace(time=lambda: clock.now)
+    monkeypatch.setattr("apps.public.ratelimit.time", limiter_time)
     cache.clear()
-    yield
+    yield clock
     cache.clear()
 
 
@@ -36,6 +42,23 @@ def test_counter_survives_process_local_cache_clear():
 
     assert first.status_code == 200
     assert second.status_code == 429
+
+
+@pytest.mark.django_db
+def test_counter_resets_in_a_new_fixed_window(isolate_rate_limit_state):
+    """A client gets a fresh allowance after its fixed window expires."""
+
+    @rate_limit(scope="rollover-test", limit=1, window_seconds=60)
+    def endpoint(request):
+        return HttpResponse("ok")
+
+    factory = RequestFactory()
+    first = endpoint(factory.post("/", REMOTE_ADDR="192.0.2.11"))
+    isolate_rate_limit_state.now += 60
+    second = endpoint(factory.post("/", REMOTE_ADDR="192.0.2.11"))
+
+    assert first.status_code == 200
+    assert second.status_code == 200
 
 
 @pytest.mark.django_db

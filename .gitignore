@@ -18,6 +18,9 @@ __pycache__/
 # Training happens on the host machine; weights are NOT stored in git.
 # The weights/ directory exists in git via .gitkeep files.
 apps/cv/weights/*.pth
+# Backup copies made before overwriting weights during retraining — same
+# reasoning as *.pth above (large, host-local, not reproducible in git).
+apps/cv/weights/*.pth.bak
 
 # ── Django collected static / uploaded media ──────────────────────────────────
 # 'static/' is SOURCE (CSS, JS) — committed to git.
@@ -77,6 +80,9 @@ data/backgrounds/*
 data/detector/
 data/detector_smoke/
 data/recognizer/
+# Plate crops dumped for debugging CV preprocessing/pipeline runs — local
+# scratch output, not reproducible input, not committed.
+data/_debug_crops/
 
 # ── Bundled plate font (binary asset — download per assets/README.md) ─────────
 apps/cv/training/assets/*.ttf

@@ -48,21 +48,22 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, Subset, random_split
+# These imports intentionally follow the direct-script path bootstrap above.
+import torch  # noqa: E402
+import torch.nn as nn  # noqa: E402
+from torch.utils.data import DataLoader, Subset, random_split  # noqa: E402
 
-from apps.cv.models.recognizer import PlateRecognizerCRNN
-from apps.cv.training.augment import (
+from apps.cv.models.recognizer import PlateRecognizerCRNN  # noqa: E402
+from apps.cv.training.augment import (  # noqa: E402
     NORMALIZED_PREPROCESSING_VERSION,
     RecognizerAugment,
 )
-from apps.cv.training.dataset import (
+from apps.cv.training.dataset import (  # noqa: E402
     IDX_TO_CHAR,
     PlateRecognizerDataset,
     ctc_collate_fn,
 )
-from apps.cv.training._train_utils import (
+from apps.cv.training._train_utils import (  # noqa: E402
     BG_PRIMARY,
     BG_SECONDARY,
     BLUE,
@@ -80,7 +81,7 @@ from apps.cv.training._train_utils import (
     smooth,
     style_axes,
 )
-from apps.cv.utils.device import get_device
+from apps.cv.utils.device import get_device  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
