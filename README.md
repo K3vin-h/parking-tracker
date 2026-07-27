@@ -402,7 +402,7 @@ The flattened features are compressed `2048 → 256 → 4`. A sigmoid at the out
 
 Trained with `SmoothL1Loss` (Huber loss) + Adam optimizer + `ReduceLROnPlateau` learning rate scheduler. Target: **>0.7 IoU** on synthetic validation data after 50 epochs.
 
-![Plate detector training curves](apps/cv/weights/detector_training.png)
+**Actual result:** the full 50-epoch run completed (best epoch 48, val loss 0.0011), but validation IoU peaked at **~0.43** — the >0.7 target was **not met**. No training log or curve survives in the repository for this run.
 
 ---
 
@@ -432,9 +432,9 @@ The BiLSTM (`hidden=256, layers=2`) processes all 16 time-steps in both directio
 
 `CTCLoss` must run on CPU even on MPS devices (a PyTorch limitation) — training scripts call `log_probs.cpu()` before the loss. Targets: **>90% character accuracy, >80% full-plate accuracy** on synthetic validation data after 100 epochs.
 
-Weights live in `apps/cv/weights/` (gitignored). Load with `torch.load(..., weights_only=True)`.
+**Actual result:** the recorded run (`data/recognizer_train.log`, 5000 synthetic samples, 6,688,741 parameters, device cpu) was **interrupted at epoch 24 of the planned 100** — the log ends mid-table with no completion message, and `apps/cv/weights/recognizer.pth` holds the epoch-24 checkpoint. Epoch 24 (best) reached val_loss 0.1531, **97.6% character accuracy**, and **86.0% full-plate accuracy** (best plate accuracy was 86.1% at epoch 23) — both targets were already met at epoch 24, well short of the full 100-epoch plan.
 
-![Plate recognizer training curves](apps/cv/weights/recognizer_training.png)
+Weights live in `apps/cv/weights/` (gitignored). Load with `torch.load(..., weights_only=True)`.
 
 ---
 
@@ -586,13 +586,15 @@ The recognizer **never** flips the image horizontally — `"ABC 123"` backwards 
 Run the training scripts outside Docker to use MPS on Apple Silicon (or CUDA on NVIDIA):
 
 ```bash
-# Train the plate detector (target: >0.7 IoU after 50 epochs)
+# Train the plate detector (target: >0.7 IoU after 50 epochs;
+# actual last run: completed all 50 epochs, best IoU ~0.43 — target not met)
 python apps/cv/training/train_detector.py \
     --epochs 50 \
     --data-dir data/detector \
     --output apps/cv/weights/detector.pth
 
-# Train the plate recognizer (target: >90% char accuracy, >80% full-plate after 100 epochs)
+# Train the plate recognizer (target: >90% char accuracy, >80% full-plate after 100 epochs;
+# actual last run: interrupted at epoch 24/100, but 97.6% char / 86.0% full-plate — both targets already met)
 python apps/cv/training/train_recognizer.py \
     --epochs 100 \
     --data-dir data/recognizer \

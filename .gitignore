@@ -3,9 +3,10 @@
 # ============================================================
 
 # ── Secrets (CRITICAL) ────────────────────────────────────────────────────────
-# The .env file contains SECRET_KEY, DB_PASSWORD, and other credentials.
-# It must NEVER be committed. .env.example (with placeholder values) IS committed.
-.env
+# Environment files may contain SECRET_KEY, DB_PASSWORD, and other credentials.
+# Ignore every environment-specific variant while retaining the reviewed template.
+.env*
+!/.env.example
 
 # ── Python bytecode ───────────────────────────────────────────────────────────
 __pycache__/
@@ -42,7 +43,6 @@ htmlcov/
 venv/
 .venv/
 env/
-.env.local
 
 # ── IDE and OS files ──────────────────────────────────────────────────────────
 .idea/
@@ -78,6 +78,9 @@ data/backgrounds/*
 data/detector/
 data/detector_smoke/
 data/recognizer/
+# Plate crops dumped for debugging CV preprocessing/pipeline runs — local
+# scratch output, not reproducible input, not committed.
+data/_debug_crops/
 
 # ── Bundled plate font (binary asset — download per assets/README.md) ─────────
 apps/cv/training/assets/*.ttf

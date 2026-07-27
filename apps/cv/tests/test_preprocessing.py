@@ -64,6 +64,8 @@ class FakeImageHeader:
         return self
 
     def __exit__(self, exc_type, exc, tb):
+        """Leave exception handling to the caller like Pillow's image context."""
+        _ = exc_type, exc, tb
         return False
 
 
@@ -206,7 +208,7 @@ def test_load_image_rejects_disallowed_format(mock_media_root, monkeypatch):
 
     monkeypatch.setattr(
         "apps.cv.preprocessing.Image.open",
-        lambda p: FakeImageHeader((100, 100), fmt="EPS"),
+        lambda _path: FakeImageHeader((100, 100), fmt="EPS"),
     )
 
     with pytest.raises(ValueError, match="Unsupported image format"):
@@ -221,7 +223,7 @@ def test_load_image_rejects_oversized_image_before_decoding(mock_media_root, mon
 
     monkeypatch.setattr(
         "apps.cv.preprocessing.Image.open",
-        lambda src: FakeImageHeader((4001, 3000)),
+        lambda _src: FakeImageHeader((4001, 3000)),
     )
     monkeypatch.setattr("apps.cv.preprocessing.cv2.imdecode", _must_not_decode)
 
@@ -237,7 +239,7 @@ def test_load_image_rejects_large_compressed_file_before_header_parse(
     img_path = mock_media_root / "large.jpg"
     img_path.write_bytes(b"x" * 11)
 
-    def fail_if_header_parsed(src):
+    def fail_if_header_parsed(_src):
         raise AssertionError("Image.open must not parse oversized compressed files")
 
     monkeypatch.setattr("apps.cv.preprocessing.MAX_IMAGE_BYTES", 10)
@@ -256,7 +258,7 @@ def test_load_image_rejects_uninspectable_image(mock_media_root, monkeypatch):
 
     from PIL import UnidentifiedImageError as UIE
 
-    def fake_open(src):
+    def fake_open(_src):
         raise UIE("cannot identify")
 
     monkeypatch.setattr("apps.cv.preprocessing.Image.open", fake_open)
@@ -272,7 +274,7 @@ def test_load_image_rejects_decompression_bomb(mock_media_root, monkeypatch):
     img_path = str(mock_media_root / "bomb.png")
     (mock_media_root / "bomb.png").write_bytes(b"fake image bytes")
 
-    def fake_open(src):
+    def fake_open(_src):
         raise Image.DecompressionBombError("simulated decompression bomb")
 
     monkeypatch.setattr("apps.cv.preprocessing.Image.open", fake_open)
@@ -288,7 +290,7 @@ def test_load_image_rejects_decompression_bomb_warning(mock_media_root, monkeypa
     img_path = str(mock_media_root / "bomb-warning.png")
     (mock_media_root / "bomb-warning.png").write_bytes(b"fake image bytes")
 
-    def fake_open(src):
+    def fake_open(_src):
         raise Image.DecompressionBombWarning("simulated decompression bomb warning")
 
     monkeypatch.setattr("apps.cv.preprocessing.Image.open", fake_open)

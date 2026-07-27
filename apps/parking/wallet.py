@@ -35,7 +35,10 @@ logger = logging.getLogger(__name__)
 
 # Charges/top-ups are stored to the cent. Callers should already quantize money,
 # but we quantize defensively so a stray extra place can never reach the DB.
-_MONEY_QUANTUM = Decimal("0.01")
+# Public (not module-private) because apps/parking/services.py imports this
+# constant too, so both billing-critical modules quantize to the exact same
+# money precision — defined once here since this module owns wallet money.
+MONEY_QUANTUM = Decimal("0.01")
 
 
 def get_or_create_wallet(user) -> Wallet:
@@ -69,7 +72,7 @@ def credit_wallet(
     Returns the refreshed wallet. Raises ValueError on invalid input or a
     conflicting payment reference.
     """
-    amount = Decimal(amount).quantize(_MONEY_QUANTUM)
+    amount = Decimal(amount).quantize(MONEY_QUANTUM)
     if amount <= 0:
         raise ValueError("Top-up amount must be positive.")
     reference = reference.strip()
@@ -143,7 +146,7 @@ def debit_wallet_for_session(session: ParkingSession, charge: Decimal) -> Wallet
         )
         return None
 
-    charge = Decimal(charge).quantize(_MONEY_QUANTUM)
+    charge = Decimal(charge).quantize(MONEY_QUANTUM)
     if charge <= 0:
         # No money moved (free grace-period stay) — nothing to record.
         return None
@@ -193,7 +196,7 @@ def reconcile_wallet_for_session_owner(
     if session.status != ParkingSession.Status.COMPLETED:
         raise ValueError("Only completed session charges can be reconciled.")
 
-    charge = Decimal(session.charge_amount).quantize(_MONEY_QUANTUM)
+    charge = Decimal(session.charge_amount).quantize(MONEY_QUANTUM)
     if charge <= 0 or previous_user_id == session.user_id:
         return
 
@@ -215,14 +218,11 @@ def reconcile_wallet_for_session_owner(
 
     for user_id in sorted(affected_user_ids):
         wallet = wallets[user_id]
-        current_net = (
-            WalletTransaction.objects.filter(wallet=wallet, session=session).aggregate(
-                total=Sum("amount")
-            )["total"]
-            or Decimal("0.00")
-        )
+        current_net = WalletTransaction.objects.filter(
+            wallet=wallet, session=session
+        ).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
         expected_net = -charge if user_id == session.user_id else Decimal("0.00")
-        adjustment = (expected_net - current_net).quantize(_MONEY_QUANTUM)
+        adjustment = (expected_net - current_net).quantize(MONEY_QUANTUM)
         if adjustment == 0:
             continue
 
