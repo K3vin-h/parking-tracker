@@ -402,7 +402,9 @@ The flattened features are compressed `2048 → 256 → 4`. A sigmoid at the out
 
 Trained with `SmoothL1Loss` (Huber loss) + Adam optimizer + `ReduceLROnPlateau` learning rate scheduler. Target: **>0.7 IoU** on synthetic validation data after 50 epochs.
 
-**Actual result:** the full 50-epoch run completed (best epoch 48, val loss 0.0011), but validation IoU peaked at **~0.43** — the >0.7 target was **not met**. No training log or curve survives in the repository for this run.
+**Actual result:** the full 50-epoch run completed (best epoch 48, val loss 0.0011), but validation IoU peaked at **~0.43** — the >0.7 target was **not met**. No per-epoch training log survives in the repository for this run.
+
+![Plate detector training curves](artifacts/cv-training/detector_training.png)
 
 ---
 
@@ -432,7 +434,9 @@ The BiLSTM (`hidden=256, layers=2`) processes all 16 time-steps in both directio
 
 `CTCLoss` must run on CPU even on MPS devices (a PyTorch limitation) — training scripts call `log_probs.cpu()` before the loss. Targets: **>90% character accuracy, >80% full-plate accuracy** on synthetic validation data after 100 epochs.
 
-**Actual result:** the recorded run (`data/recognizer_train.log`, 5000 synthetic samples, 6,688,741 parameters, device cpu) was **interrupted at epoch 24 of the planned 100** — the log ends mid-table with no completion message, and `apps/cv/weights/recognizer.pth` holds the epoch-24 checkpoint. Epoch 24 (best) reached val_loss 0.1531, **97.6% character accuracy**, and **86.0% full-plate accuracy** (best plate accuracy was 86.1% at epoch 23) — both targets were already met at epoch 24, well short of the full 100-epoch plan.
+**Actual result:** the recorded run (`data/recognizer_train.log`, 5000 synthetic samples, 6,688,741 parameters, device cpu) concluded at **epoch 36 of the planned 100** and is treated as final — no further training is planned. Epoch 36 was the best epoch on every metric — val_loss 0.094675, **98.59% character accuracy**, and **91.50% full-plate accuracy** — so those weights (`apps/cv/weights/recognizer.pth`) were kept as the final model. Both targets (>90% char, >80% full-plate) are **met**.
+
+![Plate recognizer training curves](artifacts/cv-training/recognizer_training.png)
 
 Weights live in `apps/cv/weights/` (gitignored). Load with `torch.load(..., weights_only=True)`.
 
@@ -594,7 +598,8 @@ python apps/cv/training/train_detector.py \
     --output apps/cv/weights/detector.pth
 
 # Train the plate recognizer (target: >90% char accuracy, >80% full-plate after 100 epochs;
-# actual last run: interrupted at epoch 24/100, but 97.6% char / 86.0% full-plate — both targets already met)
+# actual last run: concluded at epoch 36/100 (best epoch on all metrics, kept as final) —
+# 98.59% char / 91.50% full-plate — both targets met)
 python apps/cv/training/train_recognizer.py \
     --epochs 100 \
     --data-dir data/recognizer \
