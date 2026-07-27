@@ -49,6 +49,7 @@ from apps.parking.models import (
 )
 from apps.parking.normalization import canonicalize_plate
 from apps.parking.wallet import (
+    MONEY_QUANTUM,
     debit_wallet_for_session,
     reconcile_wallet_for_session_owner,
 )
@@ -56,8 +57,9 @@ from apps.parking.wallet import (
 logger = logging.getLogger(__name__)
 
 # Charges are stored to the cent; this is the quantum every Decimal result is
-# rounded to before it touches the DB (DecimalField(decimal_places=2)).
-_MONEY_QUANTUM = Decimal("0.01")
+# rounded to before it touches the DB (DecimalField(decimal_places=2)). Defined
+# once in apps/parking/wallet.py and imported here so both billing-critical
+# modules share the exact same money precision.
 
 # Plate columns (ParkingSession.plate_text, PlateDetectionEvent.raw_plate_text /
 # corrected_plate) are CharField(max_length=20). CharField does NOT enforce
@@ -238,7 +240,7 @@ def calculate_charge(
         elif charge > lot_settings.daily_cap_amount:
             charge = lot_settings.daily_cap_amount
 
-    return charge.quantize(_MONEY_QUANTUM, rounding=ROUND_HALF_UP)
+    return charge.quantize(MONEY_QUANTUM, rounding=ROUND_HALF_UP)
 
 
 def _clamp_confidence(confidence: float) -> float:
@@ -551,6 +553,184 @@ def _void_duplicate_active_sessions(
     return voided
 
 
+def _locked_correction_event(
+    event_id: int,
+    locked_event: PlateDetectionEvent | None,
+) -> PlateDetectionEvent:
+    """Return the correction target; callers must hold an atomic transaction."""
+    if locked_event is not None:
+        if locked_event.pk != event_id:
+            raise ValueError("locked event id does not match correction target")
+        return locked_event
+    try:
+        return PlateDetectionEvent.objects.select_for_update().get(pk=event_id)
+    except PlateDetectionEvent.DoesNotExist:
+        logger.error("correct_plate: no detection event with id %s", event_id)
+        raise
+
+
+def _correct_linked_session(
+    event: PlateDetectionEvent,
+    normalized: str,
+    session_id: int,
+) -> None:
+    """Relink a corrected session without weakening locks or wallet history."""
+    # Lock the session row too so the relink can't race a concurrent exit.
+    session = ParkingSession.objects.select_for_update().get(pk=session_id)
+    previous_user_id = session.user_id
+    duplicate_voided = 0
+    if session.status == ParkingSession.Status.ACTIVE:
+        duplicate_voided = _void_duplicate_active_sessions(
+            session.lot,
+            normalized,
+            session.pk,
+        )
+    session.plate_text = normalized
+    if duplicate_voided:
+        session.has_duplicate_warning = True
+    registered = _match_registered_plate(normalized)
+    session.license_plate = registered
+    session.user = registered.user if registered else None
+    session.save(
+        update_fields=[
+            "plate_text",
+            "has_duplicate_warning",
+            "license_plate",
+            "user",
+        ]
+    )
+    if (
+        session.status == ParkingSession.Status.COMPLETED
+        and previous_user_id != session.user_id
+    ):
+        # The old debit is immutable ledger evidence. Append compensating
+        # entries so the old owner is restored and the corrected owner bears
+        # the charge (or nobody does when correction makes it a guest).
+        reconcile_wallet_for_session_owner(session, previous_user_id)
+    # Only write `lot` when we actually backfill it; otherwise the save would
+    # rewrite an unchanged column (and clobber it if logic ever diverges).
+    event_update_fields = ["manually_corrected", "corrected_plate"]
+    if event.lot_id is None:
+        event.lot = session.lot
+        event_update_fields.append("lot")
+    event.save(update_fields=event_update_fields)
+    logger.info(
+        "Corrected event %s -> plate_hash=%s; session %s relinked "
+        "(guest=%s duplicate_voided=%d)",
+        event.pk,
+        _plate_log_token(normalized),
+        session.pk,
+        registered is None,
+        duplicate_voided,
+    )
+
+
+def _correct_unmatched_exit(
+    event: PlateDetectionEvent,
+    normalized: str,
+    lot: ParkingLot,
+) -> None:
+    """Close only a matching active session that predates the corrected exit."""
+    # We deliberately do not match voided/orphaned sessions: reviving one here
+    # could double-bill the vehicle while its live re-entry session also bills.
+    settings = _get_lot_settings(lot)
+    session = (
+        ParkingSession.objects.select_for_update()
+        .filter(
+            lot=lot,
+            plate_text=normalized,
+            status=ParkingSession.Status.ACTIVE,
+            entry_time__lt=event.timestamp,
+        )
+        .order_by("entry_time")
+        .first()
+    )
+    if session is not None:
+        exit_time = event.timestamp
+        if exit_time <= session.entry_time:
+            logger.warning(
+                "Corrected exit event %s timestamp not after entry for "
+                "session %s; bumping +1s",
+                event.pk,
+                session.pk,
+            )
+            exit_time = session.entry_time + timedelta(seconds=1)
+        _complete_session_for_exit(session, exit_time, settings)
+        event.session = session
+        event.save(
+            update_fields=["manually_corrected", "corrected_plate", "session"]
+        )
+        logger.info(
+            "Corrected unmatched exit event %s closed session %s for "
+            "plate_hash=%s in lot %s",
+            event.pk,
+            session.pk,
+            _plate_log_token(normalized),
+            event.lot_id,
+        )
+        return
+    event.save(update_fields=["manually_corrected", "corrected_plate"])
+    logger.info(
+        "Corrected unmatched exit event %s found no active session for "
+        "plate_hash=%s in lot %s",
+        event.pk,
+        _plate_log_token(normalized),
+        lot.pk,
+    )
+
+
+def _open_corrected_entry_session(
+    event: PlateDetectionEvent,
+    normalized: str,
+    lot: ParkingLot,
+) -> None:
+    """Open the session an unreadable entry could not create originally."""
+    # Preserve the detection timestamp so billing reflects the actual arrival.
+    voided = ParkingSession.objects.filter(
+        lot=lot,
+        plate_text=normalized,
+        status=ParkingSession.Status.ACTIVE,
+    ).update(
+        status=ParkingSession.Status.VOID,
+        charge_amount=Decimal("0.00"),
+        was_orphaned=True,
+    )
+    registered = _match_registered_plate(normalized)
+    session = ParkingSession.objects.create(
+        plate_text=normalized,
+        license_plate=registered,
+        user=registered.user if registered else None,
+        lot=lot,
+        entry_time=event.timestamp,
+        status=ParkingSession.Status.ACTIVE,
+        has_duplicate_warning=voided > 0,
+    )
+    event.session = session
+    event.save(update_fields=["manually_corrected", "corrected_plate", "session"])
+    logger.info(
+        "Corrected sessionless entry event %s opened session %s for "
+        "plate_hash=%s in lot %s (duplicate_voided=%d)",
+        event.pk,
+        session.pk,
+        _plate_log_token(normalized),
+        lot.pk,
+        voided,
+    )
+
+
+def _save_standalone_correction(
+    event: PlateDetectionEvent,
+    normalized: str,
+) -> None:
+    """Persist a correction that lacks enough lot/session context to reconcile."""
+    event.save(update_fields=["manually_corrected", "corrected_plate"])
+    logger.info(
+        "Corrected event %s -> plate_hash=%s; no linked session to relink",
+        event.pk,
+        _plate_log_token(normalized),
+    )
+
+
 @transaction.atomic
 def correct_plate(
     event_id: int,
@@ -562,35 +742,18 @@ def correct_plate(
     Apply an operator's manual plate correction to a detection event.
 
     WHY: low-confidence reads (and unmatched exits) land in a review queue. When
-    an operator fixes the text, we must atomically: mark the event corrected,
-    update the linked session's plate, and RE-EVALUATE the registration link —
-    the corrected plate might now match a registered user (or no longer match,
-    reverting the session to guest).
+    an operator fixes the text, we atomically update the event and reconcile its
+    session, registration, wallet owner, or missing entry/exit relationship.
 
-    Sessionless unreadable entry events also open the parking session that the
-    original upload could not create once an operator supplies valid plate text.
-
-    AUTHORIZATION: this service performs no access control. The caller (the
-    planned PATCH /api/events/<id>/correct/ view) MUST restrict this to staff /
-    lot operators — any caller can otherwise rewrite any event and relink any
-    session to any registered user.
+    AUTHORIZATION: this service performs no access control. Callers must restrict
+    corrections to staff or lot operators before invoking it.
 
     Raises:
       PlateDetectionEvent.DoesNotExist: for an unknown event id.
       ValueError: if corrected_text is empty or over-length after normalization.
     """
     _require_plate_within_limits(corrected_text)
-    if locked_event is not None:
-        if locked_event.pk != event_id:
-            raise ValueError("locked event id does not match correction target")
-        event = locked_event
-    else:
-        try:
-            event = PlateDetectionEvent.objects.select_for_update().get(pk=event_id)
-        except PlateDetectionEvent.DoesNotExist:
-            logger.error("correct_plate: no detection event with id %s", event_id)
-            raise
-
+    event = _locked_correction_event(event_id, locked_event)
     normalized = normalize_plate(corrected_text)
     if not normalized:
         # Blanking a plate via "correction" would corrupt the event/session.
@@ -600,150 +763,13 @@ def correct_plate(
     event.corrected_plate = normalized
 
     if event.session_id is not None:
-        # Lock the session row too so the relink can't race a concurrent exit.
-        session = ParkingSession.objects.select_for_update().get(pk=event.session_id)
-        previous_user_id = session.user_id
-        duplicate_voided = 0
-        if session.status == ParkingSession.Status.ACTIVE:
-            duplicate_voided = _void_duplicate_active_sessions(
-                session.lot,
-                normalized,
-                session.pk,
-            )
-        session.plate_text = normalized
-        if duplicate_voided:
-            session.has_duplicate_warning = True
-        registered = _match_registered_plate(normalized)
-        session.license_plate = registered
-        session.user = registered.user if registered else None
-        session.save(
-            update_fields=[
-                "plate_text",
-                "has_duplicate_warning",
-                "license_plate",
-                "user",
-            ]
-        )
-        if (
-            session.status == ParkingSession.Status.COMPLETED
-            and previous_user_id != session.user_id
-        ):
-            # The old debit is immutable ledger evidence. Append compensating
-            # entries so the old owner is restored and the corrected owner bears
-            # the charge (or nobody does when correction makes it a guest).
-            reconcile_wallet_for_session_owner(session, previous_user_id)
-        # Only write `lot` when we actually backfill it; otherwise the save would
-        # rewrite an unchanged column (and clobber it if logic ever diverges).
-        event_update_fields = ["manually_corrected", "corrected_plate"]
-        if event.lot_id is None:
-            event.lot = session.lot
-            event_update_fields.append("lot")
-        event.save(update_fields=event_update_fields)
-        logger.info(
-            "Corrected event %s -> plate_hash=%s; session %s relinked "
-            "(guest=%s duplicate_voided=%d)",
-            event_id,
-            _plate_log_token(normalized),
-            session.pk,
-            registered is None,
-            duplicate_voided,
-        )
+        _correct_linked_session(event, normalized, event.session_id)
     elif event.event_type == "exit" and event.lot_id is not None:
-        # Reconcile a corrected unmatched-exit event to a still-OPEN session only.
-        # We deliberately do NOT match voided/orphaned sessions: a session voided
-        # because the car re-entered was correctly abandoned, and reviving+billing
-        # it here would double-bill the same vehicle (the live session bills too).
-        settings = _get_lot_settings(event.lot)
-        session = (
-            ParkingSession.objects.select_for_update()
-            .filter(
-                lot=event.lot,
-                plate_text=normalized,
-                status=ParkingSession.Status.ACTIVE,
-                entry_time__lt=event.timestamp,
-            )
-            .order_by("entry_time")
-            .first()
-        )
-        if session is not None:
-            exit_time = event.timestamp
-            if exit_time <= session.entry_time:
-                logger.warning(
-                    "Corrected exit event %s timestamp not after entry for "
-                    "session %s; bumping +1s",
-                    event_id,
-                    session.pk,
-                )
-                exit_time = session.entry_time + timedelta(seconds=1)
-            _complete_session_for_exit(session, exit_time, settings)
-            event.session = session
-            event.save(
-                update_fields=["manually_corrected", "corrected_plate", "session"]
-            )
-            logger.info(
-                "Corrected unmatched exit event %s closed session %s for "
-                "plate_hash=%s in lot %s",
-                event_id,
-                session.pk,
-                _plate_log_token(normalized),
-                event.lot_id,
-            )
-        else:
-            event.save(update_fields=["manually_corrected", "corrected_plate"])
-            logger.info(
-                "Corrected unmatched exit event %s found no active session for "
-                "plate_hash=%s in lot %s",
-                event_id,
-                _plate_log_token(normalized),
-                event.lot_id,
-            )
-    elif (
-        event.event_type == "entry"
-        and event.lot_id is not None
-        and event.session_id is None
-    ):
-        # Reconcile a queued unreadable entry by opening the session the upload
-        # could not create. Preserve the original detection timestamp so billing
-        # and occupancy reflect when the vehicle actually arrived.
-        lot = event.lot
-        voided = ParkingSession.objects.filter(
-            lot=lot,
-            plate_text=normalized,
-            status=ParkingSession.Status.ACTIVE,
-        ).update(
-            status=ParkingSession.Status.VOID,
-            charge_amount=Decimal("0.00"),
-            was_orphaned=True,
-        )
-        registered = _match_registered_plate(normalized)
-        session = ParkingSession.objects.create(
-            plate_text=normalized,
-            license_plate=registered,
-            user=registered.user if registered else None,
-            lot=lot,
-            entry_time=event.timestamp,
-            status=ParkingSession.Status.ACTIVE,
-            has_duplicate_warning=voided > 0,
-        )
-        event.session = session
-        event.save(update_fields=["manually_corrected", "corrected_plate", "session"])
-        logger.info(
-            "Corrected sessionless entry event %s opened session %s for "
-            "plate_hash=%s in lot %s (duplicate_voided=%d)",
-            event_id,
-            session.pk,
-            _plate_log_token(normalized),
-            lot.pk,
-            voided,
-        )
+        _correct_unmatched_exit(event, normalized, event.lot)
+    elif event.event_type == "entry" and event.lot_id is not None:
+        _open_corrected_entry_session(event, normalized, event.lot)
     else:
-        # Orphan event without lot context cannot be reconciled to a session.
-        event.save(update_fields=["manually_corrected", "corrected_plate"])
-        logger.info(
-            "Corrected event %s -> plate_hash=%s; no linked session to relink",
-            event_id,
-            _plate_log_token(normalized),
-        )
+        _save_standalone_correction(event, normalized)
 
     return event
 

@@ -113,6 +113,83 @@ class TestSecurityHeaders:
 class TestDashboardContext:
     """Verify UTC statistics, live charges, and lot scoping."""
 
+    def test_combines_dashboard_summary_queries(
+        self,
+        lots,
+        django_assert_num_queries,
+    ):
+        """Keep four independent dashboard reads from regressing into extra queries."""
+        request = RequestFactory().get("/")
+
+        with django_assert_num_queries(4):
+            context = build_dashboard_context(request)
+
+        assert context["entries_today"] == 0
+        assert context["exits_today"] == 0
+        assert context["revenue_today"] == Decimal("0.00")
+
+    def test_combined_summaries_keep_values_day_bounds_and_lot_scope(
+        self,
+        lots,
+        django_assert_num_queries,
+    ):
+        """Prove the combined aggregates retain non-empty UTC and lot semantics."""
+        first, second = lots
+        now = datetime.now(UTC)
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        completed = ParkingSession.objects.create(
+            plate_text="FIRST1",
+            lot=first,
+            entry_time=now - timedelta(hours=2),
+            exit_time=now - timedelta(hours=1),
+            duration_seconds=3600,
+            charge_amount=Decimal("12.00"),
+            status=ParkingSession.Status.COMPLETED,
+        )
+        ParkingSession.objects.create(
+            plate_text="OTHER1",
+            lot=second,
+            entry_time=now - timedelta(hours=2),
+            exit_time=now - timedelta(hours=1),
+            duration_seconds=7200,
+            charge_amount=Decimal("99.00"),
+            status=ParkingSession.Status.COMPLETED,
+        )
+        ParkingSession.objects.create(
+            plate_text="OLD001",
+            lot=first,
+            entry_time=today_start - timedelta(hours=2),
+            exit_time=today_start - timedelta(hours=1),
+            duration_seconds=3600,
+            charge_amount=Decimal("40.00"),
+            status=ParkingSession.Status.COMPLETED,
+        )
+        for event_type in ("entry", "exit"):
+            PlateDetectionEvent.objects.create(
+                session=completed,
+                lot=first,
+                image=f"plates/first-{event_type}.jpg",
+                raw_plate_text="FIRST1",
+                confidence_score=0.9,
+                event_type=event_type,
+            )
+        PlateDetectionEvent.objects.create(
+            lot=second,
+            image="plates/other-exit.jpg",
+            raw_plate_text="OTHER1",
+            confidence_score=0.9,
+            event_type="exit",
+        )
+        request = RequestFactory().get("/", {"lot": first.pk})
+
+        with django_assert_num_queries(5):
+            context = build_dashboard_context(request)
+
+        assert context["revenue_today"] == Decimal("12.00")
+        assert context["average_stay_seconds"] == 3600
+        assert context["entries_today"] == 1
+        assert context["exits_today"] == 1
+
     def test_context_filters_lot_and_calculates_live_values(self, lots):
         """Keep one lot's dashboard isolated and calculate active values via billing."""
         first, second = lots

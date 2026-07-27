@@ -29,12 +29,13 @@ __pycache__
 # It must NEVER be copied into a Docker image — anyone who pulls the image
 # would have access to your secrets.
 .env
+.env.*
 
 # --- Trained model weights ---
 # PyTorch .pth files can be 100MB+. Training happens on the host machine
 # (Apple Silicon MPS), not inside Docker. Copy weights into the container
 # manually when needed for production inference.
-apps/cv/weights/*.pth
+apps/cv/weights/
 
 # --- User-uploaded media ---
 # Media files (uploaded plate images) are served from a Docker named volume,
@@ -51,10 +52,27 @@ staticfiles/
 .coverage
 htmlcov/
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
 .tox/
 
 # --- Analysis and tooling artifacts ---
 graphify-out/
+.agents/
+.claude/
+.codex/
+.superpowers/
+AGENTS.md
+CLAUDE.md
+
+# --- Local training and visual-proof artifacts ---
+# These files are generated or maintained outside the application runtime and
+# should not invalidate Docker layers or be copied into production images.
+data/
+artifacts/
+screenshots/
+docs/
+*.log
 
 # --- IDE and OS files ---
 .idea/
