@@ -3,9 +3,10 @@
 # ============================================================
 
 # ── Secrets (CRITICAL) ────────────────────────────────────────────────────────
-# The .env file contains SECRET_KEY, DB_PASSWORD, and other credentials.
-# It must NEVER be committed. .env.example (with placeholder values) IS committed.
-.env
+# Environment files may contain SECRET_KEY, DB_PASSWORD, and other credentials.
+# Ignore every environment-specific variant while retaining the reviewed template.
+.env*
+!/.env.example
 
 # ── Python bytecode ───────────────────────────────────────────────────────────
 __pycache__/
@@ -45,7 +46,6 @@ htmlcov/
 venv/
 .venv/
 env/
-.env.local
 
 # ── IDE and OS files ──────────────────────────────────────────────────────────
 .idea/
@@ -59,6 +59,18 @@ Thumbs.db
 
 # ── Analysis artifacts ────────────────────────────────────────────────────────
 graphify-out/
+
+# ── Reviewed documentation proof ──────────────────────────────────────────────
+# Proof runs may contain real plates, timestamps, charges, or operator details.
+# Ignore new captures by default and allowlist only sanitized README assets.
+artifacts/dashboard-proof/*
+!artifacts/dashboard-proof/01-login.png
+!artifacts/dashboard-proof/02-entry-detected.png
+!artifacts/dashboard-proof/03-dashboard-active.png
+!artifacts/dashboard-proof/04-exit-completed.png
+!artifacts/dashboard-proof/05-session-log.png
+!artifacts/dashboard-proof/06-error-queue.png
+!artifacts/dashboard-proof/07-revenue.png
 
 # ── Local documentation (not pushed) ───────────────────────────────────────────
 docs/
