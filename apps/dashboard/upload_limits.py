@@ -40,6 +40,9 @@ class BoundedUploadHandler(FileUploadHandler):
         framing beyond the image itself, so the request cap includes configurable
         overhead while the streamed file-byte cap remains exact.
         """
+        # Django owns this callback signature; retaining every parameter keeps
+        # compatibility even though this guard only needs Content-Length.
+        _ = input_data, META, boundary, encoding
         request_limit = (
             settings.PARKING_UPLOAD_MAX_BYTES
             + settings.UPLOAD_FORM_OVERHEAD_BYTES
@@ -55,6 +58,8 @@ class BoundedUploadHandler(FileUploadHandler):
         store valid uploads. On overflow, ``StopUpload`` closes partial temporary
         files and prevents the remaining body from being consumed.
         """
+        # Django supplies the stream offset; aggregate accounting only needs bytes.
+        _ = start
         self._received_bytes += len(raw_data)
         if self._received_bytes > settings.PARKING_UPLOAD_MAX_BYTES:
             self.request.upload_too_large = True
@@ -63,6 +68,8 @@ class BoundedUploadHandler(FileUploadHandler):
 
     def file_complete(self, file_size):
         """This guard validates only; later handlers create the UploadedFile."""
+        # Django reports the final size even though this handler stores no file.
+        _ = file_size
         return None
 
 

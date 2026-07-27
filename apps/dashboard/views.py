@@ -8,7 +8,7 @@ from django.contrib import messages
 from django.contrib.auth.mixins import UserPassesTestMixin
 from django.contrib.auth.views import redirect_to_login
 from django.core.paginator import Paginator
-from django.db.models import Avg, Q, Sum
+from django.db.models import Avg, Count, Q, Sum
 from django.http import Http404, HttpRequest
 from django.shortcuts import redirect
 from django.urls import reverse
@@ -140,22 +140,24 @@ def build_dashboard_context(request: HttpRequest) -> dict:
         exit_time__gte=today_start,
         exit_time__lt=tomorrow_start,
     )
-    revenue_today = completed_today.aggregate(total=Sum("charge_amount"))["total"]
-    average_stay = completed_today.aggregate(average=Avg("duration_seconds"))["average"]
-    entries_today = events.filter(
-        event_type="entry",
+    completed_summary = completed_today.aggregate(
+        revenue=Sum("charge_amount"),
+        average_stay=Avg("duration_seconds"),
+    )
+    event_summary = events.filter(
         timestamp__gte=today_start,
         timestamp__lt=tomorrow_start,
-    ).count()
-    exits_today = events.filter(
-        event_type="exit",
-        timestamp__gte=today_start,
-        timestamp__lt=tomorrow_start,
-    ).count()
+    ).aggregate(
+        entries=Count("pk", filter=Q(event_type="entry")),
+        exits=Count("pk", filter=Q(event_type="exit")),
+    )
+    entries_today = event_summary["entries"]
+    exits_today = event_summary["exits"]
+    average_stay = completed_summary["average_stay"]
 
     return {
         "active_session_count": len(active_sessions),
-        "revenue_today": revenue_today or Decimal("0.00"),
+        "revenue_today": completed_summary["revenue"] or Decimal("0.00"),
         "events_today": entries_today + exits_today,
         "entries_today": entries_today,
         "exits_today": exits_today,

@@ -2082,6 +2082,20 @@ svg {
 }
 
 @media (max-width: 640px) {
+    /* Authenticated resident navigation has five actions; give it a second row
+       instead of forcing the top bar wider than a phone viewport. */
+    .public-topbar {
+        flex-wrap: wrap;
+        height: auto;
+        min-height: var(--topbar-height);
+        padding-block: 0.75rem;
+    }
+    .public-nav {
+        width: 100%;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 0.5rem 0.75rem;
+    }
     .kiosk {
         margin-top: 0;
     }

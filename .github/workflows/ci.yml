@@ -8,6 +8,10 @@ on:
   pull_request:
     branches: [main]
 
+# The test job only reads repository contents; keep its GITHUB_TOKEN least-privileged.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Test (Python 3.12 + PostgreSQL 16)
@@ -33,9 +37,13 @@ jobs:
           - 5432:5432
 
     steps:
-      - uses: actions/checkout@v4
+      # Pin third-party workflow code to immutable, reviewed v6 commits.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          # No later step performs authenticated Git operations.
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.12'
           # Cache pip downloads keyed on both requirements files so the cache
@@ -72,7 +80,7 @@ jobs:
             -v
 
       - name: Upload coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         if: always()
         with:
           name: coverage-xml
