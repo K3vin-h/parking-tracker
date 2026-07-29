@@ -36,6 +36,15 @@ configuration + oversight, nested under `/staff/`.
   - [Plate Detector CNN](#plate-detector-cnn)
   - [Plate Recognizer CRNN](#plate-recognizer-crnn)
   - [Plate Recognition Pipeline](#plate-recognition-pipeline)
+- [CV Design Rationale](#cv-design-rationale)
+  - [Why Build the CV Stack From Scratch](#why-build-the-cv-stack-from-scratch)
+  - [Two-Stage Detector → Recognizer, Not One End-to-End Model](#two-stage-detector--recognizer-not-one-end-to-end-model)
+  - [Detector Design Choices](#detector-design-choices)
+  - [Recognizer Design Choices](#recognizer-design-choices)
+  - [Synthetic Data: Why, and How It's Kept Honest](#synthetic-data-why-and-how-its-kept-honest)
+  - [Preprocessing as a Security Boundary](#preprocessing-as-a-security-boundary)
+  - [Inference Engineering](#inference-engineering)
+  - [Confidence as a Product Decision, Not Just a Metric](#confidence-as-a-product-decision-not-just-a-metric)
 - [CV Model Status](#cv-model-status)
 - [Synthetic Training Data](#synthetic-training-data)
   - [Data Generation](#data-generation)
@@ -70,25 +79,21 @@ The system is organized into five Django apps with clear ownership boundaries:
 |-----|------|
 | `apps.accounts` | Custom `User(AbstractUser)` — no extra fields |
 | `apps.parking` | Models (incl. `Wallet`/`WalletTransaction`), admin, `setup_defaults`, session/billing services, wallet money ops (`wallet.py`), placeholder payment seam (`payments.py`) |
-| `apps.cv` | Preprocessing, custom models, synthetic data, training scripts, and inference pipeline |
+| `apps.cv` | Preprocessing, custom models, synthetic data, training scripts, and inference pipeline — see [CV Pipeline](#cv-pipeline) for mechanics, [CV Design Rationale](#cv-design-rationale) for why each piece is shaped the way it is |
 | `apps.dashboard` | **Staff-only** pages and support APIs (nested under `/staff/`), settings form, HTMX partials, private event images, and revenue analytics; also owns `scan_core.run_plate_scan`, the shared image→CV→session core reused by the public kiosk |
 | `apps.public` | **Public** (site root): the unmanned gate kiosk, resident signup, plate management, wallet + top-up/history, and the per-IP rate limiter |
 
-**Request flow for a kiosk plate scan:**
+**Request flow for a kiosk plate scan** (CV pipeline internals collapsed here — see [CV Pipeline](#cv-pipeline)):
 
 ```
 Driver uploads plate photo at the kiosk ("/")
   └─ validate (MIME + Pillow + dimensions + 10 MB cap)
        └─ scan_core.run_plate_scan()
-            └─ PlateRecognitionPipeline.process()
-                 ├─ load_image() → bgr_to_rgb() → resize_for_detector(640×480) → normalize → to_tensor()
-                 ├─ PlateDetectorCNN → bbox [cx, cy, w, h]
-                 ├─ crop_plate_region() → prepare_for_recognizer(128×32 gray)
-                 └─ PlateRecognizerCRNN → greedy CTC decode → plate_text + confidence
-                      └─ handle_entry() or handle_exit()  (services.py)
-                           ├─ ParkingSession + PlateDetectionEvent  (DB)
-                           └─ registered plate on exit → wallet.py debits the owner's
-                              Wallet automatically; guest plates just report the charge
+            └─ PlateRecognitionPipeline.process()  →  plate_text + confidence + bbox
+                 └─ handle_entry() or handle_exit()  (services.py)
+                      ├─ ParkingSession + PlateDetectionEvent  (DB)
+                      └─ registered plate on exit → wallet.py debits the owner's
+                         Wallet automatically; guest plates just report the charge
 ```
 
 The public kiosk response is privacy-reduced: it returns only plate text,
@@ -403,6 +408,12 @@ Active sessions are a tiny fraction of the table once months of completed sessio
 
 ## CV Pipeline
 
+This section is the mechanics reference for `apps/cv/` — exact shapes, layers,
+constants, and control flow, precise enough to reimplement the pipeline from
+this section alone. For *why* each shape and choice was made instead of an
+alternative, see [CV Design Rationale](#cv-design-rationale). For measured
+accuracy numbers, see [CV Model Status](#cv-model-status).
+
 ```mermaid
 flowchart TD
     IMG(["photo path"])
@@ -433,53 +444,122 @@ flowchart TD
 
 ### Image Preprocessing
 
-**`load_image(path)`** — loads the image from disk using OpenCV after a security pre-check. Before any pixels are decoded, the resolved path is confirmed to stay inside `MEDIA_ROOT` (path traversal prevention), and Pillow inspects the file header to confirm the format is JPEG, PNG, or WEBP. Images larger than 12 MP (4000×3000) are rejected to prevent decompression bomb attacks. OpenCV then decodes the validated file into a BGR numpy array.
+Every function below lives in `apps/cv/preprocessing.py`. Signatures and I/O
+shapes are exact:
 
-**`bgr_to_rgb(image)`** — converts the color channel order from BGR to RGB. OpenCV always loads images in BGR order (blue–green–red), but PyTorch models trained on ImageNet expect RGB (red–green–blue). Without this swap, the model would see the red and blue channels swapped on every image. The conversion uses `cv2.cvtColor` rather than array slicing because `cvtColor` produces a contiguous array that avoids a hidden memory copy later in the pipeline.
+```
+path:str → load_image() → bgr_to_rgb() → resize_for_detector()   # (480, 640, 3) uint8 RGB
+        → normalize_pixels() → to_tensor()                       # (3, 480, 640) float32 tensor
+bbox → crop_plate_region() → prepare_for_recognizer()             # (32, 128) grayscale, recognizer input
+```
 
-**`resize_for_detector(image)`** — resizes the image to 640×480 pixels using letterboxing (padding the shorter dimension with a neutral fill) to preserve the original aspect ratio. Stretching the image to fit would distort plate shapes and hurt detection accuracy, especially for narrow or wide plates.
+**`load_image(path: str) -> np.ndarray`** (returns `(H, W, 3)` `uint8` BGR) — the
+only function that touches raw, potentially attacker-controlled bytes; on the
+public kiosk anyone can reach it with no account, so its load contract is a
+security boundary as much as an I/O routine:
 
-**`normalize_pixels(image)`** — scales pixel values from the 0–255 integer range down to 0.0–1.0 floats by dividing by 255. Neural networks learn faster and more stably when inputs are in a small, consistent numeric range. Without normalization, large pixel values would cause large gradients and make the model sensitive to overall image brightness rather than plate features.
+- **Path containment** (`_assert_safe_path`) — resolves symlinks and `..`
+  segments; the resolved path must live under `MEDIA_ROOT` (or
+  `CV_PROCESSING_TEMP_ROOT`). Violations raise `UnsafeImagePathError`
+  (a `ValueError` subclass, importable from `preprocessing`).
+- **Format allowlist by content, not extension** — Pillow inspects the actual
+  file header; only JPEG, PNG, and WEBP pass. BMP is rejected outright
+  regardless of extension (richer CVE history in both Pillow's and OpenCV's
+  BMP parsers, for a format no real camera upload uses).
+- **12 MP cap (4000×3000) before decode** — checked from the header (cheap)
+  and again post-decode as defense in depth, rejecting decompression-bomb-style
+  images (tiny compressed file, huge decoded buffer) before OpenCV ever
+  allocates the pixel array.
+- **Single bounded read, not double-open** — the file is read once, capped at
+  `MAX_IMAGE_BYTES + 1` bytes; both the Pillow validation and the
+  `cv2.imdecode` call operate on that same in-memory buffer, closing a TOCTOU
+  window where the file could be swapped between a validate-then-load pair of
+  operations.
+- **Path-stripped errors** — on failure, callers see a generic
+  `FileNotFoundError` or `RuntimeError` with no path in the message; only a
+  6-byte hash (`_path_id`) goes to the server log, so an API error response
+  can't leak server directory layout even if it echoes the exception text.
 
-**`to_tensor(image)`** — converts the numpy array to a PyTorch `FloatTensor` and reorders the axes from HWC (Height × Width × Channels) to CHW (Channels × Height × Width). PyTorch's convolutional layers expect channels first. The conversion also moves the data from CPU memory into a tensor that can be transferred to GPU/MPS for inference.
+OpenCV decodes the validated buffer into a BGR numpy array only after every
+check above passes.
 
-**`crop_plate_region(image, bbox)`** — uses the detector's bounding box to crop just the plate area out of the full image. This gives the recognizer a tight view of the plate with minimal background clutter, which significantly improves character recognition accuracy. The crop is clamped to image bounds to handle any slight over-prediction from the detector.
+**`bgr_to_rgb(image: np.ndarray) -> np.ndarray`** — `(H, W, 3)` BGR → `(H, W,
+3)` RGB via `cv2.cvtColor`, not array slicing — `cvtColor` returns a
+contiguous array, avoiding a hidden copy later in the pipeline.
 
-**`prepare_for_recognizer(crop)`** — resizes the plate crop to 128×32 pixels and converts it to grayscale. The recognizer operates on grayscale because plate text recognition is a shape task — color carries no useful signal and including it would triple the input size for no accuracy gain. The 128×32 resolution is wide enough to fit the longest plate text while being small enough to keep the encoder fast.
+**`resize_for_detector(image: np.ndarray) -> np.ndarray`** — any `(H, W, 3)` →
+letterboxed `(480, 640, 3)`. The image is scaled to fit and the shorter
+dimension is padded with a neutral fill rather than stretched, so aspect
+ratio (and plate shape) is preserved.
+
+**`normalize_pixels(image: np.ndarray) -> np.ndarray`** — `uint8 [0, 255]` →
+`float32 [0.0, 1.0]` (divide by 255).
+
+**`to_tensor(image: np.ndarray) -> torch.FloatTensor`** — `(H, W, C)` → `(C,
+H, W)`; for the detector input this is `(3, 480, 640)`, matching PyTorch's
+channels-first convention.
+
+**`crop_plate_region(image: np.ndarray, bbox) -> np.ndarray`** — crops the
+resized `(480, 640, 3)` image to a top-left `[x, y, w, h]` box, clamped to
+image bounds to absorb any slight over-prediction from the detector.
+
+**`prepare_for_recognizer(crop: np.ndarray) -> np.ndarray`** — crop → grayscale
+`(32, 128)`. Grayscale because plate reading is a shape task (color carries no
+signal and would triple input size for no accuracy gain); 128×32 is wide
+enough for the longest supported plate text and small enough to keep the
+encoder fast.
 
 ---
 
 ### Plate Detector CNN
 
-`PlateDetectorCNN` is a custom convolutional neural network with two main parts:
+`PlateDetectorCNN` (`apps/cv/models/plate_detector.py`) regresses one
+normalized bounding box `[cx, cy, w, h]` per image — YOLO center format, all
+four values in `[0, 1]`.
 
-1. A **convolutional backbone** that extracts spatial features from the image.
-2. A **fully connected head** that outputs the plate bounding box in YOLO format `[cx, cy, w, h]` with all values normalized to `[0, 1]`.
+**Input:** `(B, 3, H, W)` float32, nominally `(B, 3, 480, 640)` after
+preprocessing (`AdaptiveAvgPool2d` below tolerates other sizes).
 
-Dropout is set to 0.3 to prevent overfitting on synthetic data.
+**Convolutional backbone** — three blocks, each `Conv2d(bias=False) →
+BatchNorm2d → ReLU(inplace=True) → MaxPool2d(2×2)`:
 
-#### Convolutional Backbone
+| Block | Channels in→out | Output shape (from 480×640 input) |
+|---|---|---|
+| 1 | 3 → 32 | `(B, 32, 240, 320)` |
+| 2 | 32 → 64 | `(B, 64, 120, 160)` |
+| 3 | 64 → 128 | `(B, 128, 60, 80)` |
 
-The detector receives input shaped `(batch, channels, height, width)`. Three convolutional blocks process the image sequentially, each applying:
+`AdaptiveAvgPool2d((4, 4))` then collapses any spatial size to a fixed `(B,
+128, 4, 4)`, flattened to `(B, 2048)`.
 
-1. **Conv2d** — learns spatial patterns (plate edges, letter locations).
-2. **BatchNorm2d** — stabilizes activations during training so the weights update smoothly.
-3. **ReLU** — introduces non-linearity; sets negative values to zero. `inplace=True` avoids creating a new tensor each pass.
-4. **MaxPool2d** — subsamples by taking the maximum value in each window, shrinking the spatial size. Layer 3 preserves the height dimension so that tall characters like `B` and `8` remain distinguishable.
+**Fully connected head:** `2048 → 256` (`fc1`) → `ReLU` → `Dropout(p=0.3)` →
+`256 → 4` (`fc2`) → `sigmoid`. The final output is `(B, 4)`, `[cx, cy, w, h]`
+in `[0, 1]`. Sigmoid is applied **inside** `forward()`, not as a
+separate inference-only step, so `SmoothL1Loss` trains against the exact
+`[0, 1]` output space `predict()` returns at inference.
 
-The three layers progress from low-level edge detection → letter localization → character discrimination. After the third block, `AdaptiveAvgPool2d(4×4)` produces a fixed-size feature map regardless of input size, which is then flattened to a 1D vector.
+```python
+x = self.block1(x)   # (B, 32,  240, 320)
+x = self.block2(x)   # (B, 64,  120, 160)
+x = self.block3(x)   # (B, 128, 60,  80)
+x = self.pool(x)     # (B, 128, 4,   4)
+x = x.flatten(1)      # (B, 2048)
+x = self.fc1(x)       # (B, 256)
+x = self.dropout(self.relu_fc(x))
+x = self.fc2(x)       # (B, 4) raw logits
+return torch.sigmoid(x)   # (B, 4), [cx, cy, w, h] in [0, 1]
+```
 
-#### Fully Connected Head
+**`predict(x)`** wraps `forward()` under `@torch.no_grad()`, temporarily
+forces `eval()` mode, and restores the model's prior `training`/`eval` state
+via `try/finally` — safe to call mid-training (e.g. a validation callback)
+without corrupting the training loop's own mode state. This same
+no-grad/eval/restore pattern is used by `PlateRecognizerCRNN.predict()` below.
 
-The flattened features are compressed `2048 → 256 → 4`. A sigmoid at the output constrains all four values to `[0, 1]`, matching the normalized YOLO bounding box convention. The same sigmoid is applied during both training and inference so both share the same output space.
-
-`predict(x)` wraps `forward()` under `@no_grad`, auto-switches to eval mode, and restores the prior training state via `try/finally` — safe to call mid-training without disrupting the training loop.
-
-#### Training
-
-Trained with `SmoothL1Loss` (Huber loss) + Adam optimizer + `ReduceLROnPlateau` learning rate scheduler. Target: **>0.7 IoU** on synthetic validation data after 50 epochs.
-
-**Actual result:** the full 50-epoch run completed (best epoch 48, val loss 0.0011), but validation IoU peaked at **~0.43** — the >0.7 target was **not met**. No per-epoch training log survives in the repository for this run.
+**Training** (`train_detector.py`): `SmoothL1Loss` (Huber) + Adam +
+`ReduceLROnPlateau(factor=0.5, patience=5)`. Target: **>0.7 IoU** on synthetic
+validation data after 50 epochs — actual result and diagnosis in
+[CV Model Status](#cv-model-status).
 
 ![Plate detector training curves](artifacts/cv-training/detector_training.png)
 
@@ -487,41 +567,89 @@ Trained with `SmoothL1Loss` (Huber loss) + Adam optimizer + `ReduceLROnPlateau` 
 
 ### Plate Recognizer CRNN
 
-`PlateRecognizerCRNN` is a custom convolutional-recurrent neural network with three parts:
+`PlateRecognizerCRNN` (`apps/cv/models/recognizer.py`) reads text from a
+cropped, grayscale plate image via a CNN backbone → bidirectional LSTM → CTC
+output.
 
-1. A **convolutional backbone** that encodes visual features from the plate crop.
-2. A **bidirectional LSTM** that reads the encoded sequence left-to-right and right-to-left.
-3. A **CTC output layer** that produces per-character probability distributions without requiring pre-segmented characters.
+**Input:** `(B, 1, 32, 128)` float32 grayscale, values in `[0, 1]`. Height 32
+and width 128 must be exact — produced by `prepare_for_recognizer()`.
 
-#### Convolutional Backbone
+**Convolutional backbone** — three blocks, each `Conv2d(bias=False) →
+BatchNorm2d → ReLU(inplace=True) → MaxPool2d`:
 
-Three convolutional blocks identical in structure to the detector's (Conv2d + BatchNorm2d + ReLU + MaxPool2d). The final MaxPool uses a `(1×2)` kernel that preserves the height dimension so tall characters remain distinguishable. The 3-block stack maps `1 → 64 → 128 → 256` channels, then the feature map is reshaped to `(B, 2048, 16)` — 16 time-steps fed into the LSTM.
+| Block | Channels in→out | Pool kernel | Output shape |
+|---|---|---|---|
+| 1 | 1 → 64 | `(2, 2)` | `(B, 64, 16, 64)` |
+| 2 | 64 → 128 | `(2, 2)` | `(B, 128, 8, 32)` |
+| 3 | 128 → 256 | `(1, 2)` | `(B, 256, 8, 16)` |
 
-#### Bidirectional LSTM
+Block 3's `MaxPool2d(kernel_size=(1, 2))` halves width (32→16) but leaves
+height at 8 — width becomes the 16-step character sequence the LSTM reads one
+column at a time, while the preserved height keeps vertical stroke detail
+that disambiguates look-alikes like `I`/`1` or `O`/`0`.
 
-The BiLSTM (`hidden=256, layers=2`) processes all 16 time-steps in both directions and concatenates the outputs, giving each time-step full context from the entire sequence. The 512-dimensional LSTM output at each step passes through a fully connected layer `(512 → 37)` followed by `log_softmax`, producing `(T=16, N, C=37)` log-probabilities — one distribution over 37 classes (26 letters + 10 digits + 1 CTC blank) per time-step.
+**Reshape to sequence:** `(B, 256, 8, 16)` → `reshape(B, 2048, 16)` (256
+channels × 8 rows flattened to a 2048-dim feature per column) →
+`permute(2, 0, 1)` → `(T=16, B, 2048)`. `reshape()` (not `view()`) is used
+because `MaxPool2d` can leave the tensor non-contiguous.
 
-`forward()` returns these log-probs directly (CTC-ready). Do **not** re-apply `log_softmax`.
+**Bidirectional LSTM:** `hidden_size=256, num_layers=2, bidirectional=True,
+dropout=0.3` (fires between the two layers only), `batch_first=False`. Input
+`(16, B, 2048)` → output `(16, B, 512)` (256 × 2 directions concatenated).
 
-#### Greedy CTC Decoder
+**Output projection:** `Linear(512, 37)` → `log_softmax(dim=-1)` → `(T=16, N,
+C=37)` log-probabilities, one distribution over 37 classes (26 letters + 10
+digits + 1 CTC blank at index 0) per time-step. `forward()` returns these
+log-probs directly — **do not** re-apply `log_softmax`; doing so silently
+corrupts `CTCLoss` by compressing probabilities a second time.
 
-`decode_predictions(output)` converts the `(T, N, C)` log-prob tensor to a list of plate strings. It takes the argmax at each time-step, collapses consecutive identical tokens, then removes blank tokens (index 0). If two identical letters appear adjacent with a blank in between, the blank is removed and both letters are kept.
+```python
+x = self.block1(x)                                    # (B, 64,  16, 64)
+x = self.block2(x)                                    # (B, 128,  8, 32)
+x = self.block3(x)                                    # (B, 256,  8, 16)
+x = x.reshape(B, 2048, 16).permute(2, 0, 1)           # (16, B, 2048)
+x, _ = self.lstm(x)                                    # (16, B, 512)
+x = self.fc(x)                                         # (16, B, 37)
+return F.log_softmax(x, dim=-1)                        # (T=16, N, C=37)
+```
 
-#### Training
+**`predict(x)`** — same no-grad/eval/restore contract as
+`PlateDetectorCNN.predict()` above; returns `(T=16, N, C=37)` log-probs.
 
-`CTCLoss` must run on CPU even on MPS devices (a PyTorch limitation) — training scripts call `log_probs.cpu()` before the loss. Targets: **>90% character accuracy, >80% full-plate accuracy** on synthetic validation data after 100 epochs.
+**`decode_predictions(output) -> list[str]`** — greedy CTC decode:
 
-**Actual result:** the recorded run (`data/recognizer_train.log`, 5000 synthetic samples, 6,688,741 parameters, device cpu) concluded at **epoch 36 of the planned 100** and is treated as final — no further training is planned. Epoch 36 was the best epoch on every metric — val_loss 0.094675, **98.59% character accuracy**, and **91.50% full-plate accuracy** — so those weights (`apps/cv/weights/recognizer.pth`) were kept as the final model. Both targets (>90% char, >80% full-plate) are **met**.
+1. `argmax(dim=-1)` over the class dimension at every time-step → `(T, N)`
+   predicted indices.
+2. Collapse consecutive identical tokens (`[A, A, B]` → `[A, B]` — CTC
+   spreads one character across multiple frames, it does not mean the plate
+   reads `"AAB"`).
+3. Drop blank tokens (index 0).
+4. Map remaining indices to characters and join.
+
+A plate where every time-step decodes to blank returns `""`.
+
+**Training** (`train_recognizer.py`): `CTCLoss` **must** run on CPU even when
+the model trains on MPS — PyTorch's MPS backend has no native CTC-loss
+kernel as of PyTorch 2.x. The training loop moves only `log_probs` to CPU
+before the loss call (`log_probs.cpu()`); the model itself keeps training on
+MPS, and autograd tracks the `.cpu()` transfer as part of the graph so
+gradients still flow back correctly. `predict()` and `decode_predictions()`
+never touch `CTCLoss`, so kiosk inference runs fully on MPS/CUDA with no
+forced CPU hop. Target: **>90% character accuracy, >80% full-plate accuracy**
+on synthetic validation data after 100 epochs — actual result and diagnosis
+in [CV Model Status](#cv-model-status).
 
 ![Plate recognizer training curves](artifacts/cv-training/recognizer_training.png)
 
-Weights live in `apps/cv/weights/` (gitignored). Load with `torch.load(..., weights_only=True)`.
+Weights for both models live in `apps/cv/weights/` (gitignored). Load with
+`torch.load(..., weights_only=True)`.
 
 ---
 
 ### Plate Recognition Pipeline
 
-`PlateRecognitionPipeline` is the glue that connects every CV piece above into a single call. It takes one image path and runs the whole chain — load, preprocess, detect, crop, recognize — and returns one result dict:
+`PlateRecognitionPipeline` (`apps/cv/pipeline.py`) wires every piece above
+into one call: image path in, structured result out.
 
 ```python
 result = pipeline.process(image_path)
@@ -556,34 +684,307 @@ flowchart TD
 
 #### Model Loading
 
-Both models are loaded once when the pipeline is created, not on every request. Loading weights from disk takes hundreds of milliseconds, so reloading per upload would make every request slow. After loading, models are moved to the best available device (MPS → CUDA → CPU) and switched to eval mode, so `process()` calls are stateless and safe to run from multiple threads.
+Both models load once at pipeline construction (`__init__`), not per request
+— hundreds of milliseconds per `.pth` load would otherwise land on every
+kiosk scan. Weights are loaded with `weights_only=True`, which blocks the
+arbitrary code execution a pickle-based load of an untrusted `.pth` file
+would allow.
 
-Weights are loaded with `weights_only=True`, which blocks the arbitrary code execution that a pickle-based load of an untrusted `.pth` file would allow. If a weight file is missing, the pipeline raises a `FileNotFoundError` telling you to train that model first. If the file exists but is corrupt, truncated, or saved from an incompatible model version, it raises a `RuntimeError`. In both cases the error message never contains the file path — the full path is only written to the server log so a future API error response can't leak the server's directory layout.
+Each checkpoint is a dict, not a bare state dict, and must declare a matching
+`preprocessing_version` (`NORMALIZED_PREPROCESSING_VERSION`,
+`apps/cv/training/augment.py`) before its `state_dict` is loaded
+(`_load_weights`). A checkpoint with no version, or a mismatched one, is
+rejected with `RuntimeError` rather than loaded and silently fed input it
+was never trained to expect — the load fails closed instead of risking a
+confident misread from an invisible normalization mismatch.
+
+- Missing weight file → `FileNotFoundError` naming which training script to
+  run.
+- Present but corrupt/truncated/incompatible file, or a version mismatch →
+  `RuntimeError`.
+- In both cases the exception message never contains the real file path;
+  only the server log gets the full path, so a future API error response
+  can't leak server directory layout.
+
+After loading, both models are moved to the best available device (`MPS →
+CUDA → CPU`, `apps/cv/utils/device.py::get_device`, shared by the training
+scripts and this pipeline) and switched to `eval()` mode, so `process()`
+calls are stateless and safe to run from multiple threads.
 
 #### Processing Steps
 
-1. **Load and preprocess** — the image goes through the full preprocessing chain, ending as a 640×480 normalized tensor.
-2. **Detect** — `PlateDetectorCNN` predicts the plate's bounding box in YOLO center format `[cx, cy, w, h]`.
-3. **Reject tiny boxes** — if the box is narrower or shorter than 5% of the image, the detector found nothing meaningful (a 5% plate would be ~32 pixels wide — too small to read). The pipeline returns early with an empty plate text and confidence `0.0`.
-4. **Crop** — the YOLO center box is converted to a top-left `[x, y, w, h]` box and the plate region is cropped from the resized image. The crop comes from the resized image (not the original) because the detector was trained on 640×480 inputs — its coordinates describe the image it actually saw.
-5. **Recognize** — the crop is resized to 128×32 grayscale and `PlateRecognizerCRNN` reads the text using the greedy CTC decoder.
-6. **Score** — the confidence score is computed from the non-blank time-steps and compared against the threshold.
+1. **Load and preprocess** — full preprocessing chain, ending as a `(3, 480,
+   640)` normalized tensor.
+2. **Detect** — `PlateDetectorCNN.predict()` returns `[cx, cy, w, h]` in
+   YOLO center format.
+3. **Reject tiny boxes** — if `w` or `h` is below `_MIN_BBOX_SIZE = 0.05`
+   (≈32 px on a 640 px image), the pipeline returns early with
+   `plate_text=""`, `confidence=0.0`, `is_low_confidence=True` — too small a
+   crop to contain readable character strokes regardless of recognizer
+   quality.
+4. **Crop** — the YOLO center box converts to top-left `[x, y, w, h]` and
+   `crop_plate_region()` cuts the plate out of the **resized** (not
+   original) image, because the detector's coordinates describe the
+   640×480 canvas it actually saw.
+5. **Recognize** — `prepare_for_recognizer()` → `(1, 32, 128)` →
+   `PlateRecognizerCRNN.predict()` → `decode_predictions()`.
+6. **Score** — confidence is computed from the non-blank time-steps (below).
 
 #### Confidence Score
 
-The recognizer emits 16 time-steps for every plate regardless of plate length, so on a 6-character plate most steps are blank tokens. The confidence score is the average certainty at each **non-blank** step — including blank steps would inflate the score and hide genuine uncertainty on the actual characters. If every step is blank, the plain average is used so the low value is preserved.
+The recognizer emits 16 time-steps for every plate regardless of length, so
+on a 6-character plate most steps are blank. Confidence is the mean
+max-class probability over **non-blank** steps only — including blank steps
+would inflate the score and hide genuine uncertainty on the actual
+characters. If every step is blank (or `plate_text` is empty), confidence is
+`0.0`.
 
-Confidence below `0.6` (`LOW_CONFIDENCE_THRESHOLD`) flags the result `is_low_confidence=True`. The per-lot `LotSettings.confidence_threshold` is the operator-configurable equivalent used by the billing services — events below that threshold land in the manual review queue rather than being silently trusted.
+`confidence < LOW_CONFIDENCE_THRESHOLD` (`0.6`, `apps/cv/pipeline.py`) sets
+`is_low_confidence=True`. This constant is a CV-layer default, not the value
+that gates billing — `services.py` checks the separate, per-lot,
+operator-tunable `LotSettings.confidence_threshold` instead (see
+[Confidence as a Product Decision](#confidence-as-a-product-decision-not-just-a-metric)
+for why two thresholds exist).
 
 #### Bounding Box Coordinate System
 
-The detector sees a letterboxed 640×480 canvas — the original photo is shrunk to fit and padded with neutral bars. The dashboard, however, draws boxes on the **original** upload. The pipeline removes the padding and re-normalizes the box to the original image, so the returned `bounding_box` lines up with the photo the operator uploaded. It is stored as `[x, y, w, h]` (top-left corner plus size, all values between 0 and 1), matching the `PlateDetectionEvent.bounding_box` field.
+The detector sees a letterboxed 640×480 canvas — the original photo shrunk to
+fit and padded with neutral bars. The dashboard draws boxes on the
+**original** upload, so the pipeline removes the padding and re-normalizes
+the box back to the original image before returning it. The returned
+`bounding_box` is `[x, y, w, h]` (top-left corner plus size, all values in
+`[0, 1]`), matching the `PlateDetectionEvent.bounding_box` field.
 
 #### Singleton
 
-`get_pipeline()` returns a module-level singleton — the first call creates the pipeline and every later call reuses it, so all Django requests in the process share one loaded copy of the models. Creation is guarded by double-checked locking so two simultaneous first requests can't each load the models concurrently.
+`get_pipeline(detector_path, recognizer_path)` returns a module-level
+singleton — the first call constructs the pipeline, every later call reuses
+it, so one Django process shares one loaded copy of both models across all
+requests. Construction is guarded by double-checked locking so two
+concurrent first requests can't each load their own copy.
 
-The singleton is created lazily on the first request rather than at Django startup. Startup code also runs during management commands like `migrate` and `collectstatic`, where the weight files may not exist and inference is never needed — eager loading would crash migrations in CI just because the models hadn't been trained yet.
+The singleton is created lazily on first use, not at Django startup
+(`AppConfig.ready()`), because `ready()` also runs during management
+commands like `migrate` and `collectstatic`, where weight files may not
+exist yet and inference is never needed — eager loading would break those
+commands in CI for lacking a trained model no one asked for at that point.
+
+---
+
+## CV Design Rationale
+
+This section explains the *why* behind the CV stack in `apps/cv/` — not
+that a detector and recognizer exist, but why each shape was chosen and
+what was traded away to get it. For the exact layers, shapes, and constants
+behind each claim, see [CV Pipeline](#cv-pipeline); for measured results, see
+[CV Model Status](#cv-model-status).
+
+### Why Build the CV Stack From Scratch
+
+**Decision:** PyTorch + OpenCV, two custom-trained models, zero external
+ANPR/OCR APIs (no Google Vision, no AWS Rekognition, no commercial LPR SDK).
+
+**Why:** This constraint was self-imposed from the outset — the point of
+the project was to build and understand a CV stack end to end, not to wire
+up a vendor SDK. That goal happens to line up with several properties the
+deployment genuinely needs. A hosted ANPR API would solve plate reading in an afternoon at
+near-100% accuracy — but it would also mean per-scan cost that scales with
+traffic, a hard dependency on a third party's uptime for a physical gate
+that must open cars in and out, and no way to reason about *why* a read
+failed (commercial APIs are black boxes; you get a string and a
+confidence float, not a bounding box you can debug or a training set you
+can extend). It would also make "confidence" mean whatever the vendor
+defines it to mean, when the billing logic in `services.py` needs a
+per-lot tunable threshold (`LotSettings.confidence_threshold`) that gates
+real money movement.
+
+**Tradeoff accepted:** the from-scratch stack is exactly as good as its
+training data, which here is 100% synthetic (see below). The detector
+misses its accuracy target as a direct, measured consequence of that
+choice — an honest cost, not swept under the rug (see
+[CV Model Status](#cv-model-status)). In exchange, the system never has a
+network dependency in its billing-critical path, never sends a photo of
+someone's car to a third party, and every failure mode is inspectable down
+to the tensor.
+
+### Two-Stage Detector → Recognizer, Not One End-to-End Model
+
+**Decision:** `PlateDetectorCNN` finds *where* the plate is; a separate crop
+step hands that region to `PlateRecognizerCRNN`, which reads *what* it says
+(see [Plate Recognition Pipeline](#plate-recognition-pipeline) for the exact
+call chain).
+
+**Why split instead of one network doing both:** the two sub-problems have
+different input scales (a 640×480 scene vs. a 128×32 crop), different loss
+functions (bbox regression vs. CTC sequence loss), and different failure
+modes that need to be diagnosable independently. A combined model (e.g. a
+single YOLO-style head that outputs both box and per-character classes)
+conflates them: if the plate text comes out wrong, you cannot tell whether
+the box was off, the crop was bad, or the reader itself misclassified a
+character, without additional instrumentation. Two small models trained and
+validated separately let [CV Model Status](#cv-model-status) report the
+detector's IoU and the recognizer's character/plate accuracy as two
+independent numbers — which is exactly how the current failure was found
+(recognizer met its targets in isolation; detector did not, and that gap is
+now visible instead of hidden inside one combined loss curve).
+
+**Alternative considered and rejected:** an end-to-end single-box detector
+with a joint OCR head (closer to real-world ANPR systems). Rejected because
+it needs a much larger, harder-to-synthesize training set to converge
+(joint losses on small custom nets are notoriously unstable), and it removes
+the ability to swap or retrain just the underperforming piece — here, the
+detector — without touching the piece that already meets its target.
+
+**Cost of the split:** a bad detector crop (loose box, clipped characters,
+included car body) directly degrades the recognizer's input regardless of
+how good the recognizer is on its own — documented explicitly in
+[CV Model Status](#cv-model-status). The two-stage design makes this
+failure legible instead of eliminating it.
+
+### Detector Design Choices
+
+| Decision | Why | Alternative rejected |
+|---|---|---|
+| Direct regression of one normalized box, not multi-box detection | One gate camera frame has exactly one plate to find. A single-box regressor is the simplest model that fits that constraint. | Anchor-based / YOLO-style multi-box detection with objectness scores and NMS. Rejected as over-engineered for a single-plate-per-frame problem; it also would have let the model express "no plate here," which the current architecture explicitly cannot (a real gap, tracked in [CV Model Status](#cv-model-status)) — deferred rather than solved with disproportionate complexity for v1. |
+| `AdaptiveAvgPool2d((4, 4))` before the FC head (see [Plate Detector CNN](#plate-detector-cnn) for the exact shapes) | Lets the model tolerate minor resizing from augmentation without being hard-wired to one exact input resolution, while keeping enough spatial structure (vs. a 1×1 global average pool) that the FC head still knows roughly *where* in the frame the plate-like texture concentrated. | A fixed `Flatten()` after a fixed-size conv stack — simpler, but locks the architecture to one exact input size and discards even more spatial position information. |
+| `SmoothL1Loss` (Huber) instead of `MSELoss` | Bounding-box regression targets can have occasional bad synthetic labels or extreme early-training predictions; `MSELoss` penalizes those quadratically, producing gradient spikes that destabilize a small network with no batch-norm-heavy backbone to absorb them. `SmoothL1` behaves like L2 near zero (smooth convergence) and like L1 on large errors (bounded gradient). | Plain L1 — more outlier-robust but has a constant-magnitude gradient even very close to the optimum, making fine-grained convergence noisier; rejected because it would make the last few percent of IoU improvement harder to reach. |
+| `ReduceLROnPlateau(factor=0.5, patience=5)` | Lets the optimizer take large steps early and only slow down once validation loss actually plateaus, without hand-scheduling epoch cutoffs the way a fixed step-decay would require guessing in advance. | A fixed step-decay schedule — rejected because the 50-epoch budget is small enough that guessing the right decay epoch ahead of time is more likely to hurt than a reactive scheduler. |
+| Dropout `p=0.3` before the final FC layer | Synthetic data has far less visual variance than real camera footage (one font, ~11 backgrounds — see [Synthetic Data](#synthetic-data-why-and-how-its-kept-honest) below), so without regularization the model can memorize background-specific cues instead of plate features. | No dropout — rejected because the training run shows a pattern (bottomed-out val loss, low IoU; diagnosed in [CV Model Status](#cv-model-status)) consistent with fitting the limited synthetic distribution rather than plate geometry generally — more regularization pressure, not less, is the likely next lever. |
+
+### Recognizer Design Choices
+
+**CRNN + CTC, not per-character segmentation.** The detector hands over a
+crop of unknown character count (US plates run 6–7 characters, Canadian
+formats add 2 more format variants) with no per-character bounding boxes.
+A segmentation-then-classify approach would need the synthetic generator to
+*also* fabricate character-level boxes, and it breaks the moment two
+characters touch or the crop is slightly skewed — exactly the conditions a
+loose detector crop produces. A CRNN with a CTC output sidesteps both
+problems: it emits a fixed-length sequence regardless of plate length, and
+CTC's alignment is learned, not hand-labeled (see
+[Plate Recognizer CRNN](#plate-recognizer-crnn) for the exact architecture).
+
+| Decision | Why | Alternative rejected |
+|---|---|---|
+| Final block halves width but preserves height (see [Plate Recognizer CRNN](#plate-recognizer-crnn) for the exact pooling shapes) | Horizontal resolution *is* the character sequence here — each resulting column is what the LSTM reads one time-step at a time. Halving height as aggressively as width (the detector's pattern) would throw away the sequence signal the whole architecture depends on; preserving height also keeps the vertical stroke detail that disambiguates look-alikes like `I`/`1` or `O`/`0`. | Symmetric pooling on all three blocks (as in the detector) — rejected because it would leave too few time-steps, too coarse to place 6–8 characters distinctly for CTC alignment. |
+| Bidirectional LSTM over the character sequence | Reading both directions gives every time-step context from the *entire* plate, not just what came before it — resolves ambiguous single-frame reads (e.g. a smudged `D` is easier to call once you also know a digit run follows). | A unidirectional LSTM or plain 1D-CNN sequence head — rejected as strictly less contextual for a sequence this short; the added BiLSTM cost is negligible at this scale. |
+| CTC loss instead of a fixed-length cross-entropy per position | Plate length varies (`ABC123` is 6 chars, `LLL DDDD` runs 7) and there is no reliable per-character ground-truth alignment to a fixed-length target grid. CTC learns the alignment between the emitted time-steps and the variable-length label itself, via the blank token. | Fixed-length classification per output slot — would require padding/truncating every label to one length and inventing an alignment (which character occupies which slot) the model has no principled way to learn correctly. |
+| Greedy CTC decode (argmax → collapse repeats → drop blank) instead of beam search | Sufficient accuracy on a short sequence over a small vocabulary at negligible compute; this is a synchronous per-scan kiosk path where added decode latency has no accuracy return the current model (undertrained, see [CV Model Status](#cv-model-status)) can actually cash in on. | CTC beam search — meaningfully helps only when the language model / prefix scoring has signal to exploit; on short, low-vocabulary plate strings with a still-improving base model, the accuracy gain would not justify the added latency and complexity. |
+| `CTCLoss` forced onto CPU even when the model runs on MPS | PyTorch's MPS backend has no native CTC-loss kernel as of PyTorch 2.x (mechanism and exact call site in [Plate Recognizer CRNN → Training](#plate-recognizer-crnn)). | Training entirely on CPU to avoid the split — rejected as far slower for the conv/LSTM forward-backward passes, which *are* MPS-accelerated; only the loss call needs the workaround. |
+| 37-class vocab (26 letters + 10 digits + CTC blank) | Matches exactly the character set the synthetic generator emits — no lowercase, no punctuation, so the model never has to represent a class it will never see. | A larger vocab including punctuation/lowercase — rejected as pure unused capacity; the format templates in `synthetic_data.py` never produce those characters. |
+
+### Synthetic Data: Why, and How It's Kept Honest
+
+**Why synthetic instead of a real labeled plate dataset:** there is no
+project-owned corpus of labeled parking-lot plate photos, real plates are
+personally identifying (a committed dataset of real plates would itself be a
+privacy liability this project explicitly tries to minimize elsewhere — see
+the kiosk's privacy-reduced responses), and a generator gives exact control
+over the label distribution (format mix, plate count per frame, occlusion
+level) that a scraped dataset would not. The cost of this choice is measured,
+not hidden — see [CV Model Status](#cv-model-status).
+
+**Why composite onto real backgrounds, not synthetic ones** — plates are
+pasted onto curated real parking-lot photos rather than solid colors or
+procedurally generated scenes. Training the detector against flat
+backgrounds would let it learn "plate = the only textured rectangle in the
+frame," a shortcut that collapses instantly against real clutter (parked
+cars, curbs, shadows, signage). Real backgrounds force the detector to learn
+actual plate appearance rather than a scene-composition trick. See
+[Synthetic Training Data](#synthetic-training-data) for exactly how images
+are generated, augmented, and turned into datasets.
+
+**Why the 90%-yield floor fails loudly instead of writing whatever it got:**
+a high skip rate during generation means something is systemically broken —
+a corrupt background directory, a missing font, a full disk — not a handful
+of unlucky samples. Silently training on an undersized, skip-biased dataset
+would produce a model with unknown, untraceable blind spots; the loud
+failure (mechanics in [Data Generation](#data-generation)) forces the root
+cause to be fixed before a single epoch runs.
+
+**Known, documented limits of the synthetic distribution** — one plate font,
+only 5 fixed format templates, and a small, reused set of background photos.
+These are load-bearing facts behind the domain-gap discussion, not a
+separate concern from the model architecture; see
+[CV Model Status](#cv-model-status) for the full list and its measured
+impact.
+
+### Preprocessing as a Security Boundary
+
+`load_image()` is not "resize the image" — it is the first parser that
+touches attacker-controlled bytes on a **public, unmanned kiosk**. Anyone can
+upload a file there with no account and no staff oversight, which makes
+image decode itself part of the attack surface, not an implementation
+detail. Every concrete control (path containment, content-based format
+allowlist, decompression-bomb cap, single bounded read, path-stripped
+errors) is documented once, as part of the function's load contract, in
+[CV Pipeline → Image Preprocessing](#image-preprocessing); the summary of
+the overall security posture lives in [Security](#security). None of it is
+generic "input validation" boilerplate — each check maps to a specific
+attack a public, credential-free upload endpoint invites.
+
+### Inference Engineering
+
+- **Lazy singleton with double-checked locking** — loading two `.pth` files
+  costs hundreds of milliseconds, too slow to redo per kiosk request. Lazy
+  (rather than at Django startup) because startup code also runs during
+  `migrate`/`collectstatic`, where weight files may not exist yet — eager
+  loading would break those commands in CI just for lacking a trained model
+  no one asked for at that point. See
+  [Plate Recognition Pipeline → Singleton](#plate-recognition-pipeline) for
+  the exact locking mechanism.
+- **`predict()` under `@torch.no_grad()`, restoring train/eval state** (both
+  models) — makes inference safe to call *during* training (e.g. a
+  mid-epoch validation callback) without corrupting the training loop's own
+  mode state; exact contract in [CV Pipeline](#cv-pipeline).
+- **Device auto-detection, MPS → CUDA → CPU** — one function
+  (`get_device()`) used by both training scripts and the inference
+  pipeline, so there is exactly one place that decides hardware, not
+  independently-drifting copies.
+- **The CTC-on-CPU workaround is training-only** — `predict()` and
+  `decode_predictions()` never touch `CTCLoss`, so kiosk inference runs
+  fully on MPS/CUDA with no forced CPU hop; only the training loop pays that
+  cost (see [Recognizer Design Choices](#recognizer-design-choices)).
+- **Weight files are versioned, not bare state dicts** — a checkpoint that
+  doesn't declare a matching preprocessing version is rejected outright
+  rather than loaded and silently fed mismatched input statistics (exact
+  mechanism in [Plate Recognition Pipeline → Model Loading](#plate-recognition-pipeline)).
+  Failing closed here trades convenience (you must retrain through the
+  current scripts) for never confidently misreading a plate because of an
+  invisible normalization mismatch.
+
+### Confidence as a Product Decision, Not Just a Metric
+
+Two different thresholds exist on purpose, at two different layers:
+
+| Threshold | Lives in | Who can change it | What it does |
+|---|---|---|---|
+| `LOW_CONFIDENCE_THRESHOLD` | `apps/cv/pipeline.py` (fixed constant) | No one at runtime | Flags `PipelineResult.is_low_confidence` as a CV-layer signal (exact value in [Confidence Score](#plate-recognition-pipeline)) |
+| `LotSettings.confidence_threshold` | `apps/parking` model, per-lot, DB-backed | Staff, via `/staff/settings/` | The value `services.handle_entry`/`handle_exit` actually check before trusting a read for billing |
+
+The pipeline's constant is a reasonable default, not the value that gates
+money movement — `services.py` deliberately reads the *operator-tunable*
+threshold instead, so a lot with worse camera placement or more glare can be
+made stricter (or looser) without touching CV code or redeploying weights.
+
+**Tiny-box rejection** — a detected box below a minimum fraction of the
+frame (exact constant in
+[Plate Recognition Pipeline → Processing Steps](#plate-recognition-pipeline))
+is treated as "no plate found" rather than handed to the recognizer, because
+a crop that small cannot contain readable character strokes regardless of
+recognizer quality; forcing a read anyway would just manufacture a
+confident-looking wrong answer.
+
+**Low confidence degrades to human review, it never blocks the gate.** This
+is the core product decision: `handle_exit`/`handle_entry` still open or
+close the session even when `is_low_confidence=True` — they just also
+create a flagged `PlateDetectionEvent` for the `/staff/errors/` queue (see
+[Session & Billing](#session--billing)). A barrier-arm system that refuses
+to act on a low-confidence read would strand a car at the gate every time
+the model is unsure — worse than occasionally billing off a low-confidence
+guess and letting a human correct it after the fact via `correct_plate()`.
+The system is designed to degrade gracefully to staff correction, not to
+refuse service.
 
 ---
 
@@ -592,20 +993,27 @@ The singleton is created lazily on the first request rather than at Django start
 **Neither CV model is fully fine-tuned yet, and both are expected to get more
 accurate with additional training cycles.** This section states current
 results plainly, including where targets were missed, so the numbers aren't
-read as more finished than they are.
+read as more finished than they are. It is the single source of truth for
+every CV accuracy number in this README — other sections link here rather
+than repeating them.
 
 | Model | Run | Result | Target | Status |
 | :--- | :--- | :--- | :--- | :--- |
 | `PlateDetectorCNN` | 50/50 epochs, best epoch 48, val loss 0.0011 | **~0.43 IoU** | >0.70 IoU | **Not met** — the current accuracy bottleneck |
-| `PlateRecognizerCRNN` | Stopped at **epoch 36 of a planned 100** | val loss 0.094675, **98.59% char accuracy, 91.50% full-plate accuracy** | >90% char / >80% full-plate | Met — but undertrained by design of the run, not converged-and-final |
+| `PlateRecognizerCRNN` | Stopped at **epoch 36 of a planned 100** (best epoch on every metric; kept as final) | val loss 0.094675, **98.59% char accuracy, 91.50% full-plate accuracy** | >90% char / >80% full-plate | **Met** — but undertrained by design of the run, not converged-and-final |
+
+These numbers match the tracked training-curve figures at
+`artifacts/cv-training/`; nothing in the repository contradicts them.
 
 A loose detector box directly degrades the recognizer downstream — a crop
 that clips characters or includes surrounding car body is a worse input than
-a tight one, regardless of how well the recognizer itself performs.
+a tight one, regardless of how well the recognizer itself performs (this is
+the direct cost of the two-stage design; see
+[Two-Stage Detector → Recognizer](#two-stage-detector--recognizer-not-one-end-to-end-model)).
 
 **Both models were trained and validated exclusively on self-generated
-synthetic data and have never been evaluated against real photographs.**
-The numbers above describe in-distribution synthetic performance, not
+synthetic data and have never been evaluated against real photographs.** The
+numbers above describe in-distribution synthetic performance, not
 real-world accuracy, and should not be read as a benchmark for how the
 system performs on an actual parking lot.
 
@@ -617,10 +1025,41 @@ system performs on an actual parking lot.
 - The detector regresses exactly one box per image with no objectness score: it cannot express "no plate present" and cannot handle multiple plates in frame.
 - Detector inference letterboxes non-4:3 source images with black padding bars that never appeared during training.
 
+**Why the detector likely underperforms, in order of suspected impact:**
+
+1. **Synthetic-to-synthetic overfitting, not synthetic-to-real gap, is the
+   first-order effect here** — val loss bottomed out at epoch 48 of 50 while
+   IoU stayed at 0.43. That combination (loss still falling or flat, IoU not
+   rising) is what a model looks like when it is fitting the *coordinates*
+   of the ~11 recycled backgrounds and one plate font well in an L1 sense,
+   without generalizing the notion of "plate," which IoU punishes far more
+   harshly at the edges of a box than `SmoothL1` does.
+2. **Single-box regression has no way to express uncertainty about scene
+   ambiguity** — with one plate composited per image but no learned
+   objectness/attention, the network has to commit to one box per forward
+   pass; on a background where multiple textured regions could plausibly be
+   "a plate," it averages, producing a soft, imprecise box rather than a
+   confident wrong one — consistent with a bounded loss but weak IoU.
+3. **Background diversity (11 images) is almost certainly a binding
+   constraint** — a detector that has seen a plate glued onto the same 11
+   scenes thousands of times over has had very little pressure to learn
+   background-invariant plate features.
+
+**What to try next, roughly in expected-payoff order:** materially expand
+`data/backgrounds/` (tens to low hundreds of distinct lots/angles/lighting
+conditions, the single highest-leverage change given point 3 above); add a
+coarse objectness/no-plate class or move to a small anchor-based head so the
+network can express confidence rather than always emitting a box; swap
+`SmoothL1Loss` for an IoU- or GIoU-based loss so the training objective
+directly optimizes the metric the target is measured in instead of a
+coordinate-distance proxy for it; and widen augmentation to include
+perspective warp and directional motion blur, both currently absent from
+`DetectorAugment` despite being present on the recognizer side.
+
 These are expected consequences of an intentionally from-scratch,
-synthetic-data-only CV stack, not signs of a broken pipeline. The clear paths
-to improvement are: more training epochs (especially the detector, which
-completed its full run and still fell short), richer augmentation
+synthetic-data-only CV stack, not signs of a broken pipeline. The clear
+paths to improvement are: more training epochs (especially the detector,
+which completed its full run and still fell short), richer augmentation
 (perspective warp, motion blur, wider scale range, negative/no-plate
 samples), and eventually fine-tuning on real labeled plate photographs.
 
@@ -646,16 +1085,14 @@ The CV models are trained entirely on synthetic data generated at runtime. No re
    - US plates: `ABC 1234` (most common), `123 ABC`, or `ABC123`
    - Canadian plates: `ABC 123` or `A1B 2C3` (Ontario-style alphanumeric)
 2. **Build the plate background** — a white rectangle with a dark border. Canadian plates add a solid blue strip across the top quarter to visually differentiate them from US plates.
-3. **Render plate text** onto the background using a TrueType plate font. `textbbox` determines the plate center and the text is drawn in black ink. If the font file is missing, Pillow's default font is used as a fallback.
+3. **Render plate text** onto the background using a TrueType plate font (`composite_on_background`). `textbbox` determines the plate center and the text is drawn in black ink. If the font file is missing, Pillow's default font is used as a fallback.
 4. **Composite onto a background** — for the detector dataset, the plate is pasted onto a random 640×480 parking-lot background image at a random position, random scale, and random rotation (−15° to +15°). The plate is constrained to fit fully within the background.
 
 **Detector dataset output** — saves full-scene `images/*.jpg` with paired `labels/*.txt` in YOLO format: `class_index cx cy w h` (all values normalized to `[0, 1]`). Existing files in the output directory are deleted before each run so re-runs don't mix generations.
 
 **Recognizer dataset output** — saves only the cropped plate `images/*.png` (grayscale) with a `labels.csv` (`filename`, `text`, `country`). Existing files are deleted before each run.
 
-Both builders count how many images they actually produced. If fewer than 90% of the requested samples were generated successfully, the run aborts with an error rather than silently writing an undersized dataset — a high skip rate means something is systematically broken (corrupt backgrounds, full disk), not just a stray bad file.
-
-Both functions accept an optional `seed` parameter to make the generated dataset reproducible across runs.
+**The 90%-yield hard failure** (`generate_detector_dataset` / `generate_recognizer_dataset`, `synthetic_data.py:461-476, 552-564`) — both builders count how many images they actually produced. If fewer than 90% of the requested samples were generated successfully, the run raises `RuntimeError` instead of silently writing an undersized dataset. Both functions accept an optional `seed` parameter to make the generated dataset reproducible across runs.
 
 ### Dataset Classes
 
@@ -672,7 +1109,8 @@ Both functions accept an optional `seed` parameter to make the generated dataset
 2. `__getitem__` loads the matching PNG, converts to a grayscale tensor `(1, 32, 128)`, encodes the text to a list of character indices (spaces skipped), and returns `(image_tensor, label_list)`.
 3. A `DataLoader` **must** set `collate_fn=ctc_collate_fn` because label lengths vary. The collate function stacks images to `(N, 1, 32, 128)`, concatenates all label lists into one 1D `targets` tensor, and builds `target_lengths` (how many indices belong to each sample).
 
-**Character encoding** (recognizer only):
+**Character encoding** (recognizer only, shared with [Plate Recognizer CRNN](#plate-recognizer-crnn)'s output layer):
+
 - `A→1` … `Z→26`, `0→27` … `9→36`
 - Index `0` is reserved for the CTC blank token
 - Spaces are skipped (not encoded)
@@ -680,24 +1118,32 @@ Both functions accept an optional `seed` parameter to make the generated dataset
 
 ### Augmentations
 
-`apps/cv/training/augment.py` provides two transform classes that slightly modify training images so the models generalize to real parking cameras. Augmentations are applied **in memory** after the dataset loads the tensor — this module does not read files from disk.
+`apps/cv/training/augment.py` provides two transform classes that slightly modify training images so the models generalize to real parking cameras, applied **in memory** after the dataset loads the tensor — this module does not read files from disk.
 
 **Two modes:**
+
 - `train=True` — random changes each pass (used during training).
 - `train=False` — normalization only, no random changes (used during evaluation).
 
 **`DetectorAugment`** (full parking-lot photo, color):
-- Random brightness/contrast/color tweaks (simulates different lighting conditions)
-- Random slight blur
-- 50% chance of horizontal flip (cars can enter from either direction)
-- 10% chance of grayscale conversion (simulates black-and-white security cameras)
-- ImageNet mean/std normalization
+
+| Augmentation | Real-world failure it targets |
+|---|---|
+| `ColorJitter` | Camera white-balance/exposure drift across time of day and lot lighting |
+| `GaussianBlur` | Lens defocus, motion blur, JPEG compression artifacts |
+| `RandomGrayscale` (10%) | Monochrome/IR security camera feeds |
+| Horizontal flip (50%, bbox-aware) | Vehicles entering from either direction |
+| ImageNet mean/std normalization | — |
 
 **`RecognizerAugment`** (small grayscale plate crop):
-- Random brightness/contrast tweaks (faded or dirty plates)
-- Random slight blur
-- 50% chance of a mild perspective warp (angled camera, not a full flip)
-- Grayscale normalization (mean 0.5, std 0.5)
+
+| Augmentation | Real-world failure it targets |
+|---|---|
+| Brightness/contrast tweaks | Faded or dirty plates |
+| `GaussianBlur` | Lens defocus, motion blur |
+| `RandomPerspective` (50%, mild) | Off-axis gate camera angle — plate not shot square-on |
+| **No flip** (deliberately absent) | Mirrored plate text is not a valid alternate reading, it's wrong data — flipping would poison the labels, not augment them |
+| Grayscale normalization (mean 0.5, std 0.5) | — |
 
 The recognizer **never** flips the image horizontally — `"ABC 123"` backwards would not match the ground-truth label. The detector **can** flip because it only predicts where the plate is, not what it says.
 
@@ -836,6 +1282,7 @@ account can enter Django Admin only for models covered by permissions explicitly
 granted to that account.
 
 **Confidence indicator bands** are fixed across all pages:
+
 - Green: ≥ 80%
 - Yellow: 60–79%
 - Red: < 60%
@@ -944,6 +1391,7 @@ The production override also runs `collectstatic` at startup via `entrypoint.sh`
 | :--- | :--- |
 | **Access control** | Every operator page and `/staff/api/` endpoint requires an authenticated staff account (`is_staff = True`). Public kiosk, registration, plate, and wallet routes are the only unauthenticated surface. Login and Django auth routes remain public. |
 | **Image uploads** | Declared MIME type, Pillow structure, and format checks run before any CV decode (`scan_core.run_plate_scan`, shared by the kiosk and formerly by staff upload). Uploads are capped at 10 MB (compressed) and 12 MP (pre-decode). Files are saved under randomized names in private storage. |
+| **CV image decode** | `load_image()` is a second, CV-side security boundary on the same public upload — path containment under `MEDIA_ROOT`, content-based format allowlist, a 12 MP decompression-bomb cap, a single bounded read, and path-stripped errors. Full control list in [CV Pipeline → Image Preprocessing](#image-preprocessing); rationale in [Preprocessing as a Security Boundary](#preprocessing-as-a-security-boundary). |
 | **Plate images** | Never served via public `MEDIA_URL`, and never returned by the public kiosk response at all. Only accessible through the authenticated `GET /staff/api/events/<id>/image/` endpoint, which validates the stored path (must start with `plates/`, no `..`, extension allowlist) and sets `Cache-Control: private, no-store` on every response. The reverse proxy or object-storage bucket must also keep the backing media directory private. |
 | **Kiosk activation** | `POST /kiosk/activate/` exchanges the server-held `KIOSK_ACTIVATION_TOKEN` and a lane scope for a short-lived, revocable browser capability; the scan endpoint requires that capability plus a single-use nonce rather than trusting the token directly on every request. |
 | **Public rate limiting** | Cache-based per-IP limiter (`apps/public/ratelimit.py`) applied to kiosk activation, kiosk scanning, wallet top-up, login, and password reset — bounding both credential-guessing and plate-scan abuse. |
