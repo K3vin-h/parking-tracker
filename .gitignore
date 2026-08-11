@@ -61,9 +61,8 @@ graphify-out/
 docs/
 artifacts/dashboard-proof/
 
-# ── AI agent instructions (local only) ───────────────────────────────────────
-AGENTS.md
-CLAUDE.md
+# ── AI agent instructions ───────────────────────────────────────────────────
+# Root CLAUDE.md and AGENTS.md are tracked. PLAN.md stays local.
 PLAN.md
 .claude/
 .claude.md
