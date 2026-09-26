@@ -58,7 +58,9 @@ Thumbs.db
 graphify-out/
 
 # ── Local documentation (not pushed) ───────────────────────────────────────────
-docs/
+docs/*
+!docs/technical/
+!docs/images/
 artifacts/dashboard-proof/
 
 # ── AI agent instructions (local only) ───────────────────────────────────────
