@@ -151,7 +151,7 @@ def normalize_plate(raw_text: str) -> str:
     'ABC 123', and ' abc123 ' all mean the same plate. We collapse those to a
     single key ('ABC123') so entry/exit matching is reliable. Only whitespace
     is removed; hyphens and other characters are preserved deliberately, so
-    'ABC-123' stays distinct from 'ABC123' (exact-match policy from PLAN.md).
+    'ABC-123' stays distinct from 'ABC123' (exact-match policy).
 
     Returns '' for None/empty/whitespace-only input — the caller decides what an
     empty plate means, but we never crash on bad CV output.
@@ -180,7 +180,7 @@ def calculate_charge(
     so it is isolated, pure (no DB writes), and unit-tested against every
     boundary. handle_exit delegates here.
 
-    Rules (from PLAN.md / LotSettings):
+    Rules (from LotSettings):
       1. duration <= grace_period_minutes        -> $0.00 (free)
       2. billing_unit == 'minute'                -> ceil(total_minutes) * rate
       3. billing_unit == 'hour'                  -> ceil(total_hours)   * rate
@@ -286,7 +286,7 @@ def handle_entry(
     new session AND create a detection event. Those must commit together — a
     partial write would corrupt the active-session invariant or revenue records.
 
-    Flow (PLAN.md):
+    Flow:
       1. Normalize plate; load lot settings.
       2. Flag low-confidence against the lot's OWN threshold (configurable).
       3. Orphan handling: if the plate already has an active session in this lot,

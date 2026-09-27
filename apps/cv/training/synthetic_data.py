@@ -604,7 +604,7 @@ def _scene_plate_crop(text: str, country: str, bg_dir: Path) -> Image.Image:
 
     WHY THIS EXISTS (2026-09-26 retrain): measured oracle-bbox accuracy (the
     recognizer given the GROUND-TRUTH crop from a scene) was only 3.3% —
-    see docs/superpowers/plans/2026-09-26-detector-retraining.md. The
+    see docs/technical/01-cv-pipeline.md#cv-model-status. The
     recognizer trained exclusively on _flat_plate_crop had never seen the
     blur, rotation, and perspective a real detector crop introduces. Mixing
     this crop source into training closes that gap directly.

@@ -402,7 +402,7 @@ class TestSettingsView:
     def test_day_10_controls_render_as_tabs_slider_and_canvas(
         self, client, users, lots
     ):
-        """Guard the exact PLAN controls instead of silently reverting to substitutes."""
+        """Guard the exact specified controls instead of silently reverting to substitutes."""
         staff, _ = users
         client.force_login(staff)
         log = client.get(reverse("dashboard:log"))

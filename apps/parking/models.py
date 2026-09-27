@@ -170,7 +170,7 @@ class ParkingLot(models.Model):
         1. Adding a lot selector to the upload form
         2. Routing sessions to the correct lot — zero schema changes required.
 
-      This is the "multi-lot ready" design referenced in PLAN.md's Notes section.
+      This is the "multi-lot ready" design.
     """
 
     # unique=True: setup_defaults uses get_or_create(name='Main Lot') — without

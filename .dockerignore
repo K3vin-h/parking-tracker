@@ -78,7 +78,6 @@ graphify-out/
 .superpowers/
 AGENTS.md
 CLAUDE.md
-PLAN.md
 
 # --- Local training and visual-proof artifacts ---
 # These files are generated or maintained outside the application runtime and

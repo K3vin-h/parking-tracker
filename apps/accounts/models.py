@@ -25,7 +25,7 @@ WHAT OUR USER MODEL INHERITS FROM AbstractUser:
     - date_joined:  auto-set timestamp when the account was created
     - last_login:   auto-updated timestamp on each authentication
 
-ACCESS CONTROL MODEL (from PLAN.md):
+ACCESS CONTROL MODEL:
   - Single role system: is_staff=True grants full access to all pages.
   - No multi-role / permission groups needed at this stage.
   - Unauthenticated users are redirected to /login/ by @login_required and LoginRequiredMixin.
