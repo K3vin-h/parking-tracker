@@ -282,7 +282,7 @@ def activate_kiosk(request: HttpRequest) -> HttpResponse:
     if not configured_token:
         logger.error("Kiosk activation attempted without a configured token")
         return JsonResponse({"error": "Kiosk activation is unavailable."}, status=503)
-    if not secrets.compare_digest(submitted_token, configured_token):
+    if not secrets.compare_digest(submitted_token.encode(), configured_token.encode()):
         logger.warning("Rejected invalid kiosk activation attempt")
         return JsonResponse({"error": "Kiosk activation failed."}, status=403)
 
@@ -346,16 +346,18 @@ def _is_htmx(request: HttpRequest) -> bool:
 
 def _presentation_state(outcome: ScanOutcome) -> str:
     """Give the public UI one explicit state without leaking backend details."""
+    # These review outcomes also carry the low-confidence flag, but need
+    # specific recovery instructions rather than the generic uncertain-read UI.
+    if outcome.outcome == "unreadable_entry":
+        return "unreadable"
+    if outcome.outcome == "exit_unmatched":
+        return "unmatched_exit"
     if outcome.is_low_confidence:
         return "low_confidence"
     if outcome.outcome == "entry":
         return "entry_success"
     if outcome.outcome == "exit_matched":
         return "exit_success"
-    if outcome.outcome == "unreadable_entry":
-        return "unreadable"
-    if outcome.outcome == "exit_unmatched":
-        return "unmatched_exit"
     if outcome.outcome == "error":
         return "model_error" if outcome.status >= 500 else "invalid_image"
     logger.error("Unsupported kiosk scan outcome: %s", outcome.outcome)

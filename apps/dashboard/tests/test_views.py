@@ -25,6 +25,19 @@ from apps.parking.models import (
 User = get_user_model()
 
 
+@pytest.mark.django_db
+def test_session_log_accepts_maximum_date(client, users, lots):
+    """An inclusive maximum date needs no overflowing next-day boundary."""
+    staff, _ = users
+    client.force_login(staff)
+    session = ParkingSession.objects.create(
+        lot=lots[0], plate_text="MAX123", entry_time=datetime.now(UTC),
+    )
+    response = client.get(reverse("dashboard:log"), {"date_to": "9999-12-31"})
+    assert response.status_code == 200
+    assert session in response.context["page_obj"]
+
+
 @pytest.fixture
 def users(db):
     """Create both sides of the single operator-role authorization boundary."""

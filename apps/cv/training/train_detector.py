@@ -12,10 +12,13 @@ Typical usage
     generate_detector_dataset(n=10000, output_dir='data/detector', bg_dir='data/backgrounds')
     "
 
-    # Train:
+    # Train (--val-data-dir points at a dataset generated from backgrounds never
+    # used in --data-dir — an honest holdout; omit it to fall back to an 80/20
+    # split of --data-dir, which shares backgrounds between train and val):
     python apps/cv/training/train_detector.py \\
         --data-dir data/detector \\
-        --epochs 50 \\
+        --val-data-dir data/detector_val \\
+        --epochs 60 \\
         --output apps/cv/weights/detector.pth
 
     # Smoke test (fast, 10-sample dataset):
@@ -25,10 +28,14 @@ Typical usage
         --batch-size 4 \\
         --output /tmp/detector_smoke.pth
 
-The script saves the best weights (lowest validation loss) to --output and
-prints one summary line per epoch.
+The script saves the weights with the best validation IoU (not the lowest
+validation loss — see _is_new_best) to --output, stops early after
+--patience epochs with no IoU improvement, and prints one summary line per
+epoch.
 
-IoU target: > 0.7 on the validation split after 50 epochs of synthetic data.
+IoU target: > 0.7 on a holdout validation split. Run evaluate_detector.py
+after training for the end-to-end (detector + recognizer) accuracy number,
+which this script's val IoU alone does not capture.
 """
 
 import argparse
@@ -50,6 +57,7 @@ if str(REPO_ROOT) not in sys.path:
 import torch  # noqa: E402
 import torch.nn as nn  # noqa: E402
 from torch.utils.data import DataLoader, Subset, random_split  # noqa: E402
+from torchvision.ops import box_convert, generalized_box_iou_loss  # noqa: E402
 
 from apps.cv.models.plate_detector import PlateDetectorCNN  # noqa: E402
 from apps.cv.training.augment import (  # noqa: E402
@@ -158,13 +166,42 @@ def _compute_batch_iou(
     return iou.mean()
 
 
+def _detector_loss(
+    preds: torch.Tensor,
+    targets: torch.Tensor,
+    smooth_l1: nn.SmoothL1Loss,
+    giou_weight: float,
+) -> torch.Tensor:
+    """
+    SmoothL1 (coordinate distance) plus a weighted GIoU term (overlap).
+
+    WHY add GIoU (2026-09-26 retrain): SmoothL1Loss is a proxy for the metric
+    that actually matters — the detector was previously checkpointed on the
+    lowest val loss even though val loss and val IoU could (and did) diverge:
+    val loss bottomed out while IoU stayed at ~0.43 (see
+    docs/technical/01-cv-pipeline.md#cv-model-status). GIoU directly optimises
+    box overlap, including the zero-overlap case (unlike plain IoU, whose
+    gradient is exactly zero when boxes don't touch — GIoU stays informative
+    there by penalising the gap between the boxes' enclosing rectangle).
+
+    Both boxes are converted from YOLO center format [cx, cy, w, h] to corner
+    format [x1, y1, x2, y2], the format torchvision.ops functions expect.
+    """
+    preds_xyxy = box_convert(preds.clamp(0.0, 1.0), in_fmt="cxcywh", out_fmt="xyxy")
+    targets_xyxy = box_convert(targets, in_fmt="cxcywh", out_fmt="xyxy")
+    l1_loss = smooth_l1(preds, targets)
+    giou_loss = generalized_box_iou_loss(preds_xyxy, targets_xyxy, reduction="mean")
+    return l1_loss + giou_weight * giou_loss
+
+
 # ── Training and validation loops ────────────────────────────────────────────
 
 
 def _train_epoch(
     model: PlateDetectorCNN,
     loader: DataLoader,
-    criterion: nn.SmoothL1Loss,
+    smooth_l1: nn.SmoothL1Loss,
+    giou_weight: float,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
 ) -> tuple[float, list[float]]:
@@ -196,7 +233,7 @@ def _train_epoch(
 
         optimizer.zero_grad()
         preds = model(images)
-        loss = criterion(preds, bboxes)
+        loss = _detector_loss(preds, bboxes, smooth_l1, giou_weight)
         loss.backward()
 
         # Gradient clipping prevents extremely large weight updates from
@@ -215,7 +252,8 @@ def _train_epoch(
 def _validate_epoch(
     model: PlateDetectorCNN,
     loader: DataLoader,
-    criterion: nn.SmoothL1Loss,
+    smooth_l1: nn.SmoothL1Loss,
+    giou_weight: float,
     device: torch.device,
 ) -> tuple[float, float]:
     """
@@ -233,7 +271,7 @@ def _validate_epoch(
         bboxes = bboxes.to(device)
 
         preds = model(images)
-        loss = criterion(preds, bboxes)
+        loss = _detector_loss(preds, bboxes, smooth_l1, giou_weight)
         iou = _compute_batch_iou(preds.cpu(), bboxes.cpu())
 
         total_loss += loss.item() * images.size(0)
@@ -427,6 +465,13 @@ def _plot_training_history(
     return save_training_figure(fig, output_path)
 
 
+def _is_new_best(val_iou: float, best_val_iou: float) -> bool:
+    """Pure predicate for checkpoint selection — isolated so the "pick the
+    highest-IoU epoch" rule is directly unit-testable without running an
+    epoch."""
+    return val_iou > best_val_iou
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 
@@ -471,17 +516,57 @@ def _parse_args() -> argparse.Namespace:
         default=42,
         help="Random seed for the train/val split (reproducibility).",
     )
+    parser.add_argument(
+        "--giou-weight",
+        type=float,
+        default=1.0,
+        help="Weight of the GIoU loss term added to SmoothL1 (see _detector_loss).",
+    )
+    parser.add_argument(
+        "--patience",
+        type=int,
+        default=10,
+        help="Stop early after this many epochs with no val IoU improvement.",
+    )
+    parser.add_argument(
+        "--val-data-dir",
+        type=Path,
+        default=None,
+        help="Optional separate dataset root to validate against instead of an "
+        "80/20 split of --data-dir. Point this at a dataset generated from "
+        "backgrounds never used in --data-dir (a true holdout) for an honest "
+        "IoU number — the default split shares backgrounds between train and val.",
+    )
     return parser.parse_args()
 
 
-def _build_datasets(data_dir: Path, seed: int) -> tuple[Subset, Subset]:
+def _build_datasets(
+    data_dir: Path, seed: int, val_data_dir: Path | None = None
+) -> tuple[Subset | PlateDetectorDataset, Subset | PlateDetectorDataset]:
     """
-    Build one reproducible split backed by separate train/eval transforms.
+    Build the train/val dataset pair, backed by separate train/eval transforms.
 
-    WHY separate dataset objects: a Subset delegates to its parent dataset, so
-    splitting one augmented dataset would apply random distortion to validation
-    too and make the reported IoU noisy and misleading.
+    WHY separate dataset objects even in the split case: a Subset delegates to
+    its parent dataset, so splitting one augmented dataset would apply random
+    distortion to validation too and make the reported IoU noisy and misleading.
+
+    WHY --val-data-dir matters: an 80/20 split of one generated dataset still
+    shares the same small background set between train and val (this project's
+    detector dataset is generated from as few as a dozen background photos —
+    see docs/technical/02-cv-training.md). Validating on a dataset generated
+    from backgrounds the model never trained on is what actually tests
+    generalization; see evaluate_detector.py for the same idea applied
+    end-to-end after training.
     """
+    if val_data_dir is not None:
+        train_dataset = PlateDetectorDataset(
+            data_dir, transform=DetectorAugment(train=True)
+        )
+        val_dataset = PlateDetectorDataset(
+            val_data_dir, transform=DetectorAugment(train=False)
+        )
+        return train_dataset, val_dataset
+
     index_source = PlateDetectorDataset(data_dir)
     rng = torch.Generator().manual_seed(seed)
     train_indices, val_indices = random_split(
@@ -513,7 +598,7 @@ def main() -> None:
     logger.info("Using device: %s", device)
 
     # ── Data ───────────────────────────────────────────────────────────────
-    train_set, val_set = _build_datasets(args.data_dir, args.seed)
+    train_set, val_set = _build_datasets(args.data_dir, args.seed, args.val_data_dir)
     logger.info("Dataset size: %d samples", len(train_set) + len(val_set))
     logger.info("Train: %d  |  Val: %d", len(train_set), len(val_set))
 
@@ -537,14 +622,13 @@ def main() -> None:
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info("Model parameters: %d", total_params)
 
-    # SmoothL1Loss with beta=1.0 (the default Huber threshold).
+    # SmoothL1Loss with beta=1.0 (the default Huber threshold), combined with a
+    # GIoU term in _detector_loss (see its docstring for why: SmoothL1 alone is
+    # a coordinate-distance proxy for the overlap metric IoU actually measures).
     # PlateDetectorCNN.forward() applies sigmoid internally, so both preds
     # and targets are in [0, 1] — the loss and the IoU metric are computed in
     # the same space as inference, so val IoU is a reliable quality signal.
-    # Using reduction='mean' averages over all 4 coordinate dimensions AND
-    # over the batch — gives a loss value in the same range as a single
-    # coordinate error, which is easier to interpret and compare across runs.
-    criterion = nn.SmoothL1Loss(beta=1.0, reduction="mean")
+    smooth_l1 = nn.SmoothL1Loss(beta=1.0, reduction="mean")
 
     # WHY Adam: Adaptive per-parameter learning rates handle sparse gradients
     # well and require minimal hyperparameter tuning compared to SGD.
@@ -561,8 +645,15 @@ def main() -> None:
     )
 
     # ── Training loop ──────────────────────────────────────────────────────
+    # Checkpointing on best val IoU, not best val loss (2026-09-26 retrain):
+    # the two metrics can and did diverge (val loss bottomed out while IoU
+    # stayed flat at ~0.43 — see docs/technical/01-cv-pipeline.md), so
+    # checkpointing on loss was silently keeping a worse-IoU epoch than one
+    # seen later in the same run.
+    best_val_iou = -1.0
     best_val_loss = float("inf")
     best_epoch = 1
+    epochs_without_improvement = 0
 
     # Resolve the output path and bound it to the project root so a crafted
     # --output like ../../etc/cron.d/payload cannot create directories outside
@@ -600,9 +691,11 @@ def main() -> None:
 
     for epoch in range(1, args.epochs + 1):
         train_loss, batch_losses = _train_epoch(
-            model, train_loader, criterion, optimizer, device
+            model, train_loader, smooth_l1, args.giou_weight, optimizer, device
         )
-        val_loss, val_iou = _validate_epoch(model, val_loader, criterion, device)
+        val_loss, val_iou = _validate_epoch(
+            model, val_loader, smooth_l1, args.giou_weight, device
+        )
 
         scheduler.step(val_loss)
         current_lr = optimizer.param_groups[0]["lr"]
@@ -625,9 +718,11 @@ def main() -> None:
         # Save weights plus their preprocessing contract, never the model
         # object. The explicit marker lets inference accept these normalized
         # weights while rejecting ambiguous plain state-dict checkpoints.
-        if val_loss < best_val_loss:
+        if _is_new_best(val_iou, best_val_iou):
+            best_val_iou = val_iou
             best_val_loss = val_loss
             best_epoch = epoch
+            epochs_without_improvement = 0
             torch.save(
                 {
                     "preprocessing_version": NORMALIZED_PREPROCESSING_VERSION,
@@ -636,12 +731,25 @@ def main() -> None:
                 output_path,
             )
             logger.info(
-                "  ↳ New best (val_loss=%.6f) → saved to %s", best_val_loss, output_path
+                "  ↳ New best (val_iou=%.4f) → saved to %s", best_val_iou, output_path
             )
+        else:
+            epochs_without_improvement += 1
+            if epochs_without_improvement >= args.patience:
+                logger.info(
+                    "Stopping early: no val IoU improvement in %d epochs "
+                    "(best %.4f at epoch %d).",
+                    args.patience,
+                    best_val_iou,
+                    best_epoch,
+                )
+                break
 
     logger.info(
-        "Training complete. Best val loss: %.6f  |  Weights: %s",
+        "Training complete. Best val IoU: %.4f (val loss %.6f, epoch %d)  |  Weights: %s",
+        best_val_iou,
         best_val_loss,
+        best_epoch,
         output_path,
     )
     logger.info("Load through PlateRecognitionPipeline: %s", output_path)

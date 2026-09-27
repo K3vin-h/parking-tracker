@@ -18,12 +18,16 @@ The CV models are trained entirely on synthetic data generated at runtime. No re
    - US plates: `ABC 1234` (most common), `123 ABC`, or `ABC123`
    - Canadian plates: `ABC 123` or `A1B 2C3` (Ontario-style alphanumeric)
 2. **Build the plate background** — a white rectangle with a dark border. Canadian plates add a solid blue strip across the top quarter to visually differentiate them from US plates.
-3. **Render plate text** onto the background using a TrueType plate font (`composite_on_background`). `textbbox` determines the plate center and the text is drawn in black ink. If the font file is missing, Pillow's default font is used as a fallback.
-4. **Composite onto a background** — for the detector dataset, the plate is pasted onto a random 640×480 parking-lot background image at a random position, random scale, and random rotation (−15° to +15°). The plate is constrained to fit fully within the background.
+3. **Render plate text** onto the background using a TrueType plate font (`composite_on_background`). `textbbox` determines the plate center and the text is drawn in black ink. If the font file (`apps/cv/training/assets/plate_font.ttf`, Liberation Mono Bold) is missing, Pillow's default bitmap font is used as a fallback and an error is logged — install it before training, since every run before the 2026-09-26 retrain silently used the fallback.
+4. **Composite onto a background** (`composite_on_background`) — the background photo is first cropped to a random region covering 50–100% of its area at a 4:3 aspect ratio, then resized to 640×480, so a small background set still yields many distinct framings. The plate is scaled to 15–60% of the image width, given a mild perspective warp (each corner jittered by up to 12% of the plate size), rotated −15° to +15°, and pasted at a random position fully inside the frame. The bounding box is taken from the warped plate's visible pixels, so it stays tight after every transform.
 
 **Detector dataset output** — saves full-scene `images/*.jpg` with paired `labels/*.txt` in YOLO format: `class_index cx cy w h` (all values normalized to `[0, 1]`). Existing files in the output directory are deleted before each run so re-runs don't mix generations.
 
-**Recognizer dataset output** — saves only the cropped plate `images/*.png` (grayscale) with a `labels.csv` (`filename`, `text`, `country`). Existing files are deleted before each run.
+**Recognizer dataset output** — saves only the cropped plate `images/*.png` (grayscale) with a `labels.csv` (`filename`, `text`, `country`). Existing files are deleted before each run. `crop_source` chooses how each crop is made:
+
+- `"flat"` (default) — the rendered plate on its own, flattened to 128×32. Clean and sharp.
+- `"scene"` — the plate is composited into a background exactly as for the detector, then cut back out with the ground-truth box jittered by ±10%, so it carries the blur, perspective and loose framing of a real detector crop.
+- `"mixed"` — a `scene_fraction` share of samples (default 0.5) use `"scene"`, the rest `"flat"`. This is the recommended setting: a recognizer trained on flat crops alone read only 3% of plates correctly even when handed a perfect scene crop (see [CV Model Status](01-cv-pipeline.md#cv-model-status)).
 
 **The 90%-yield hard failure** (`generate_detector_dataset` / `generate_recognizer_dataset`, `synthetic_data.py:461-476, 552-564`) — both builders count how many images they actually produced. If fewer than 90% of the requested samples were generated successfully, the run raises `RuntimeError` instead of silently writing an undersized dataset. Both functions accept an optional `seed` parameter to make the generated dataset reproducible across runs.
 
@@ -82,26 +86,35 @@ The recognizer **never** flips the image horizontally — `"ABC 123"` backwards 
 
 ## Training the Models
 
-Run the training scripts outside Docker to use MPS on Apple Silicon (or CUDA on NVIDIA):
+Run the training scripts outside Docker to use MPS on Apple Silicon (or CUDA on NVIDIA). Keep a few background photos out of training entirely so validation measures generalization rather than memorized scenes:
 
 ```bash
-# Train the plate detector (target: >0.7 IoU after 50 epochs;
-# actual last run: completed all 50 epochs, best IoU ~0.43 — target not met)
-python apps/cv/training/train_detector.py \
-    --epochs 50 \
-    --data-dir data/detector \
-    --output apps/cv/weights/detector.pth
+# Detector data: train on one background set, validate on a held-out set
+python -c "from apps.cv.training.synthetic_data import generate_detector_dataset as g; g(n=2500, output_dir='data/detector', bg_dir='data/backgrounds_train', seed=1)"
+python -c "from apps.cv.training.synthetic_data import generate_detector_dataset as g; g(n=400, output_dir='data/detector_val', bg_dir='data/backgrounds_holdout', seed=2)"
 
-# Train the plate recognizer (target: >90% char accuracy, >80% full-plate after 100 epochs;
-# actual last run: concluded at epoch 36/100 (best epoch on all metrics, kept as final) —
-# 98.59% char / 91.50% full-plate — both targets met)
+# Recognizer data: half clean crops, half crops cut out of composited scenes
+python -c "from apps.cv.training.synthetic_data import generate_recognizer_dataset as g; g(n=8000, output_dir='data/recognizer', crop_source='mixed', bg_dir='data/backgrounds_train', seed=1)"
+
+# Train (--output must resolve inside the project; the script refuses paths outside it)
+python apps/cv/training/train_detector.py \
+    --data-dir data/detector \
+    --val-data-dir data/detector_val \
+    --epochs 40 --patience 8 \
+    --output apps/cv/weights/detector.pth
 python apps/cv/training/train_recognizer.py \
-    --epochs 100 \
     --data-dir data/recognizer \
+    --epochs 20 \
     --output apps/cv/weights/recognizer.pth
+
+# Measure end to end on the held-out backgrounds (detector IoU, full-plate
+# reads through the whole pipeline, and reads given a perfect "oracle" box)
+SECRET_KEY=eval DEBUG=True DB_PASSWORD=unused PYTHONPATH=. \
+    python apps/cv/training/evaluate_detector.py \
+    --bg-dir data/backgrounds_holdout --n 100 --json eval.json
 ```
 
-Both scripts save training-curve plots alongside the `.pth` files.
+Both training scripts save a training-curve plot next to their `.pth` file. On an Apple M3, a detector epoch over 2,500 images took roughly 5–20 minutes (slowing as the machine heated up) and a recognizer epoch over 8,000 crops under a minute. Most of the detector time is the MPS forward and backward pass (about 2 s per batch of 32 on that machine); CPU-side augmentation adds only about 0.3 s per batch.
 
 ## See also
 

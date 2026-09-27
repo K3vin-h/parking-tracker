@@ -2,16 +2,20 @@
 
 ## CV models
 
-- **The detector misses its target.** Best IoU is about 0.43 against a >0.70 target. A loose crop directly degrades the recognizer's input. See [01-cv-pipeline.md → CV Model Status](01-cv-pipeline.md#cv-model-status) for the diagnosis.
-- **The recognizer is undertrained.** It met its targets (98.59% character / 91.50% full-plate accuracy) but stopped at epoch 36 of 100.
+The accuracy figures below come from the September 2026 local retraining run,
+whose model architecture and training code are included in this checkout.
+
+- **End-to-end accuracy is low.** Only about 22% of synthetic scenes on held-out backgrounds are read exactly right through the full pipeline (up from 0% before the 2026-09-26 retrain). Low-confidence reads and exits with no matching entry are flagged for staff correction, but a confident misread can still open a session under the wrong plate. See [01-cv-pipeline.md → CV Model Status](01-cv-pipeline.md#cv-model-status).
+- **The detector misses its target.** Validation IoU is about 0.60 against a >0.70 target (up from ~0.43). A loose crop directly degrades the recognizer's input.
+- **The recognizer is undertrained.** 90.5% character but only 59.1% full-plate accuracy after 20 epochs, and it was still improving when training ended.
 - **Synthetic data only.** Neither model has been evaluated on real photographs, so every reported number describes in-distribution synthetic performance.
 - **Clearer photos can still be confidently wrong.** During walkthrough preparation, all three cleaner AI-generated car/plate images were misread above the low-confidence threshold. This was a small exploratory check, not an accuracy benchmark. Human-readable text, cleaner backgrounds, and more realistic plate placement do not ensure correct model output. The training distribution is narrow, and broader training plus separate evaluation on representative camera photos is needed before claiming real-world reliability.
 - **The walkthrough uses selected successes.** Its synthetic plate photos were chosen because the current pipeline reads them correctly. The recording demonstrates login, registration, uploads, sessions, and billing; it does not represent typical recognition accuracy. Its initial wallet credit is seeded demo data, not a working payment-provider transaction.
 - **A narrow synthetic distribution:**
   - one plate font;
   - five US and Canadian format templates;
-  - 11 reused background photos;
-  - no perspective warp or directional motion blur in `DetectorAugment`.
+  - 12 background photos (10 for training, 2 held out), stretched with random crops;
+  - no directional motion blur.
 - **The detector can't say "no plate here".** It regresses exactly one box per image, with no objectness score, and cannot handle multiple plates in a frame.
 - **Greedy CTC decode only.** Beam search was deliberately skipped (see [03-design-rationale.md](03-design-rationale.md#recognizer-design-choices)).
 - **No feedback loop.** Staff corrections fix the session record but are never fed back into training data.

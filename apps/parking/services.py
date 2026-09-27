@@ -646,16 +646,7 @@ def _correct_unmatched_exit(
         .first()
     )
     if session is not None:
-        exit_time = event.timestamp
-        if exit_time <= session.entry_time:
-            logger.warning(
-                "Corrected exit event %s timestamp not after entry for "
-                "session %s; bumping +1s",
-                event.pk,
-                session.pk,
-            )
-            exit_time = session.entry_time + timedelta(seconds=1)
-        _complete_session_for_exit(session, exit_time, settings)
+        _complete_session_for_exit(session, event.timestamp, settings)
         event.session = session
         event.save(
             update_fields=["manually_corrected", "corrected_plate", "session"]

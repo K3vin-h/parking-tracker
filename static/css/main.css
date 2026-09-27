@@ -1805,6 +1805,11 @@ svg {
     color: var(--text-secondary);
     margin: 0 0 1.5rem;
 }
+/* Component display rules must not reveal controls hidden by kiosk state. */
+.kiosk [hidden] {
+    display: none !important;
+}
+
 .kiosk__form {
     display: flex;
     flex-direction: column;

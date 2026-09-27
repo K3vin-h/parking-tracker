@@ -34,6 +34,8 @@ def _parse_revenue_range(request: HttpRequest) -> tuple[str, date, date]:
         raise ValueError("Custom ranges require valid start and end dates.") from None
     if end < start:
         raise ValueError("End date must be on or after start date.")
+    if end == date.max:
+        raise ValueError("End date must be before 9999-12-31.")
     if (end - start).days > 365:
         raise ValueError("Custom ranges cannot exceed 366 days.")
     return preset, start, end

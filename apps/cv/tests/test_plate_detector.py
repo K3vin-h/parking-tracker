@@ -17,12 +17,16 @@ from apps.cv.models.plate_detector import PlateDetectorCNN
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _random_batch(batch_size: int = 2, height: int = 480, width: int = 640) -> torch.Tensor:
+
+def _random_batch(
+    batch_size: int = 2, height: int = 480, width: int = 640
+) -> torch.Tensor:
     """Return a random float32 image batch with values in [0, 1]."""
     return torch.rand(batch_size, 3, height, width)
 
 
 # ── Model architecture tests ─────────────────────────────────────────────────
+
 
 @pytest.mark.unit
 class TestPlateDetectorCNN:
@@ -73,7 +77,9 @@ class TestPlateDetectorCNN:
         x = _random_batch(batch_size=2)
         out1 = model(x)
         out2 = model(x)
-        assert torch.allclose(out1, out2), "eval mode gave different outputs for same input"
+        assert torch.allclose(out1, out2), (
+            "eval mode gave different outputs for same input"
+        )
 
     def test_train_mode_nondeterministic_with_dropout(self) -> None:
         """
@@ -88,20 +94,24 @@ class TestPlateDetectorCNN:
         x = _random_batch(batch_size=2)
         outputs = [model(x).detach() for _ in range(10)]
         all_same = all(torch.allclose(outputs[0], o) for o in outputs[1:])
-        assert not all_same, "train mode produced identical outputs on 10 passes — dropout may be broken"
+        assert not all_same, (
+            "train mode produced identical outputs on 10 passes — dropout may be broken"
+        )
 
     def test_parameter_count_in_expected_range(self) -> None:
         """
-        Total trainable parameters should be in the range [500 k, 3 M].
+        Total trainable parameters should be in the range [500 k, 6 M].
 
         This is a sanity check — too few params means a layer is missing,
         too many means an accidental architecture change inflated the model.
+        Raised from 3 M (2026-09-26 retrain): the backbone grew from three to
+        five conv blocks to widen the receptive field past a plate's typical
+        size — see the WHY note at the top of plate_detector.py.
         """
         model = PlateDetectorCNN()
         total = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        assert 500_000 <= total <= 3_000_000, (
-            f"Unexpected parameter count: {total:,}. "
-            "Expected between 500 k and 3 M."
+        assert 500_000 <= total <= 6_000_000, (
+            f"Unexpected parameter count: {total:,}. Expected between 500 k and 6 M."
         )
 
     def test_output_dtype_float32(self) -> None:
@@ -161,6 +171,7 @@ class TestPlateDetectorCNN:
 # The IoU helper lives in train_detector.py.  We import it directly rather than
 # going through the training CLI to keep tests fast and dependency-free.
 
+
 @pytest.mark.unit
 class TestComputeBatchIoU:
     """Tests for the _compute_batch_iou helper in train_detector.py."""
@@ -168,6 +179,7 @@ class TestComputeBatchIoU:
     @staticmethod
     def _iou_fn(pred: torch.Tensor, target: torch.Tensor) -> float:
         from apps.cv.training.train_detector import _compute_batch_iou
+
         return _compute_batch_iou(pred, target).item()
 
     def test_perfect_overlap_returns_one(self) -> None:
@@ -178,7 +190,7 @@ class TestComputeBatchIoU:
 
     def test_no_overlap_returns_zero(self) -> None:
         """Non-overlapping boxes → IoU = 0.0."""
-        pred   = torch.tensor([[0.1, 0.1, 0.1, 0.1]])
+        pred = torch.tensor([[0.1, 0.1, 0.1, 0.1]])
         target = torch.tensor([[0.9, 0.9, 0.1, 0.1]])
         iou = self._iou_fn(pred, target)
         assert abs(iou - 0.0) < 1e-5, f"Expected 0.0, got {iou}"
@@ -203,7 +215,7 @@ class TestComputeBatchIoU:
         union       = 0.16 + 0.16 − 0.08 = 0.24
         IoU         = 0.08 / 0.24 = 1/3 ≈ 0.3333
         """
-        pred   = torch.tensor([[0.4, 0.5, 0.4, 0.4]])
+        pred = torch.tensor([[0.4, 0.5, 0.4, 0.4]])
         target = torch.tensor([[0.6, 0.5, 0.4, 0.4]])
         iou = self._iou_fn(pred, target)
         assert abs(iou - (1.0 / 3.0)) < 1e-4, f"Expected ~0.333, got {iou}"
@@ -211,7 +223,7 @@ class TestComputeBatchIoU:
     def test_batch_mean_is_correct(self) -> None:
         """Mean IoU over a batch of 2: one perfect, one zero → mean = 0.5."""
         box = torch.tensor([[0.5, 0.5, 0.4, 0.3]])
-        pred   = torch.cat([box, torch.tensor([[0.1, 0.1, 0.1, 0.1]])])
+        pred = torch.cat([box, torch.tensor([[0.1, 0.1, 0.1, 0.1]])])
         target = torch.cat([box, torch.tensor([[0.9, 0.9, 0.1, 0.1]])])
         iou = self._iou_fn(pred, target)
         assert abs(iou - 0.5) < 1e-4, f"Expected 0.5, got {iou}"
@@ -220,6 +232,8 @@ class TestComputeBatchIoU:
         """Large logits (before sigmoid) should not cause NaN IoU."""
         raw_logits = torch.tensor([[10.0, -10.0, 5.0, -5.0]])
         clamped = torch.sigmoid(raw_logits)
-        target  = torch.tensor([[0.5, 0.5, 0.4, 0.3]])
+        target = torch.tensor([[0.5, 0.5, 0.4, 0.3]])
         iou = self._iou_fn(clamped, target)
-        assert not torch.isnan(torch.tensor(iou)), "IoU is NaN for sigmoid-clamped predictions"
+        assert not torch.isnan(torch.tensor(iou)), (
+            "IoU is NaN for sigmoid-clamped predictions"
+        )

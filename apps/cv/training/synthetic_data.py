@@ -24,8 +24,10 @@ import string
 from functools import lru_cache
 from pathlib import Path
 
+import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+from apps.cv.preprocessing import crop_plate_region
 from apps.cv.training._image_io import safe_open_image
 
 logger = logging.getLogger(__name__)
@@ -58,17 +60,17 @@ _DIGITS = string.digits
 # CA formats cover the majority of provinces (ON, BC, AB, QC etc.).
 _US_FORMATS = [
     "LLL DDDD",  # ABC 1234 — most common US style
-    "DDD LLL",   # 123 ABC — older/vanity style
-    "LLLDDD",    # ABC123  — compact / some state vanity plates
+    "DDD LLL",  # 123 ABC — older/vanity style
+    "LLLDDD",  # ABC123  — compact / some state vanity plates
 ]
 _CA_FORMATS = [
-    "LLL DDD",   # ABC 123 — most Canadian provinces
-    "LDL DLD",   # A1B 2C3 — Ontario-style alphanumeric
+    "LLL DDD",  # ABC 123 — most Canadian provinces
+    "LDL DLD",  # A1B 2C3 — Ontario-style alphanumeric
 ]
 
 # ── Plate rendering constants ─────────────────────────────────────────────────
 
-PLATE_SIZE = (400, 120)   # (width, height) in pixels
+PLATE_SIZE = (400, 120)  # (width, height) in pixels
 
 _ASSETS_DIR = Path(__file__).parent / "assets"
 _FONT_PATH = _ASSETS_DIR / "plate_font.ttf"
@@ -80,6 +82,7 @@ _BG_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 
 
 # ── Background file collection (cached per bg_dir to avoid 10k dir scans) ────
+
 
 @lru_cache(maxsize=8)
 def _collect_bg_files(bg_dir: Path) -> tuple[Path, ...]:
@@ -102,7 +105,8 @@ def _collect_bg_files(bg_dir: Path) -> tuple[Path, ...]:
         raise FileNotFoundError("Background directory not found.")
     files = tuple(
         sorted(
-            p for p in bg_dir.iterdir()
+            p
+            for p in bg_dir.iterdir()
             if p.suffix.lower() in _BG_EXTENSIONS and not p.is_symlink()
         )
     )
@@ -112,6 +116,7 @@ def _collect_bg_files(bg_dir: Path) -> tuple[Path, ...]:
 
 
 # ── Font loading (cached so 50k render calls don't reload from disk) ──────────
+
 
 @lru_cache(maxsize=16)
 def _load_font(size: int = _FONT_SIZE) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -159,6 +164,7 @@ def _load_font(size: int = _FONT_SIZE) -> ImageFont.FreeTypeFont | ImageFont.Ima
 
 # ── Plate text generation ─────────────────────────────────────────────────────
 
+
 def _apply_format(fmt: str) -> str:
     """Expand a format string where L → random letter, D → random digit."""
     out = []
@@ -198,6 +204,7 @@ def generate_plate_text(country: str = "random") -> tuple[str, str]:
 
 # ── Plate image rendering ─────────────────────────────────────────────────────
 
+
 def render_plate_image(text: str, country: str) -> Image.Image:
     """
     Render a synthetic license plate as an RGBA PIL Image.
@@ -217,7 +224,9 @@ def render_plate_image(text: str, country: str) -> Image.Image:
         RGBA PIL Image of size PLATE_SIZE.
     """
     w, h = PLATE_SIZE
-    img = Image.new("RGBA", (w, h), (255, 255, 255, 255)) # White background, fully opaque
+    img = Image.new(
+        "RGBA", (w, h), (255, 255, 255, 255)
+    )  # White background, fully opaque
     draw = ImageDraw.Draw(img)
 
     if country == "CA":
@@ -237,7 +246,7 @@ def render_plate_image(text: str, country: str) -> Image.Image:
     # the text's drawing origin, not the bbox top-left. Without the subtraction
     # every plate would be shifted right and down by the font's bearing.
     bbox = draw.textbbox((0, 0), text, font=font)
-    text_w = bbox[2] - bbox[0] #bbox (left, top, right, bottom)
+    text_w = bbox[2] - bbox[0]  # bbox (left, top, right, bottom)
     text_h = bbox[3] - bbox[1]
     x = (w - text_w) // 2 - bbox[0]
     y = (h - text_h) // 2 - bbox[1]
@@ -248,6 +257,69 @@ def render_plate_image(text: str, country: str) -> Image.Image:
 
 # ── Compositing ───────────────────────────────────────────────────────────────
 
+
+def _random_aspect_crop(img: Image.Image, target_size: tuple[int, int]) -> Image.Image:
+    """
+    Crop a random region of `img`, scaling each side to 50–100% before aspect trimming, at the same
+    aspect ratio as `target_size`, so the subsequent resize never distorts it.
+
+    WHY: the detector dataset reuses a small, fixed set of background photos.
+    Always resizing the whole photo to target_size means every sample from one
+    background shows the identical framing. Cropping a random sub-region first
+    turns one background into many distinct "viewpoints" — different corners,
+    different zoom — which is a cheap, real source of visual diversity when the
+    background set itself cannot easily be grown.
+    """
+    tw, th = target_size
+    aspect = tw / th
+    iw, ih = img.size
+    frac = _rng.uniform(0.5, 1.0)
+    if iw / ih > aspect:
+        crop_h = max(1, int(ih * frac))
+        crop_w = max(1, int(crop_h * aspect))
+    else:
+        crop_w = max(1, int(iw * frac))
+        crop_h = max(1, int(crop_w / aspect))
+    crop_w = min(crop_w, iw)
+    crop_h = min(crop_h, ih)
+    x0 = _rng.randint(0, iw - crop_w) if iw > crop_w else 0
+    y0 = _rng.randint(0, ih - crop_h) if ih > crop_h else 0
+    return img.crop((x0, y0, x0 + crop_w, y0 + crop_h))
+
+
+def _apply_perspective_jitter(img: Image.Image, max_frac: float = 0.12) -> Image.Image:
+    """
+    Warp `img` by jittering each corner of a source quad by up to `max_frac` of
+    the image's width/height, then resampling that quad back to the original
+    rectangle (PIL's QUAD transform). This approximates viewing a flat plate
+    from a slightly off-axis camera angle — corners move independently, unlike
+    a simple rotation, which only rotates the whole rectangle rigidly.
+
+    Kept deliberately mild (default 12%): a plate warped past recognition would
+    poison the label the same way a horizontal flip would (see RecognizerAugment
+    in augment.py), so this must distort framing, not identity.
+    """
+    w, h = img.size
+
+    def _jitter_corner(x: float, y: float) -> tuple[float, float]:
+        return (
+            x + _rng.uniform(-max_frac * w, max_frac * w),
+            y + _rng.uniform(-max_frac * h, max_frac * h),
+        )
+
+    # Source quad: upper-left, lower-left, lower-right, upper-right — the order
+    # PIL's QUAD transform expects, mapped onto the full (0, 0, w, h) output.
+    quad = (
+        *_jitter_corner(0, 0),
+        *_jitter_corner(0, h),
+        *_jitter_corner(w, h),
+        *_jitter_corner(w, 0),
+    )
+    return img.transform(
+        (w, h), Image.QUAD, quad, resample=Image.BICUBIC, fillcolor=(0, 0, 0, 0)
+    )
+
+
 def composite_on_background(
     plate_img: Image.Image,
     bg_dir: Path,
@@ -257,8 +329,13 @@ def composite_on_background(
     Paste a plate image onto a randomly chosen background at a random transform.
 
     Randomisations applied each call:
-        - Background: random image from bg_dir
-        - Scale:      plate occupies 15–40% of image width (realistic camera framing)
+        - Background: random image from bg_dir, plus a random aspect-preserving
+                      crop scaling each side to 50–100% before aspect trimming — multiplies
+                      viewpoint diversity out of a small background set.
+        - Scale:      plate occupies 15–60% of image width (close gate framing
+                      through a wide establishing shot)
+        - Perspective: mild quad warp (up to ~12% of plate size per corner),
+                      simulating an off-axis camera angle, applied before rotation
         - Rotation:   ±15° (cameras aren't always perfectly level)
         - Position:   uniform random within image bounds (plate always fully visible)
 
@@ -295,17 +372,28 @@ def composite_on_background(
     # instead of masking it as FileNotFoundError.
     bg_path = _rng.choice(bg_files)
     bg = safe_open_image(bg_path).convert("RGBA")
+    # Random aspect-preserving crop before resizing: zooms into a different part
+    # of the same background each call, so a handful of source photos yield many
+    # distinct framings instead of always the same downsampled whole scene.
+    bg = _random_aspect_crop(bg, target_size)
     bg = bg.resize(target_size, Image.LANCZOS)
 
-    # Scale plate so it occupies 15–40% of image width — realistic for parking cameras
-    scale = _rng.uniform(0.15, 0.40)
+    # Scale plate so it occupies 15–60% of image width. The lower end matches a
+    # wide establishing shot; the upper end matches a close gate camera — the
+    # original 15–40% cap under-represented close-up framing.
+    scale = _rng.uniform(0.15, 0.60)
     new_w = int(tw * scale)
     new_h = int(new_w * plate_img.height / plate_img.width)
     plate_scaled = plate_img.resize((new_w, new_h), Image.LANCZOS)
 
+    # Mild perspective warp — simulates a camera that isn't shooting the plate
+    # square-on — applied before rotation so the two distortions compose the way
+    # a real off-axis, slightly tilted camera would produce them.
+    plate_warped = _apply_perspective_jitter(plate_scaled)
+
     # Rotate ±15°; expand=True grows the canvas to fit rotated corners without clipping
     angle = _rng.uniform(-15, 15)
-    plate_rotated = plate_scaled.rotate(
+    plate_rotated = plate_warped.rotate(
         angle, resample=Image.BICUBIC, expand=True, fillcolor=(0, 0, 0, 0)
     )
 
@@ -324,7 +412,7 @@ def composite_on_background(
     max_x = tw - canvas_w
     max_y = th - canvas_h
     if max_x < 0 or max_y < 0:
-        # Safety fallback: plate is larger than image (shouldn't happen at ≤40% scale)
+        # Safety fallback: plate is larger than image (shouldn't happen at ≤60% scale)
         x, y = max(0, (tw - canvas_w) // 2), max(0, (th - canvas_h) // 2)
     else:
         x = _rng.randint(0, max_x)
@@ -337,6 +425,7 @@ def composite_on_background(
 
 
 # ── Dataset generation ────────────────────────────────────────────────────────
+
 
 def _validate_sample_count(n: int) -> None:
     """Reject obviously-wrong sample counts before we touch the filesystem."""
@@ -359,6 +448,15 @@ def _seed_rng(seed: int | None) -> None:
     """
     if seed is not None:
         _rng.seed(seed)
+
+
+def _validate_background_output(bg_dir: Path, output_dir: Path) -> None:
+    """Keep source backgrounds separate from directories cleared on generation."""
+    if bg_dir.is_relative_to(output_dir) or output_dir.is_relative_to(bg_dir):
+        raise ValueError("Background and output directories must not overlap.")
+    for name in ("images", "labels", "labels.csv"):
+        if (output_dir / name).is_symlink():
+            raise ValueError("Generated output paths must not be symlinks.")
 
 
 def _clear_existing(directory: Path, suffixes: tuple[str, ...]) -> None:
@@ -419,6 +517,7 @@ def generate_detector_dataset(
     # Accept str or Path from callers; canonicalize before any deletion.
     output_dir = Path(output_dir).resolve()
     bg_dir = Path(bg_dir).resolve()
+    _validate_background_output(bg_dir, output_dir)
     _collect_bg_files(bg_dir)
 
     img_dir = output_dir / "images"
@@ -476,10 +575,69 @@ def generate_detector_dataset(
         )
 
 
+def _flat_plate_crop(text: str, country: str) -> Image.Image:
+    """
+    Render a plate at native resolution and flatten it to a clean 128×32
+    grayscale crop — no background, no rotation, no perspective.
+
+    This is the original recognizer training input. It teaches the recognizer
+    to read a plate's characters, but nothing about the blur and distortion a
+    plate looks like after being composited into a scene at gate-camera scale
+    and then cropped back out — that gap is what "scene" crop_source targets.
+    """
+    plate = render_plate_image(text, country)
+    # Flatten RGBA onto white before converting to grayscale so the alpha
+    # channel is not misinterpreted as black in the luminance formula (safe
+    # now since alpha=255, but prevents a silent bug if render_plate_image
+    # ever adds partial transparency).
+    white_bg = Image.new("RGB", plate.size, (255, 255, 255))
+    white_bg.paste(plate, mask=plate.split()[3])
+    return white_bg.convert("L").resize((128, 32), Image.LANCZOS)
+
+
+def _scene_plate_crop(text: str, country: str, bg_dir: Path) -> Image.Image:
+    """
+    Render a plate, composite it into a scene exactly as the detector dataset
+    does (background crop, scale, perspective, rotation), then crop it back
+    out using the ground-truth box — jittered ±10% to approximate a slightly
+    imperfect detector prediction rather than a hand-fed perfect box.
+
+    WHY THIS EXISTS (2026-09-26 retrain): measured oracle-bbox accuracy (the
+    recognizer given the GROUND-TRUTH crop from a scene) was only 3.3% —
+    see docs/superpowers/plans/2026-09-26-detector-retraining.md. The
+    recognizer trained exclusively on _flat_plate_crop had never seen the
+    blur, rotation, and perspective a real detector crop introduces. Mixing
+    this crop source into training closes that gap directly.
+    """
+    plate = render_plate_image(text, country)
+    composite, (x, y, w, h) = composite_on_background(plate, bg_dir)
+    iw, ih = composite.size
+
+    # Jitter the ground-truth box by up to 10% of its own size per edge —
+    # approximates a detector that is close but not pixel-perfect, so the
+    # recognizer also learns to tolerate a loose crop, not just a scene crop.
+    jitter_x, jitter_y = w * 0.10, h * 0.10
+    jx = x + _rng.uniform(-jitter_x, jitter_x)
+    jy = y + _rng.uniform(-jitter_y, jitter_y)
+    jw = max(1.0, w + _rng.uniform(-jitter_x, jitter_x))
+    jh = max(1.0, h + _rng.uniform(-jitter_y, jitter_y))
+    bbox_norm = [
+        max(0.0, min(1.0, jx / iw)),
+        max(0.0, min(1.0, jy / ih)),
+        max(1e-3, min(1.0, jw / iw)),
+        max(1e-3, min(1.0, jh / ih)),
+    ]
+    crop = crop_plate_region(np.array(composite.convert("RGB")), bbox_norm)
+    return Image.fromarray(crop).convert("L").resize((128, 32), Image.LANCZOS)
+
+
 def generate_recognizer_dataset(
     n: int = 50_000,
     output_dir: Path = Path("data/recognizer"),
     seed: int | None = None,
+    crop_source: str = "flat",
+    bg_dir: Path = Path("data/backgrounds"),
+    scene_fraction: float = 0.5,
 ) -> None:
     """
     Generate n cropped plate images at 128×32 grayscale for recognizer training.
@@ -502,17 +660,38 @@ def generate_recognizer_dataset(
         seed:       Optional seed for ``random`` to make output reproducible.
                     Note: this calls ``random.seed(seed)`` on the process-wide
                     RNG, which affects any other code in the same process.
+        crop_source: "flat" (default, original behavior — a clean, isolated
+                    plate crop) or "scene" (every sample is composited into a
+                    background and cropped back out) or "mixed" (a
+                    `scene_fraction` share of samples use "scene", the rest
+                    "flat" — recommended so the recognizer keeps reading clean
+                    crops well while also learning scene-degraded ones).
+        bg_dir:     Background directory, required when crop_source is
+                    "scene" or "mixed".
+        scene_fraction: Share of samples using the scene crop when
+                    crop_source="mixed" (ignored otherwise).
 
     Raises:
-        ValueError:   If n is outside [1, 1_000_000].
+        ValueError:   If n is outside [1, 1_000_000], or crop_source is
+                      unrecognized.
         RuntimeError: If fewer than 90 % of requested samples could be
                       generated (systematic failure, not a stray bad file).
     """
     _validate_sample_count(n)
+    if crop_source not in ("flat", "scene", "mixed"):
+        raise ValueError(
+            f"crop_source must be 'flat', 'scene', or 'mixed', got {crop_source!r}"
+        )
+    if not 0.0 <= scene_fraction <= 1.0:
+        raise ValueError("scene_fraction must be finite and between 0 and 1.")
     _seed_rng(seed)
 
     # Accept str or Path from callers; canonicalize before any deletion.
     output_dir = Path(output_dir).resolve()
+    if crop_source != "flat":
+        bg_dir = Path(bg_dir).resolve()
+        _validate_background_output(bg_dir, output_dir)
+        _collect_bg_files(bg_dir)  # fail fast if the background set is unusable
 
     img_dir = output_dir / "images"
     img_dir.mkdir(parents=True, exist_ok=True)
@@ -528,14 +707,14 @@ def generate_recognizer_dataset(
         for i in range(n):
             try:
                 text, country = generate_plate_text()
-                plate = render_plate_image(text, country)
-                # Flatten RGBA onto white before converting to grayscale so the
-                # alpha channel is not misinterpreted as black in the luminance
-                # formula (safe now since alpha=255, but prevents a silent bug
-                # if render_plate_image ever adds partial transparency).
-                white_bg = Image.new("RGB", plate.size, (255, 255, 255))
-                white_bg.paste(plate, mask=plate.split()[3])
-                plate_gray = white_bg.convert("L").resize((128, 32), Image.LANCZOS)
+                use_scene = crop_source == "scene" or (
+                    crop_source == "mixed" and _rng.random() < scene_fraction
+                )
+                plate_gray = (
+                    _scene_plate_crop(text, country, bg_dir)
+                    if use_scene
+                    else _flat_plate_crop(text, country)
+                )
 
                 filename = f"{i:06d}.png"
                 plate_gray.save(img_dir / filename)

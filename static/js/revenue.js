@@ -101,6 +101,10 @@
             options: commonOptions(),
         });
         renderBreakdown();
+        // A successful retry replaces the previous failed request's state.
+        if (error) {
+            error.hidden = true;
+        }
     }
 
     async function load() {

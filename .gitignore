@@ -7,12 +7,20 @@
 # Ignore every environment-specific variant while retaining the reviewed template.
 .env*
 !/.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.sqlite3
+*.sqlite3-*
+*.sql
+*.dump
+/backups/
 
 # ── Python bytecode ───────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
-*.pyo
 
 # ── Trained model weights ─────────────────────────────────────────────────────
 # Training outputs include model checkpoints and generated diagnostic plots.
@@ -37,6 +45,12 @@ apps/cv/weights/*
 htmlcov/
 .pytest_cache/
 .tox/
+.ruff_cache/
+.mypy_cache/
+coverage.xml
+junit.xml
+test-results/
+playwright-report/
 
 # ── Virtual environments ──────────────────────────────────────────────────────
 # If running outside Docker, virtual environments stay local.
@@ -61,7 +75,8 @@ graphify-out/
 docs/*
 !docs/technical/
 !docs/images/
-artifacts/dashboard-proof/
+/artifacts/
+/screenshots/
 
 # ── AI agent instructions (local only) ───────────────────────────────────────
 CLAUDE.md
@@ -70,6 +85,8 @@ PLAN.md
 .claude/
 .claude.md
 .superpowers/
+.agents/
+.codex/
 
 # ── Synthetic training data (generated, not committed) ────────────────────────
 # Background images are real parking-lot photos supplied by the user.
@@ -78,11 +95,15 @@ PLAN.md
 data/backgrounds/*
 !data/backgrounds/.gitkeep
 data/detector/
+data/detector_val/
+data/backgrounds_train
+data/backgrounds_holdout
 data/detector_smoke/
 data/recognizer/
 # Plate crops dumped for debugging CV preprocessing/pipeline runs — local
 # scratch output, not reproducible input, not committed.
 data/_debug_crops/
+data/_retrain_weights/
 
 # ── Bundled plate font (binary asset — download per assets/README.md) ─────────
 apps/cv/training/assets/*.ttf

@@ -1,5 +1,8 @@
 # CV Pipeline
 
+> This checkout includes the five-block detector from the September 2026 retrain.
+> See [CV Model Status](#cv-model-status) for measured accuracy and limitations.
+
 This section is the mechanics reference for `apps/cv/` — exact shapes, layers,
 constants, and control flow, precise enough to reimplement the pipeline from
 this section alone. For *why* each shape and choice was made instead of an
@@ -110,7 +113,7 @@ four values in `[0, 1]`.
 **Input:** `(B, 3, H, W)` float32, nominally `(B, 3, 480, 640)` after
 preprocessing (`AdaptiveAvgPool2d` below tolerates other sizes).
 
-**Convolutional backbone** — three blocks, each `Conv2d(bias=False) →
+**Convolutional backbone** — five blocks, each `Conv2d(bias=False) →
 BatchNorm2d → ReLU(inplace=True) → MaxPool2d(2×2)`:
 
 | Block | Channels in→out | Output shape (from 480×640 input) |
@@ -118,22 +121,33 @@ BatchNorm2d → ReLU(inplace=True) → MaxPool2d(2×2)`:
 | 1 | 3 → 32 | `(B, 32, 240, 320)` |
 | 2 | 32 → 64 | `(B, 64, 120, 160)` |
 | 3 | 64 → 128 | `(B, 128, 60, 80)` |
+| 4 | 128 → 256 | `(B, 256, 30, 40)` |
+| 5 | 256 → 256 | `(B, 256, 15, 20)` |
 
-`AdaptiveAvgPool2d((4, 4))` then collapses any spatial size to a fixed `(B,
-128, 4, 4)`, flattened to `(B, 2048)`.
+Blocks 4 and 5 were added in the 2026-09-26 retrain. Three blocks gave each
+output position a receptive field of about 22px, while a plate at gate-camera
+scale spans 96–256px; five blocks raise it to about 94px (rationale in
+[Detector Design Choices](03-design-rationale.md#detector-design-choices)).
 
-**Fully connected head:** `2048 → 256` (`fc1`) → `ReLU` → `Dropout(p=0.3)` →
+`AdaptiveAvgPool2d((3, 4))` then collapses the spatial size to a fixed `(B,
+256, 3, 4)`, flattened to `(B, 3072)`. The 3×4 grid keeps the input's 3:4
+aspect ratio and evenly divides the 15×20 feature map, which PyTorch's MPS
+backend requires for adaptive pooling.
+
+**Fully connected head:** `3072 → 256` (`fc1`) → `ReLU` → `Dropout(p=0.3)` →
 `256 → 4` (`fc2`) → `sigmoid`. The final output is `(B, 4)`, `[cx, cy, w, h]`
 in `[0, 1]`. Sigmoid is applied **inside** `forward()`, not as a
-separate inference-only step, so `SmoothL1Loss` trains against the exact
+separate inference-only step, so the loss trains against the exact
 `[0, 1]` output space `predict()` returns at inference.
 
 ```python
 x = self.block1(x)   # (B, 32,  240, 320)
 x = self.block2(x)   # (B, 64,  120, 160)
 x = self.block3(x)   # (B, 128, 60,  80)
-x = self.pool(x)     # (B, 128, 4,   4)
-x = x.flatten(1)      # (B, 2048)
+x = self.block4(x)   # (B, 256, 30,  40)
+x = self.block5(x)   # (B, 256, 15,  20)
+x = self.pool(x)     # (B, 256, 3,   4)
+x = x.flatten(1)      # (B, 3072)
 x = self.fc1(x)       # (B, 256)
 x = self.dropout(self.relu_fc(x))
 x = self.fc2(x)       # (B, 4) raw logits
@@ -146,10 +160,13 @@ via `try/finally` — safe to call mid-training (e.g. a validation callback)
 without corrupting the training loop's own mode state. This same
 no-grad/eval/restore pattern is used by `PlateRecognizerCRNN.predict()` below.
 
-**Training** (`train_detector.py`): `SmoothL1Loss` (Huber) + Adam +
-`ReduceLROnPlateau(factor=0.5, patience=5)`. Target: **>0.7 IoU** on synthetic
-validation data after 50 epochs — actual result and diagnosis in
-[CV Model Status](#cv-model-status).
+**Training** (`train_detector.py`): `SmoothL1Loss` (Huber) plus a weighted
+GIoU term (`torchvision.ops.generalized_box_iou_loss`, `--giou-weight`), Adam,
+and `ReduceLROnPlateau(factor=0.5, patience=5)`. The checkpoint is chosen by
+**best validation IoU**, not lowest loss, and training stops early after
+`--patience` epochs without an IoU gain. `--val-data-dir` validates against a
+dataset generated from backgrounds never used in training. Target: **>0.7 IoU**
+on held-out backgrounds — actual result in [CV Model Status](#cv-model-status).
 
 ![Plate detector training curves](../images/detector_training.png)
 
@@ -357,78 +374,76 @@ commands in CI for lacking a trained model no one asked for at that point.
 
 ## CV Model Status
 
-**Neither CV model is fully fine-tuned yet, and both are expected to get more
-accurate with additional training cycles.** This section states current
-results plainly, including where targets were missed, so the numbers aren't
-read as more finished than they are. It is the single source of truth for
-every CV accuracy number in these docs — other sections link here rather
-than repeating them.
+**Neither CV model is fully trained yet, and both are expected to get more
+accurate with more training and more varied data.** This section states
+current results plainly, including where targets were missed. It is the
+single source of truth for every CV accuracy number in these docs — other
+sections link here rather than repeating them.
+
+### Experimental models (2026-09-26 retrain)
+
+These results come from the September 2026 local retraining run. This checkout
+includes its five-block detector, mixed-crop generator, held-out validation
+options, and evaluation script. Use checkpoints trained with this architecture;
+older three-block detector checkpoints are incompatible.
 
 | Model | Run | Result | Target | Status |
 | :--- | :--- | :--- | :--- | :--- |
-| `PlateDetectorCNN` | 50/50 epochs, best epoch 48, val loss 0.0011 | **~0.43 IoU** | >0.70 IoU | **Not met** — the current accuracy bottleneck |
-| `PlateRecognizerCRNN` | Stopped at **epoch 36 of a planned 100** (best epoch on every metric; kept as final) | val loss 0.094675, **98.59% char accuracy, 91.50% full-plate accuracy** | >90% char / >80% full-plate | **Met** — but undertrained by design of the run, not converged-and-final |
+| `PlateDetectorCNN` (5 blocks, SmoothL1 + GIoU) | 2,500 train images from 10 backgrounds; validated on 400 images from 2 **held-out** backgrounds. Stopped manually at epoch 33 of 40; best epoch 28 | **0.603 val IoU** (0.587 mean IoU on a fresh 100-image holdout evaluation) | >0.70 IoU | **Not met** — up from ~0.43 |
+| `PlateRecognizerCRNN` (mixed flat + scene crops) | 8,000 crops, half cut from composited scenes with a ±10% jittered box. 20 of 20 epochs, still improving at the end | **90.5% char accuracy, 59.1% full-plate accuracy** on its mixed validation split | >90% char / >80% full-plate | **Char met, plate not met** |
 
-These numbers match the tracked training-curve figures at
-`docs/images/`; nothing in the repository contradicts them.
+**End to end** (`apps/cv/training/evaluate_detector.py`, 100 fresh scenes on
+the 2 held-out backgrounds):
 
-A loose detector box directly degrades the recognizer downstream — a crop
-that clips characters or includes surrounding car body is a worse input than
-a tight one, regardless of how well the recognizer itself performs (this is
-the direct cost of the two-stage design; see
-[Two-Stage Detector → Recognizer](03-design-rationale.md#two-stage-detector--recognizer-not-one-end-to-end-model)).
+| Metric | Before retrain | After retrain |
+| :--- | ---: | ---: |
+| Mean detector IoU | 0.433 | 0.587 |
+| Boxes with IoU ≥ 0.5 | 38% | 77% |
+| Full-plate reads, detector + recognizer | **0%** | **22%** |
+| Full-plate reads given the ground-truth box ("oracle") | 3% | 50% |
+
+The training curves in `docs/images/` match these runs.
+
+### What the retrain found
+
+- **The recognizer was the hidden bottleneck.** The previous recognizer
+  scored 98.6% character accuracy on its own validation set, but only 3% of
+  plates read correctly when handed a *perfect* crop cut from a composited
+  scene. It had only ever seen clean, native-resolution crops, never the
+  blur, rotation and perspective a detector crop carries. Training on half
+  scene crops raised that oracle number to 50%.
+- **Every earlier run used the fallback font.** `apps/cv/training/assets/plate_font.ttf`
+  was missing, so plates were rendered with Pillow's low-fidelity bitmap
+  font. Liberation Mono Bold is now installed (see `assets/README.md`).
+- **The detector's receptive field was too small** for plate-sized objects,
+  and its checkpoint was chosen on a loss that had drifted away from IoU.
+  Both are fixed (see [Detector Design Choices](03-design-rationale.md#detector-design-choices)).
+
+### Honest limits of these numbers
 
 **Both models were trained and validated exclusively on self-generated
 synthetic data and have never been evaluated against real photographs.** The
-numbers above describe in-distribution synthetic performance, not
-real-world accuracy, and should not be read as a benchmark for how the
-system performs on an actual parking lot.
+numbers describe synthetic performance, not real-world accuracy.
 
-**Known domain-gap limitations:**
+- The holdout set is only 2 background photos, so it is a small and noisy
+  generalization check; the full background set is still just 12 photos.
+- A single plate font and only 5 fixed plate formats (US + Canadian) are
+  rendered.
+- The detector regresses exactly one box per image with no objectness score:
+  it cannot express "no plate present" and cannot handle multiple plates.
+- The detector run was stopped by hand at epoch 33 and the recognizer run
+  ended while still improving, so neither is converged.
 
-- A single plate font and only 5 fixed plate formats (US + Canadian) are rendered — no font or format diversity.
-- Only 11 background photos are reused across the entire synthetic detector set.
-- Detector augmentation has no perspective warp — only flat rotation within ±15° — and no directional motion blur.
-- The detector regresses exactly one box per image with no objectness score: it cannot express "no plate present" and cannot handle multiple plates in frame.
-- Detector inference letterboxes non-4:3 source images with black padding bars that never appeared during training.
+### What to try next, in expected-payoff order
 
-**Why the detector likely underperforms, in order of suspected impact:**
-
-1. **Synthetic-to-synthetic overfitting, not synthetic-to-real gap, is the
-   first-order effect here** — val loss bottomed out at epoch 48 of 50 while
-   IoU stayed at 0.43. That combination (loss still falling or flat, IoU not
-   rising) is what a model looks like when it is fitting the *coordinates*
-   of the ~11 recycled backgrounds and one plate font well in an L1 sense,
-   without generalizing the notion of "plate," which IoU punishes far more
-   harshly at the edges of a box than `SmoothL1` does.
-2. **Single-box regression has no way to express uncertainty about scene
-   ambiguity** — with one plate composited per image but no learned
-   objectness/attention, the network has to commit to one box per forward
-   pass; on a background where multiple textured regions could plausibly be
-   "a plate," it averages, producing a soft, imprecise box rather than a
-   confident wrong one — consistent with a bounded loss but weak IoU.
-3. **Background diversity (11 images) is almost certainly a binding
-   constraint** — a detector that has seen a plate glued onto the same 11
-   scenes thousands of times over has had very little pressure to learn
-   background-invariant plate features.
-
-**What to try next, roughly in expected-payoff order:** materially expand
-`data/backgrounds/` (tens to low hundreds of distinct lots/angles/lighting
-conditions, the single highest-leverage change given point 3 above); add a
-coarse objectness/no-plate class or move to a small anchor-based head so the
-network can express confidence rather than always emitting a box; swap
-`SmoothL1Loss` for an IoU- or GIoU-based loss so the training objective
-directly optimizes the metric the target is measured in instead of a
-coordinate-distance proxy for it; and widen augmentation to include
-perspective warp and directional motion blur, both currently absent from
-`DetectorAugment` despite being present on the recognizer side.
-
-These are expected consequences of an intentionally from-scratch,
-synthetic-data-only CV stack, not signs of a broken pipeline. The clear
-paths to improvement are: more training epochs (especially the detector,
-which completed its full run and still fell short), richer augmentation
-(perspective warp, motion blur, wider scale range, negative/no-plate
-samples), and eventually fine-tuning on real labeled plate photographs.
+1. **More backgrounds** — tens to low hundreds of distinct lots, angles and
+   lighting conditions, with a larger held-out share. This is the biggest
+   remaining lever for the detector.
+2. **Train the recognizer longer** on scene-heavy data; full-plate accuracy
+   was still rising steeply at epoch 20.
+3. **An objectness / no-plate output** (for example a small heatmap head) so
+   the detector can express confidence instead of always emitting a box.
+4. Eventually, fine-tuning on real labeled plate photographs.
 
 ## See also
 

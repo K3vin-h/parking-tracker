@@ -98,14 +98,22 @@ function loadKioskScript({ resultMode = null, activation = false } = {}) {
     });
     const panel = element();
     const processing = element({ hidden: true });
-    const input = element();
+    const inputListeners = new Map();
+    const input = element({
+        addEventListener(name, listener) { inputListeners.set(name, listener); },
+        click() { input.clicked = true; },
+    });
     const preview = element({ hidden: true });
     const prompt = element();
     const reviewCopy = element({ hidden: true });
     const dropzone = element();
     const chooseButtons = [element()];
     const submitButton = element({ hidden: true });
-    const changeButton = element({ hidden: true });
+    const changeListeners = new Map();
+    const changeButton = element({
+        hidden: true,
+        addEventListener(name, listener) { changeListeners.set(name, listener); },
+    });
     const uploader = element();
     const activationHeading = element({
         focus() {
@@ -136,6 +144,7 @@ function loadKioskScript({ resultMode = null, activation = false } = {}) {
         ["[data-dropzone-prompt]", prompt],
         ["[data-kiosk-review-copy]", reviewCopy],
         ["[data-kiosk-submit]", submitButton],
+        ["[data-kiosk-change-photo]", changeButton],
         ["[data-kiosk-uploader]", uploader],
         ["[data-kiosk-activation-form]", activationForm],
         ["[data-kiosk-activation-result]", activation ? activationResult : null],
@@ -217,8 +226,30 @@ function loadKioskScript({ resultMode = null, activation = false } = {}) {
         activationToken,
         activationResult,
         activationHeading,
+        input,
+        inputListeners,
+        changeButton,
+        changeListeners,
+        submitButton,
+        chooseButtons,
     };
 }
+
+test("choosing and resetting a photo toggles the separate change-photo control", () => {
+    const fixture = loadKioskScript();
+    fixture.input.files = [{ type: "image/jpeg", size: 1024 }];
+    fixture.inputListeners.get("change")();
+    assert.equal(fixture.submitButton.hidden, false);
+    assert.equal(fixture.changeButton.hidden, false);
+    assert.ok(fixture.chooseButtons.every(button => button.hidden));
+    fixture.changeListeners.get("click")();
+    assert.equal(fixture.input.clicked, true);
+    fixture.input.files = [];
+    fixture.inputListeners.get("change")();
+    assert.equal(fixture.submitButton.hidden, true);
+    assert.equal(fixture.changeButton.hidden, true);
+    assert.ok(fixture.chooseButtons.every(button => !button.hidden));
+});
 
 test("beforeRequest replaces the uploader with the processing state", () => {
     const fixture = loadKioskScript();

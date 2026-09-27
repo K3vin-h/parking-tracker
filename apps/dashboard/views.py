@@ -212,7 +212,9 @@ def build_session_context(request: HttpRequest) -> dict:
         queryset = queryset.filter(
             entry_time__gte=datetime.combine(date_from, time.min, tzinfo=UTC)
         )
-    if date_to:
+    # date.max already includes every representable timestamp; adding a day
+    # would overflow instead of returning the requested inclusive results.
+    if date_to and date_to < date.max:
         queryset = queryset.filter(
             entry_time__lt=datetime.combine(
                 date_to + timedelta(days=1), time.min, tzinfo=UTC

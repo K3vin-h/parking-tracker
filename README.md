@@ -2,13 +2,19 @@
 
 A self-service parking lot system modeled on Chinese license-plate-recognition (LPR) gates. A from-scratch PyTorch plate reader opens and closes sessions at an unmanned kiosk, and registered plates are billed automatically to the owner's prepaid wallet.
 
+<a href="docs/images/demo.gif"><img src="docs/images/demo.gif" alt="Walkthrough: login, plate registration, kiosk activation, photo upload, entry and exit scans, and wallet billing" width="100%"></a>
+
+[View the demo at full size](docs/images/demo.gif).
+
+*An 87-second walkthrough of login, plate registration, kiosk activation, photo selection, entry and exit scans, and the final wallet charge. The demo starts with a preloaded $25 wallet; one $0.50 charge leaves $24.50. Screens are held longer for readability. The plate photos are selected synthetic inputs that the current model reads correctly.*
+
 **Recognition limitation:** Clearer or more realistic-looking photos are not necessarily easier for this model. During demo preparation, it misread all three cleaner AI-generated test images, with confidence scores above the low-confidence threshold. This small check is not a benchmark, but it shows that confidence does not guarantee a correct plate. The recorded held-out synthetic evaluation achieved only 22% exact end-to-end reads; accuracy on real camera photos is unmeasured. The GIF demonstrates the application flow with selected successful inputs, not reliable real-world recognition. See [known CV limitations](docs/technical/08-limitations.md#cv-models).
 
 ## Why
 
-In a lot of Chinese cities, parking no longer involves anyone at all. A camera at the barrier reads your plate, the arm lifts, and when you leave the fee is taken from an account already linked to that plate. There's no ticket, no cashier and no machine to feed coins into. Most parking lots elsewhere still run on paper tickets, pay stations and staff in booths, and I wanted to understand how the self-service version actually works end to end.
+Camera-based parking systems in Chinese cities inspired me to try building my own version. I wanted to understand the whole process: taking an image, locating the plate, extracting its text, and connecting that result to a backend API that manages parking sessions and billing.
 
-So I rebuilt it, including the part most projects would outsource: reading the plate. Instead of calling a cloud OCR API, the detector and recognizer are small networks trained from scratch on synthetic data. That makes every misread something I can open up and debug, down to the tensor.
+Instead of using a ready-made OCR system or a cloud recognition API, I built and trained my own detector and recognizer using PyTorch, with OpenCV and Pillow for image processing. The goal was to learn each stage from scratch and understand how the pieces work together, including what happens when a plate is misread.
 
 ## Features
 
@@ -19,7 +25,7 @@ So I rebuilt it, including the part most projects would outsource: reading the p
 - **Resident self-service.** Sign up, link plates, and view the wallet balance and ledger history.
 - **Staff oversight.** A live dashboard, session log, and a correction queue for low-confidence or unmatched reads.
 - **Revenue analytics.** Daily, per-lot and per-hour charts.
-- **Privacy defaults.** Plate images are kept in private storage, the kiosk returns reduced responses, and expired images are cleaned up on a schedule.
+- **Privacy defaults.** Plate images are kept in private storage, the kiosk returns reduced responses, and a cleanup command enforces image retention when scheduled.
 
 ## How it works
 
@@ -32,7 +38,7 @@ flowchart LR
     Staff["Staff dashboard<br/>HTMX + Chart.js"] <--> Django
 ```
 
-A driver uploads a plate photo at the kiosk, which stands in for the lane camera. The upload is validated and stored privately. The CV pipeline finds the plate, reads its text and scores its confidence. The session layer then opens a session on entry, or on exit closes it, calculates the charge and debits the owner's wallet in the same transaction. Low-confidence reads still let the car through but are also queued for staff to correct. The gate never blocks on the model being unsure.
+A driver uploads a plate photo at the kiosk, which stands in for the lane camera. The upload is validated and stored privately. The CV pipeline finds the plate, reads its text, and scores its confidence. The session layer opens a session on entry. On exit, it closes the session, calculates the charge, and debits the registered owner's wallet in the same transaction. Low-confidence reads are flagged for staff review, and the kiosk asks the driver to retake the photo or contact an attendant. This project simulates the gate workflow; it does not control a physical barrier.
 
 A detailed technical walkthrough is in [`docs/technical/`](docs/technical/00-architecture.md).
 
@@ -41,7 +47,7 @@ A detailed technical walkthrough is in [`docs/technical/`](docs/technical/00-arc
 | Layer | Technology |
 |---|---|
 | CV models | PyTorch, OpenCV, Pillow (custom CNN detector + CRNN/CTC recognizer) |
-| Backend | Django 5.1 |
+| Backend | Django 5.2 LTS |
 | Database | PostgreSQL 16 |
 | Frontend | Django templates, HTMX, Chart.js (self-hosted, no Node build) |
 | Deployment | Docker Compose, Gunicorn |
@@ -51,17 +57,16 @@ A detailed technical walkthrough is in [`docs/technical/`](docs/technical/00-arc
 
 Requires Docker with Compose ≥ 2.24. Python 3.11+ is needed only to train the CV models outside Docker.
 
-Create a `.env` file from `.env.example`. It stores the Django secret key, database credentials, `DEBUG`, and the kiosk activation token. Generate the token with `openssl rand -hex 32`.
+Create a `.env` file from `.env.example`, then replace its placeholder credentials before starting the app. It stores the Django secret key, database credentials, `DEBUG`, and the kiosk activation token. Generate a separate random value for each secret; `openssl rand -hex 32` works for the secret key and kiosk token.
 
 ```bash
 cp .env.example .env
-docker-compose up --build
-docker-compose exec web python manage.py migrate
-docker-compose exec web python manage.py setup_defaults     # default lot + billing settings
-docker-compose exec web python manage.py createsuperuser    # staff/admin account
+docker compose up --build -d
+docker compose exec web python manage.py setup_defaults     # admin account, default lot, billing settings
 ```
 
-Open `http://localhost:8000/`:
+Migrations run automatically when the container starts. Open `http://localhost:8000/`:
+
 - the kiosk is at `/` (activate it with the token from `.env`);
 - residents sign up at `/register/`;
 - staff land on `/staff/` after logging in.
@@ -69,33 +74,41 @@ Open `http://localhost:8000/`:
 Run the tests:
 
 ```bash
-docker-compose exec web pytest
-docker-compose exec web pytest --cov=apps/accounts --cov=apps/parking --cov-fail-under=80
+docker compose exec web pytest
+docker compose exec web pytest --cov=apps/accounts --cov=apps/parking --cov-fail-under=80
 ```
 
 ### CV model weights
 
-Scans need both trained weight files in `apps/cv/weights/` (gitignored): `detector.pth` and `recognizer.pth`. Generate synthetic data and train them outside Docker. Training uses MPS on Apple Silicon or CUDA when available. The detector dataset needs parking-lot photos in `data/backgrounds/`.
+Scans need both trained weight files in `apps/cv/weights/` (gitignored): `detector.pth` and `recognizer.pth`. Generate synthetic data and train them outside Docker. Training uses MPS on Apple Silicon or CUDA when available. The detector dataset needs parking-lot photos in `data/backgrounds/`, and plates render best with the font described in `apps/cv/training/assets/README.md`.
+
+Use weights trained with the matching model architecture and preprocessing version. This checkout includes the five-block detector used in the demo. The quick-start commands below split generated samples into training and validation sets; use the [held-out-background workflow](docs/technical/02-cv-training.md#training-the-models) for a stronger evaluation and mixed recognizer crops.
+
+In a Python virtual environment, install the training dependencies with `python -m pip install -r requirements-dev.txt` before running these commands.
 
 ```bash
-python -c "from apps.cv.training.synthetic_data import generate_detector_dataset; generate_detector_dataset(n=1000, output_dir='data/detector', bg_dir='data/backgrounds')"
-python -c "from apps.cv.training.synthetic_data import generate_recognizer_dataset; generate_recognizer_dataset(n=5000, output_dir='data/recognizer')"
-python apps/cv/training/train_detector.py --epochs 50 --data-dir data/detector --output apps/cv/weights/detector.pth
-python apps/cv/training/train_recognizer.py --epochs 100 --data-dir data/recognizer --output apps/cv/weights/recognizer.pth
+python -c "from apps.cv.training.synthetic_data import generate_detector_dataset; generate_detector_dataset(n=2500, output_dir='data/detector', bg_dir='data/backgrounds')"
+python -c "from apps.cv.training.synthetic_data import generate_recognizer_dataset; generate_recognizer_dataset(n=8000, output_dir='data/recognizer')"
+python apps/cv/training/train_detector.py --epochs 40 --data-dir data/detector --output apps/cv/weights/detector.pth
+python apps/cv/training/train_recognizer.py --epochs 20 --data-dir data/recognizer --output apps/cv/weights/recognizer.pth
 ```
 
-Each script saves a training-curve plot next to its weights:
+Each script saves a training-curve plot next to its weights. These plots show the experimental retraining runs:
 
 ![Plate detector training curves](docs/images/detector_training.png)
 ![Plate recognizer training curves](docs/images/recognizer_training.png)
 
-Current results on synthetic validation data:
-- **Recognizer:** 98.59% character accuracy, 91.50% full-plate accuracy.
-- **Detector:** about 0.43 IoU, below its 0.70 target.
+Experimental retraining results (synthetic data, with separate held-out backgrounds for detector and end-to-end evaluation):
 
-See [CV Model Status](docs/technical/01-cv-pipeline.md#cv-model-status) for what that means and what to try next.
+- **Detector:** 0.60 IoU, below its 0.70 target (up from 0.43).
+- **Recognizer:** 90.5% character accuracy, 59.1% full-plate accuracy.
+- **End to end:** 22% of plates read exactly right through the whole pipeline (up from 0%).
+
+See [CV Model Status](docs/technical/01-cv-pipeline.md#cv-model-status) for what the results mean and what to try next, and [CV Training Data](docs/technical/02-cv-training.md#training-the-models) for the experimental training workflow.
 
 ### Production
+
+Set `DEBUG=False`, your deployment hostname in `ALLOWED_HOSTS`, and a separate `HEALTH_CHECK_TOKEN` before starting production mode. Keep the kiosk activation token and all other credentials unique to the deployment.
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build -d
@@ -111,7 +124,8 @@ This runs Gunicorn, drops the dev bind mount and binds only to `127.0.0.1`, so p
 | POST | `/kiosk/activate/` | Exchange the kiosk token and lane scope for a browser capability |
 | POST | `/kiosk/scan/` | Run CV on an uploaded plate and open/close a session (privacy-reduced response) |
 | GET/POST | `/register/` | Resident signup (always non-staff), provisions a wallet |
-| GET/POST | `/plates/`, `/plates/<id>/delete/` | Manage the signed-in user's plates |
+| GET/POST | `/plates/` | List or add the signed-in user's plates |
+| POST | `/plates/<id>/delete/` | Delete one of the signed-in user's plates |
 | GET | `/wallet/` | Balance and ledger history |
 | GET/POST | `/wallet/topup/` | Top up through the payment connector (placeholder, fails closed) |
 | GET | `/staff/`, `/staff/log/`, `/staff/errors/`, `/staff/revenue/`, `/staff/settings/` | Staff pages |
@@ -119,11 +133,12 @@ This runs Gunicorn, drops the dev bind mount and binds only to `127.0.0.1`, so p
 | PATCH | `/staff/api/events/<id>/correct/` | Correct a queued plate read and reconcile its session |
 | GET | `/staff/api/events/<id>/image/` | Stream a detection image privately |
 
-Resident routes require login, and `/staff/` routes require `is_staff`. Kiosk, signup, top-up, login and password-reset routes are rate-limited per IP.
+Resident routes require login, and `/staff/` routes require `is_staff`. Kiosk, signup, top-up, login (including the admin login), and password-reset routes are rate-limited per IP.
 
 ## Limitations and roadmap
 
 This is a portfolio-scale system, and several choices reflect that:
+
 - the kiosk takes an uploaded photo instead of a camera feed;
 - inference runs in the request, with no task queue;
 - there is one global staff role;
@@ -134,6 +149,7 @@ The CV models were trained only on synthetic data, and the detector is the curre
 ## Security notes
 
 Two layers check every public upload before any decode:
+
 - **Web layer:** declared MIME type, Pillow header, 10 MB and 12 MP caps, randomized names in private storage.
 - **CV layer:** path containment, a content-based format allowlist and a bounded single read.
 

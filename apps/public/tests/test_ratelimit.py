@@ -164,6 +164,19 @@ def test_login_post_is_throttled(client):
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("routes", [["/admin/login/"] * 6, ["/login/", "/admin/login/"] * 3])
+def test_admin_login_shares_credential_guess_budget(client, routes):
+    """Switching between login forms must not grant extra password guesses."""
+    responses = [
+        client.post(route, {"username": "unknown", "password": "wrong"})
+        for route in routes
+    ]
+    assert [response.status_code for response in responses[:5]] == [200] * 5
+    assert responses[5].status_code == 429
+    assert client.get("/admin/login/").status_code == 200
+
+
+@pytest.mark.django_db
 def test_password_reset_post_is_throttled(client):
     """Repeated reset requests must not become an outbound-email denial of service."""
     url = reverse("password_reset")

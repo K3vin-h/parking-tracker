@@ -109,13 +109,14 @@ def _result(plate_text="ABC123", confidence=0.95, low=False):
                 is_low_confidence=True,
                 status=422,
             ),
-            "low_confidence",
+            "unreadable",
         ),
         (
             ScanOutcome(
                 outcome="exit_unmatched",
                 event_type="exit",
                 result=_result(),
+                is_low_confidence=True,
             ),
             "unmatched_exit",
         ),
@@ -142,6 +143,16 @@ def _result(plate_text="ABC123", confidence=0.95, low=False):
 def test_public_payload_exposes_stable_recovery_state(outcome, expected):
     """A wrong backend outcome branch must not render as a successful scan."""
     assert _public_payload(outcome)["presentation_state"] == expected
+
+
+@pytest.mark.django_db
+def test_unicode_activation_token_is_rejected(client, parking_lot):
+    """An invalid non-ASCII token must fail closed rather than crash the kiosk."""
+    response = client.post(ACTIVATE_URL, {
+        "token": "无效令牌", "event_type": "entry", "lot": parking_lot.name,
+    })
+    assert response.status_code == 403
+    assert not KioskDeviceCapability.objects.exists()
 
 
 def test_public_payload_marks_low_confidence_entry_as_recovery():

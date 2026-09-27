@@ -47,6 +47,12 @@ class TestHealthProbeAccess:
         assert _is_internal_probe(request) is False
 
     @override_settings(HEALTH_CHECK_TOKEN='probe-secret')
+    def test_non_ascii_probe_token_is_rejected(self) -> None:
+        """An invalid header value must not turn an access denial into a 500."""
+        request = RequestFactory().get('/health/', HTTP_X_HEALTH_CHECK_TOKEN='é')
+        assert _is_internal_probe(request) is False
+
+    @override_settings(HEALTH_CHECK_TOKEN='probe-secret')
     def test_loopback_without_configured_token_header_is_rejected(self) -> None:
         """A configured token prevents same-host reverse proxies bypassing auth."""
         request = RequestFactory().get('/health/', REMOTE_ADDR='127.0.0.1')

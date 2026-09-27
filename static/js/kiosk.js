@@ -256,6 +256,7 @@
     chooseButtons.forEach((button) => {
         button.addEventListener("click", () => input.click());
     });
+    changeButton?.addEventListener("click", () => input.click());
 
     ["dragenter", "dragover"].forEach((name) => {
         dropzone.addEventListener(name, (event) => {

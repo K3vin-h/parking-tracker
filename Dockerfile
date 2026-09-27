@@ -44,7 +44,13 @@ COPY requirements.txt requirements-dev.txt ./
 # Production builds install only runtime dependencies. docker-compose opts into
 # requirements-dev.txt so DEBUG=True can load django_extensions locally.
 ARG INSTALL_DEV_REQUIREMENTS=false
-RUN if [ "$INSTALL_DEV_REQUIREMENTS" = "true" ]; then \
+ARG PYTORCH_VERSION=2.12.0
+ARG TORCHVISION_VERSION=0.27.0
+RUN pip install --no-cache-dir \
+        --index-url https://download.pytorch.org/whl/cpu \
+        "torch==${PYTORCH_VERSION}" \
+        "torchvision==${TORCHVISION_VERSION}" \
+    && if [ "$INSTALL_DEV_REQUIREMENTS" = "true" ]; then \
         pip install --no-cache-dir -r requirements-dev.txt; \
     else \
         pip install --no-cache-dir -r requirements.txt; \
@@ -61,17 +67,9 @@ ENV PYTHONUNBUFFERED=1
 # Activate the venv copied from the builder stage.
 ENV PATH="/venv/bin:$PATH"
 
-# Runtime-only system libraries:
-#   libgl1        — OpenCV links against libGL.so.1 even in headless mode
-#   libglib2.0-0  — OpenCV uses GLib threading primitives (GThread) at runtime
-#
-# Note: gcc and libpq-dev are intentionally absent — not needed at runtime.
-# psycopg2-binary bundles its own libpq, so libpq5 is not required either.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        libgl1 \
-        libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
+# opencv-python-headless bundles the libraries needed by this application and
+# does not link to libGL or GLib. The runtime therefore needs no GUI packages.
+# psycopg2-binary also bundles libpq, so no PostgreSQL system package is needed.
 
 # Copy installed Python packages from the builder stage.
 # This brings in Django, PyTorch, OpenCV, and all other deps

@@ -6,6 +6,7 @@ files. The composite_on_background tests use a fixture that creates a single
 solid-colour background image in a tmp_path directory so the function has
 something to open without touching production assets.
 """
+
 import csv
 import string
 from pathlib import Path
@@ -18,6 +19,8 @@ from apps.cv.training import synthetic_data
 from apps.cv.training import _image_io
 from apps.cv.training.synthetic_data import (
     PLATE_SIZE,
+    _apply_perspective_jitter,
+    _random_aspect_crop,
     _seed_rng,
     composite_on_background,
     generate_detector_dataset,
@@ -27,6 +30,7 @@ from apps.cv.training.synthetic_data import (
 )
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
+
 
 @pytest.fixture
 def bg_dir(tmp_path: Path) -> Path:
@@ -38,6 +42,7 @@ def bg_dir(tmp_path: Path) -> Path:
 
 
 # ── generate_plate_text ───────────────────────────────────────────────────────
+
 
 @pytest.mark.unit
 class TestGeneratePlateText:
@@ -84,6 +89,7 @@ class TestGeneratePlateText:
 
 # ── render_plate_image ────────────────────────────────────────────────────────
 
+
 @pytest.mark.unit
 class TestRenderPlateImage:
     def test_returns_pil_image(self):
@@ -120,23 +126,29 @@ class TestRenderPlateImage:
         img = render_plate_image("ABC 123", "CA")
         assert img.size == PLATE_SIZE
 
-    @pytest.mark.parametrize("text,country", [
-        ("ABC 1234", "US"),
-        ("123 ABC", "US"),
-        ("ABC123", "US"),
-        ("ABC 123", "CA"),
-        ("A1B 2C3", "CA"),
-    ])
+    @pytest.mark.parametrize(
+        "text,country",
+        [
+            ("ABC 1234", "US"),
+            ("123 ABC", "US"),
+            ("ABC123", "US"),
+            ("ABC 123", "CA"),
+            ("A1B 2C3", "CA"),
+        ],
+    )
     def test_parametrized_formats_render_successfully(self, text: str, country: str):
         """Each supported plate format string must render without error."""
         img = render_plate_image(text, country)
         assert isinstance(img, Image.Image)
 
-    @pytest.mark.parametrize("text,country", [
-        ("ABC 1234", "US"),
-        ("A1B 2C3", "CA"),
-        ("X", "US"),
-    ])
+    @pytest.mark.parametrize(
+        "text,country",
+        [
+            ("ABC 1234", "US"),
+            ("A1B 2C3", "CA"),
+            ("X", "US"),
+        ],
+    )
     def test_text_is_horizontally_centered(self, text: str, country: str):
         """
         Inked text must be horizontally centred within ±8 px of the plate.
@@ -164,7 +176,40 @@ class TestRenderPlateImage:
 
 # ── composite_on_background ───────────────────────────────────────────────────
 
+
 @pytest.mark.unit
+class TestRandomAspectCrop:
+    def test_crop_matches_target_aspect_ratio(self):
+        img = Image.new("RGBA", (1200, 500), (0, 0, 0, 0))
+        _seed_rng(1)
+        for _ in range(20):
+            cropped = _random_aspect_crop(img, (640, 480))
+            cw, ch = cropped.size
+            assert abs((cw / ch) - (640 / 480)) < 0.02
+
+    def test_crop_stays_within_source_bounds(self):
+        img = Image.new("RGBA", (300, 300), (0, 0, 0, 0))
+        _seed_rng(2)
+        for _ in range(20):
+            cropped = _random_aspect_crop(img, (640, 480))
+            cw, ch = cropped.size
+            assert cw <= 300 and ch <= 300
+
+
+class TestApplyPerspectiveJitter:
+    def test_output_size_matches_input(self):
+        plate = Image.new("RGBA", PLATE_SIZE, (255, 0, 0, 255))
+        _seed_rng(3)
+        warped = _apply_perspective_jitter(plate)
+        assert warped.size == plate.size
+
+    def test_warp_still_has_visible_plate_pixels(self):
+        plate = Image.new("RGBA", PLATE_SIZE, (255, 0, 0, 255))
+        _seed_rng(4)
+        warped = _apply_perspective_jitter(plate)
+        assert warped.getchannel("A").getbbox() is not None
+
+
 class TestCompositeOnBackground:
     def test_returns_rgb_image(self, bg_dir: Path):
         """Composite must be an RGB PIL Image (alpha consumed during paste)."""
@@ -299,10 +344,14 @@ class TestCompositeOnBackground:
                 return values[0]
 
             def uniform(self, start, end):
-                if (start, end) == (0.15, 0.40):
+                if (start, end) == (0.15, 0.60):
                     return 0.30
                 if (start, end) == (-15, 15):
                     return 15
+                if (start, end) == (0.5, 1.0):
+                    return 1.0  # background crop: keep the full frame, no zoom
+                if start == -end:
+                    return 0.0  # symmetric perspective-jitter ranges: no warp
                 raise AssertionError(f"Unexpected uniform range: {(start, end)}")
 
             def randint(self, start, end):
@@ -324,6 +373,7 @@ class TestCompositeOnBackground:
 
 
 # ── generate_detector_dataset ─────────────────────────────────────────────────
+
 
 @pytest.mark.unit
 class TestGenerateDetectorDataset:
@@ -354,9 +404,7 @@ class TestGenerateDetectorDataset:
         generate_detector_dataset(n=2, output_dir=out, bg_dir=bg_dir)
         generate_detector_dataset(n=2, output_dir=out, bg_dir=bg_dir)
 
-    def test_rerun_with_smaller_n_clears_orphans(
-        self, tmp_path: Path, bg_dir: Path
-    ):
+    def test_rerun_with_smaller_n_clears_orphans(self, tmp_path: Path, bg_dir: Path):
         """
         Re-running with a smaller n must leave exactly n files behind.
 
@@ -389,9 +437,7 @@ class TestGenerateDetectorDataset:
         with pytest.raises(ValueError):
             generate_detector_dataset(n=2_000_000, output_dir=out, bg_dir=bg_dir)
 
-    def test_missing_background_dir_raises_before_output_creation(
-        self, tmp_path: Path
-    ):
+    def test_missing_background_dir_raises_before_output_creation(self, tmp_path: Path):
         """Missing backgrounds must not produce an empty detector dataset."""
         out = tmp_path / "det_missing_bg"
         with pytest.raises(FileNotFoundError):
@@ -402,9 +448,7 @@ class TestGenerateDetectorDataset:
             )
         assert not out.exists()
 
-    def test_empty_background_dir_raises_before_output_creation(
-        self, tmp_path: Path
-    ):
+    def test_empty_background_dir_raises_before_output_creation(self, tmp_path: Path):
         """Empty backgrounds must not produce an empty detector dataset."""
         out = tmp_path / "det_empty_bg"
         empty_bg = tmp_path / "empty_backgrounds"
@@ -426,6 +470,7 @@ class TestGenerateDetectorDataset:
 
 # ── generate_recognizer_dataset ───────────────────────────────────────────────
 
+
 @pytest.mark.unit
 class TestGenerateRecognizerDataset:
     def test_creates_images_and_csv(self, tmp_path: Path):
@@ -443,7 +488,9 @@ class TestGenerateRecognizerDataset:
         generate_recognizer_dataset(n=2, output_dir=out)
         with (out / "labels.csv").open() as f:
             reader = csv.DictReader(f)
-            assert {"filename", "text", "country"}.issubset(set(reader.fieldnames or []))
+            assert {"filename", "text", "country"}.issubset(
+                set(reader.fieldnames or [])
+            )
 
     def test_images_are_128x32(self, tmp_path: Path):
         """Every saved plate image must be exactly 128×32 pixels."""
@@ -491,3 +538,70 @@ class TestGenerateRecognizerDataset:
             generate_recognizer_dataset(n=0, output_dir=out)
         with pytest.raises(ValueError):
             generate_recognizer_dataset(n=2_000_000, output_dir=out)
+
+    def test_invalid_crop_source_raises_value_error(self, tmp_path: Path):
+        """An unrecognized crop_source must fail before any I/O."""
+        out = tmp_path / "rec_bad_crop_source"
+        with pytest.raises(ValueError):
+            generate_recognizer_dataset(n=2, output_dir=out, crop_source="bogus")
+
+    def test_scene_crop_source_produces_128x32_grayscale(
+        self, tmp_path: Path, bg_dir: Path
+    ):
+        """crop_source='scene' still yields the standard 128x32 'L' images."""
+        out = tmp_path / "rec_scene"
+        generate_recognizer_dataset(
+            n=3, output_dir=out, crop_source="scene", bg_dir=bg_dir
+        )
+        images = list((out / "images").glob("*.png"))
+        assert len(images) == 3
+        for path in images:
+            with Image.open(path) as img:
+                assert img.size == (128, 32)
+                assert img.mode == "L"
+
+    def test_scene_crop_source_requires_background_directory(self, tmp_path: Path):
+        """A missing/empty bg_dir must surface as a clear failure, not a silent skip."""
+        out = tmp_path / "rec_scene_missing_bg"
+        with pytest.raises(FileNotFoundError):
+            generate_recognizer_dataset(
+                n=3,
+                output_dir=out,
+                crop_source="scene",
+                bg_dir=tmp_path / "no_such_dir",
+            )
+
+    def test_mixed_crop_source_respects_scene_fraction(
+        self, tmp_path: Path, bg_dir: Path
+    ):
+        """scene_fraction=1.0 in 'mixed' mode must behave like 'scene' end to end."""
+        out = tmp_path / "rec_mixed_all_scene"
+        generate_recognizer_dataset(
+            n=3, output_dir=out, crop_source="mixed", bg_dir=bg_dir, scene_fraction=1.0
+        )
+        assert len(list((out / "images").glob("*.png"))) == 3
+@pytest.mark.parametrize("generator,suffix", [("detector", ".jpg"), ("recognizer", ".png")])
+def test_generation_rejects_overlapping_backgrounds(tmp_path, generator, suffix):
+    from apps.cv.training.synthetic_data import generate_detector_dataset, generate_recognizer_dataset
+    images = tmp_path / "images"
+    images.mkdir()
+    sentinel = images / ("keep" + suffix)
+    sentinel.write_bytes(b"source background")
+    kwargs = dict(n=1, output_dir=tmp_path, bg_dir=images)
+    with pytest.raises(ValueError, match="overlap"):
+        if generator == "detector":
+            generate_detector_dataset(**kwargs)
+        else:
+            generate_recognizer_dataset(**kwargs, crop_source="scene")
+    assert sentinel.read_bytes() == b"source background"
+def test_generation_rejects_symlinked_output_images(tmp_path):
+    backgrounds = tmp_path / "backgrounds"
+    backgrounds.mkdir()
+    sentinel = backgrounds / "keep.jpg"
+    sentinel.write_bytes(b"source")
+    output = tmp_path / "output"
+    output.mkdir()
+    (output / "images").symlink_to(backgrounds, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlinks"):
+        generate_detector_dataset(n=1, output_dir=output, bg_dir=backgrounds)
+    assert sentinel.read_bytes() == b"source"

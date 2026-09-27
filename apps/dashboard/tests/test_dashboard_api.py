@@ -19,6 +19,17 @@ from apps.parking.models import (
 User = get_user_model()
 
 
+@pytest.mark.django_db
+def test_revenue_rejects_maximum_end_date(client, api_data):
+    """Reject a range whose exclusive upper bound cannot be represented."""
+    client.force_login(api_data[0])
+    response = client.get(reverse("dashboard:api_revenue_data"), {
+        "range": "custom", "start": "9999-12-30", "end": "9999-12-31",
+    })
+    assert response.status_code == 400
+    assert "End date" in response.json()["error"]
+
+
 @pytest.fixture
 def api_data(db):
     """Create a staff user and two configured lots for API integration tests."""

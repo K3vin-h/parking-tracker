@@ -65,7 +65,7 @@ def _is_internal_probe(request) -> bool:
     expected_token = getattr(settings, "HEALTH_CHECK_TOKEN", "")
     supplied_token = request.META.get("HTTP_X_HEALTH_CHECK_TOKEN", "")
     if expected_token:
-        return secrets.compare_digest(supplied_token, expected_token)
+        return secrets.compare_digest(supplied_token.encode(), expected_token.encode())
 
     try:
         addr = ipaddress.ip_address(request.META.get("REMOTE_ADDR", ""))
@@ -111,6 +111,11 @@ urlpatterns = [
     # Django's built-in admin site — browse and edit all registered models.
     # Only accessible to users with is_staff=True.
     # The URL '/admin/' is conventional; changing it adds minor security through obscurity.
+    # Share the public login budget so switching forms cannot bypass throttling.
+    path(
+        "admin/login/",
+        rate_limit(scope="login", limit=5, window_seconds=300)(admin.site.login),
+    ),
     path("admin/", admin.site.urls),
     # ── Authentication ─────────────────────────────────────────────────────────
     # django.contrib.auth.urls provides a complete set of auth views:

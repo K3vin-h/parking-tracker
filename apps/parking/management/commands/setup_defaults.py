@@ -198,7 +198,7 @@ class Command(BaseCommand):
           - No daily cap (disabled) — simple use case for a single lot
           - Image retention null = keep forever (can be configured in settings page)
         """
-        settings_obj, created = LotSettings.objects.get_or_create(
+        _, created = LotSettings.objects.get_or_create(
             lot=lot,
             defaults={
                 "rate": Decimal("5.00"),
