@@ -2,6 +2,8 @@
 
 A self-service parking lot system modeled on Chinese license-plate-recognition (LPR) gates. A from-scratch PyTorch plate reader opens and closes sessions at an unmanned kiosk, and registered plates are billed automatically to the owner's prepaid wallet.
 
+**Recognition limitation:** Clearer or more realistic-looking photos are not necessarily easier for this model. During demo preparation, it misread all three cleaner AI-generated test images, with confidence scores above the low-confidence threshold. This small check is not a benchmark, but it shows that confidence does not guarantee a correct plate. The recorded held-out synthetic evaluation achieved only 22% exact end-to-end reads; accuracy on real camera photos is unmeasured. The GIF demonstrates the application flow with selected successful inputs, not reliable real-world recognition. See [known CV limitations](docs/technical/08-limitations.md#cv-models).
+
 ## Why
 
 In a lot of Chinese cities, parking no longer involves anyone at all. A camera at the barrier reads your plate, the arm lifts, and when you leave the fee is taken from an account already linked to that plate. There's no ticket, no cashier and no machine to feed coins into. Most parking lots elsewhere still run on paper tickets, pay stations and staff in booths, and I wanted to understand how the self-service version actually works end to end.

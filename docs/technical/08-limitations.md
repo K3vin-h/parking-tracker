@@ -5,6 +5,8 @@
 - **The detector misses its target.** Best IoU is about 0.43 against a >0.70 target. A loose crop directly degrades the recognizer's input. See [01-cv-pipeline.md → CV Model Status](01-cv-pipeline.md#cv-model-status) for the diagnosis.
 - **The recognizer is undertrained.** It met its targets (98.59% character / 91.50% full-plate accuracy) but stopped at epoch 36 of 100.
 - **Synthetic data only.** Neither model has been evaluated on real photographs, so every reported number describes in-distribution synthetic performance.
+- **Clearer photos can still be confidently wrong.** During walkthrough preparation, all three cleaner AI-generated car/plate images were misread above the low-confidence threshold. This was a small exploratory check, not an accuracy benchmark. Human-readable text, cleaner backgrounds, and more realistic plate placement do not ensure correct model output. The training distribution is narrow, and broader training plus separate evaluation on representative camera photos is needed before claiming real-world reliability.
+- **The walkthrough uses selected successes.** Its synthetic plate photos were chosen because the current pipeline reads them correctly. The recording demonstrates login, registration, uploads, sessions, and billing; it does not represent typical recognition accuracy. Its initial wallet credit is seeded demo data, not a working payment-provider transaction.
 - **A narrow synthetic distribution:**
   - one plate font;
   - five US and Canadian format templates;
